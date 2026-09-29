@@ -7,12 +7,19 @@ use subnet_core::addr::AgentId;
 
 pub use subnet_ops::client::Client;
 
-/// Streams committed events (as JSON) from the hub until the connection ends.
-pub async fn tail(base: &str, token: Option<&str>, agent: Option<AgentId>, mut on: impl FnMut(Value)) -> anyhow::Result<()> {
-    let ws_base = base.replacen("http", "ws", 1);
-    let mut url = format!("{}/events?", ws_base.trim_end_matches('/'));
+/// Streams notices (as JSON) from the hub until the connection ends: all of
+/// them, one agent's, or (`tree`) an agent's and its descendants'.
+pub async fn tail(
+    base: &str,
+    token: Option<&str>,
+    agent: Option<AgentId>,
+    tree: bool,
+    mut on: impl FnMut(Value),
+) -> anyhow::Result<()> {
+    let ws_base = base.split(',').next().unwrap_or_default().trim().replacen("http", "ws", 1);
+    let mut url = format!("{}/v1/events/ws?", ws_base.trim_end_matches('/'));
     if let Some(a) = agent {
-        url.push_str(&format!("agent={a}&"));
+        url.push_str(&format!("{}={a}&", if tree { "tree" } else { "agent" }));
     }
     if let Some(t) = token {
         url.push_str(&format!("token={t}"));

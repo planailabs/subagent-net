@@ -9,14 +9,15 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::Deserialize;
-use subnet_core::addr::AgentId;
 use crate::wire::{ToHub, ToNode};
+use futures::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 
-use super::Hub;
+use super::{Hub, NoticeFilter};
 
 const PING_EVERY: Duration = Duration::from_secs(10);
 /// A node silent for this long is considered dead and its agents move.
@@ -29,7 +30,10 @@ pub fn router(hub: Arc<Hub>) -> Router {
     let instructions = "subagent-net hub: spawn agents, message them (answers arrive via wait_inbox), \
                         pause/resume/cancel/approve/fork them."
         .to_string();
-    let events = Router::new().route("/events", get(events_ws)).layer(middleware::from_fn_with_state(hub.clone(), auth));
+    let events = Router::new()
+        .route("/v1/events", get(events_sse))
+        .route("/v1/events/ws", get(events_ws))
+        .layer(middleware::from_fn_with_state(hub.clone(), auth));
     Router::new()
         .route("/node", get(node_ws))
         .merge(events)
@@ -59,24 +63,39 @@ async fn auth(State(hub): State<Arc<Hub>>, Query(q): Query<TokenQuery>, req: Req
     }
 }
 
-#[derive(Deserialize)]
-struct EventsQuery {
-    agent: Option<AgentId>,
+fn notices(hub: &Hub, f: NoticeFilter) -> impl futures::Stream<Item = String> + use<> {
+    futures::stream::unfold(hub.subscribe(), move |mut rx| {
+        let f = f.clone();
+        async move {
+            loop {
+                match rx.recv().await {
+                    Ok(n) if !f.matches(&n) => continue,
+                    Ok(n) => return Some((serde_json::to_string(&n).unwrap(), rx)),
+                    Err(RecvError::Lagged(k)) => return Some((serde_json::json!({"kind":"lagged","missed":k}).to_string(), rx)),
+                    Err(RecvError::Closed) => return None,
+                }
+            }
+        }
+    })
 }
 
-/// Streams committed events as JSON, optionally for one agent.
-async fn events_ws(State(hub): State<Arc<Hub>>, Query(q): Query<EventsQuery>, ws: WebSocketUpgrade) -> Response {
-    let mut rx = hub.subscribe();
+/// Server-sent events.
+async fn events_sse(State(hub): State<Arc<Hub>>, Query(f): Query<NoticeFilter>) -> Response {
+    let s = notices(&hub, f).map(|j| Ok::<_, std::convert::Infallible>(SseEvent::default().data(j)));
+    Sse::new(s).keep_alive(KeepAlive::default()).into_response()
+}
+
+async fn events_ws(State(hub): State<Arc<Hub>>, Query(f): Query<NoticeFilter>, ws: WebSocketUpgrade) -> Response {
+    let s = notices(&hub, f);
     ws.on_upgrade(move |mut ws| async move {
+        futures::pin_mut!(s);
         loop {
-            let msg = match rx.recv().await {
-                Ok(n) if q.agent.is_some_and(|a| a != n.agent) => continue,
-                Ok(n) => serde_json::to_string(&n).unwrap(),
-                Err(RecvError::Lagged(k)) => serde_json::json!({"lagged": k}).to_string(),
-                Err(RecvError::Closed) => break,
-            };
-            if ws.send(Message::Text(msg.into())).await.is_err() {
-                break;
+            tokio::select! {
+                n = s.next() => {
+                    let Some(n) = n else { break };
+                    if ws.send(Message::Text(n.into())).await.is_err() { break }
+                }
+                inc = ws.recv() => if !matches!(inc, Some(Ok(_))) { break },
             }
         }
     })

@@ -93,7 +93,7 @@ async fn token_is_required_when_configured() {
     assert!(remote(&base, Some("wrong"), "user").await.is_err());
     let ok = remote(&base, Some("sekrit"), "user").await.unwrap();
     ok.call_raw("list_types", Value::Null).await.unwrap();
-    assert!(tail(&base, Some("wrong"), None, |_| {}).await.is_err());
+    assert!(tail(&base, Some("wrong"), None, false, |_| {}).await.is_err());
 }
 
 #[tokio::test]
@@ -103,7 +103,7 @@ async fn tail_streams_committed_events() {
     let seen = Arc::new(Mutex::new(vec![]));
     let s2 = seen.clone();
     let b2 = base.clone();
-    tokio::spawn(async move { tail(&b2, None, None, move |v| s2.lock().unwrap().push(v)).await });
+    tokio::spawn(async move { tail(&b2, None, None, false, move |v| s2.lock().unwrap().push(v)).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let u = remote(&base, None, "user").await.unwrap();
     u.call_raw("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap();
@@ -129,7 +129,7 @@ async fn tail_filters_by_agent() {
     let s2 = seen.clone();
     let b2 = base.clone();
     let agent = first.parse().unwrap();
-    tokio::spawn(async move { tail(&b2, None, Some(agent), move |v| s2.lock().unwrap().push(v)).await });
+    tokio::spawn(async move { tail(&b2, None, Some(agent), false, move |v| s2.lock().unwrap().push(v)).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
     u.call_raw("spawn", json!({"type":"helper","prompt":"2"})).await.unwrap();
     u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
@@ -216,4 +216,32 @@ async fn principals_removed_from_the_cluster_lose_access() {
     let root = remote(&base, Some("adm"), "").await.unwrap();
     root.call_raw("apply_cluster", json!({"files":[{"name":"p.hcl","text":"user \"watcher\" { role = \"viewer\" }"}]})).await.unwrap();
     assert_eq!(c.call_raw("whoami", Value::Null).await.unwrap_err().kind, subnet_ops::ErrorKind::Unauthorized);
+}
+
+#[tokio::test]
+async fn sse_stream_and_tree_filter() {
+    use futures::StreamExt;
+    let (base, llm, hub) = setup_hub(None).await;
+    llm.say(SYS, &["parent done"]);
+    let root = hub.spawn(&subnet_core::addr::Addr::root(), "helper", "x".into()).await.unwrap().id;
+    hub.wait_inbox(&subnet_core::addr::Addr::root(), Some(5000)).await.unwrap();
+    // Subscribe to the tree of `root` over SSE, then make it and an unrelated agent do something.
+    let resp = reqwest::get(format!("{base}/v1/events?tree={root}")).await.unwrap();
+    assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    let mut body = resp.bytes_stream();
+    llm.say(SYS, &["again"]);
+    llm.say(SYS, &["other"]);
+    hub.spawn(&subnet_core::addr::Addr::root(), "helper", "unrelated".into()).await.unwrap();
+    hub.send(&subnet_core::addr::Addr::root(), subnet_core::addr::Addr::Agent(root), "more".into()).await.unwrap();
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !seen.contains("llm_done") {
+        let chunk = tokio::time::timeout_at(deadline, body.next()).await.expect("sse timeout").unwrap().unwrap();
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    for line in seen.lines().filter_map(|l| l.strip_prefix("data:")) {
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["kind"], "agent");
+        assert_eq!(v["agent"], root.to_string(), "only the subscribed tree: {v}");
+    }
 }

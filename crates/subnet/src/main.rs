@@ -58,7 +58,12 @@ enum Cmd {
         files: Vec<PathBuf>,
     },
     /// Stream events live (all agents, or one).
-    Tail { id: Option<AgentId> },
+    Tail {
+        id: Option<AgentId>,
+        /// Include the agent's descendants.
+        #[arg(long, requires = "id")]
+        tree: bool,
+    },
     /// Apply cluster files (HCL) to the hub.
     Apply {
         #[arg(required = true)]
@@ -113,7 +118,7 @@ async fn await_answer(c: &Client, from: &str) -> anyhow::Result<()> {
 
 /// One line per event; streamed text inline.
 fn show_event(v: Value) {
-    let agent = v["agent"].as_str().unwrap_or("?").get(..8).unwrap_or("?").to_string();
+    let agent = v["agent"].as_str().unwrap_or("-").get(..8).unwrap_or("-").to_string();
     let ev = &v["event"];
     let mut out = std::io::stdout().lock();
     match ev["type"].as_str() {
@@ -198,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
             }
             std::future::pending::<()>().await;
         }
-        Cmd::Tail { id } => tail(&cli.hub, cli.token.as_deref(), id, show_event).await?,
+        Cmd::Tail { id, tree } => tail(&cli.hub, cli.token.as_deref(), id, tree, show_event).await?,
         Cmd::Apply { files, dry_run } => {
             let files = read_files(&files)?;
             let c = Client::new(&cli.hub, cli.token);

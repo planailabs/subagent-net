@@ -49,12 +49,34 @@ fn no_agent<T>(id: AgentId) -> Result<T, HubError> {
     Err(HubError::NotFound(format!("no agent {id}")))
 }
 
-/// A committed event, as broadcast to subscribers.
+/// Something that happened, as streamed to subscribers (`/v1/events`).
 #[derive(Debug, Clone, Serialize)]
-pub struct Notice {
-    pub agent: AgentId,
-    pub seq: u64,
-    pub event: Event,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Notice {
+    /// A committed agent event. `ancestors` lists parent, grandparent, …
+    Agent { agent: AgentId, ancestors: Vec<AgentId>, seq: u64, event: Event },
+}
+
+/// What a subscriber wants to see.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct NoticeFilter {
+    /// Only this agent.
+    #[serde(default)]
+    pub agent: Option<AgentId>,
+    /// This agent and its descendants.
+    #[serde(default)]
+    pub tree: Option<AgentId>,
+}
+
+impl NoticeFilter {
+    pub fn matches(&self, n: &Notice) -> bool {
+        match n {
+            Notice::Agent { agent, ancestors, .. } => {
+                self.agent.is_none_or(|a| a == *agent)
+                    && self.tree.is_none_or(|t| t == *agent || ancestors.contains(&t))
+            }
+        }
+    }
 }
 
 struct AgentRec {
@@ -413,6 +435,16 @@ impl Hub {
         self.db.append(id, r.seq + 1, &events).await?;
         let before = r.seq;
         let ends_with_recovery = events.last() == Some(&Event::Recovered);
+        let ancestors = {
+            let mut v = vec![];
+            let mut p = r.a.spec.parent;
+            while let Some(x) = p {
+                v.push(x);
+                p = st.agents.get(&x).and_then(|r| r.a.spec.parent);
+            }
+            v
+        };
+        let r = st.agents.get_mut(&id).unwrap();
         let mut reports = vec![];
         for event in events {
             r.seq += 1;
@@ -425,7 +457,7 @@ impl Hub {
             if let Some(s) = r.node.and_then(|c| st.nodes.get(&c)) {
                 let _ = s.tx.send(ToNode::Commit { agent: id, seq, event: event.clone() });
             }
-            let _ = self.notices.send(Notice { agent: id, seq, event });
+            let _ = self.notices.send(Notice::Agent { agent: id, ancestors: ancestors.clone(), seq, event });
         }
         // A snapshot each time the log crosses a multiple of `snapshot_every`.
         // Never right after `Recovered`: an assignment needs one event after its snapshot.

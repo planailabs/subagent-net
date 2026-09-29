@@ -312,7 +312,7 @@ Every operation is defined once in the `ops` crate's typed registry: name, summa
   `GET /v1/openapi.json` is the generated OpenAPI 3.1 document; `/v1/docs` renders it.
 - **MCP** (`/mcp`): every op a principal's role allows is a tool.
 - **CLI:** every op is a `subnet` subcommand (`list_agents` → `subnet list-agents`). Path parameters are positional; an op without path parameters takes its required scalar fields positionally (`subnet spawn <type> <prompt>`). Other fields are flags, and `--json` passes a whole argument object. The CLI calls the REST/RPC API.
-- **Events:** `GET /v1/events` (SSE) and `/v1/events/ws` (WebSocket), filtered by `agent`, `tree`, `sense` or `route`.
+- **Events:** `GET /v1/events` (SSE) and `/v1/events/ws` (WebSocket), filtered by `agent` or `tree` (an agent and its descendants), later also `sense` and `route`. Each notice has a `kind`: `agent` notices carry `agent`, `ancestors`, `seq` and the committed `event`. A slow subscriber gets `{"kind":"lagged","missed":n}` instead of blocking the hub.
 
 The web UI and the TUI use the same API.
 
@@ -388,5 +388,5 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - Nodes: pull-based configuration (`Configure`/`Ready`), credential resolution on the node with errors reported in `list_nodes`, `subnet node`, `subnet dev <files>`.
   - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
   - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
-- **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks.
+- **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters).
 - **In progress (v2):** snapshots, tree forks, event filters/SSE, senses/streams/blobs/switchboard, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
