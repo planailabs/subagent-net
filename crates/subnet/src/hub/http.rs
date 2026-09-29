@@ -33,6 +33,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
     let events = Router::new()
         .route("/v1/events", get(events_sse))
         .route("/v1/events/ws", get(events_ws))
+        .route("/v1/blobs/{hash}/raw", get(blob_raw))
         .layer(middleware::from_fn_with_state(hub.clone(), auth));
     Router::new()
         .route("/node", get(node_ws))
@@ -78,6 +79,14 @@ fn notices(hub: &Hub, f: NoticeFilter) -> impl futures::Stream<Item = String> + 
             }
         }
     })
+}
+
+/// A blob's bytes with its content type.
+async fn blob_raw(State(hub): State<Arc<Hub>>, axum::extract::Path(hash): axum::extract::Path<String>) -> Response {
+    match hub.get_blob(&hash).await {
+        Ok((mime, data)) => ([(axum::http::header::CONTENT_TYPE, mime)], data).into_response(),
+        Err(e) => subnet_ops::OpError::from(e).into_response(),
+    }
 }
 
 /// Server-sent events.

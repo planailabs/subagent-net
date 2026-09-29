@@ -249,6 +249,35 @@ enum Out {
     Items(mpsc::Sender<Item>),
 }
 
+/// Replaces inline blobs (`{"$blob": {"base64": …, "mime": …}}`) in event data
+/// with `blob:<sha256>` references; returns the blobs to upload first.
+pub fn extract_blobs(v: &mut Value) -> Vec<(String, String, String)> {
+    let mut out = vec![];
+    walk(v, &mut out);
+    out
+}
+
+fn walk(v: &mut Value, out: &mut Vec<(String, String, String)>) {
+    if let Some(inner) = v.get("$blob")
+        && v.as_object().is_some_and(|o| o.len() == 1)
+        && let Some(b64) = inner["base64"].as_str()
+    {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+            let h = crate::hub::blobs::hash(&bytes);
+            let mime = inner["mime"].as_str().unwrap_or("application/octet-stream").to_string();
+            out.push((h.clone(), mime, b64.to_string()));
+            *v = Value::String(format!("blob:{h}"));
+            return;
+        }
+    }
+    match v {
+        Value::Array(a) => a.iter_mut().for_each(|x| walk(x, out)),
+        Value::Object(o) => o.values_mut().for_each(|x| walk(x, out)),
+        _ => {}
+    }
+}
+
 /// A line of command output: JSON if it parses, else `{"line": …}`.
 fn line_to_event(line: &str) -> Value {
     serde_json::from_str(line).unwrap_or_else(|_| json!({ "line": line }))
@@ -442,6 +471,17 @@ async fn exec_stage(sense: &str, cmd: &[String], mut rx: mpsc::Receiver<Item>, t
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_blobs_become_references() {
+        let mut v = json!({"clip": {"$blob": {"base64": "aGVsbG8=", "mime": "text/plain"}}, "n": 1, "list": [{"$blob": {"base64": "eA=="}}]});
+        let blobs = extract_blobs(&mut v);
+        assert_eq!(blobs.len(), 2);
+        assert_eq!(v["clip"], format!("blob:{}", crate::hub::blobs::hash(b"hello")));
+        assert_eq!(blobs[0].1, "text/plain");
+        assert_eq!(blobs[1].1, "application/octet-stream");
+        assert_eq!(v["n"], 1);
+    }
 
     #[test]
     fn lines_become_events() {

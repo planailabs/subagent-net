@@ -54,6 +54,8 @@ pub enum ToHub {
     McpCancel { id: u64 },
     /// Result of an `McpInvoke` this node ran.
     McpResult { id: u64, result: Result<String, String> },
+    /// A blob a sense produced; sent before the event that refers to it.
+    Blob { hash: String, mime: String, base64: String },
     /// An event from one of this node's senses.
     SenseEvent { sense: String, id: String, at: u64, data: Value },
     /// A sense started fine (`error: None`) or has a problem.

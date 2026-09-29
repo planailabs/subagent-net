@@ -258,7 +258,7 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
 
 ### Events and blobs (durable)
 
-A sense emits **events**: `{ id, sense, at, data }`. `data` is JSON. Large payloads go into the **blob store** (Postgres `blobs` table, 64 MiB limit per blob) and the event carries `"$blob": "blob:<sha256>"`. Blobs are content-addressed, fetched via the API or `blob_get`, and garbage-collected when no event, mail or agent log references them for 7 days.
+A sense emits **events**: `{ id, sense, at, data }`. `data` is JSON. Large payloads go into the **blob store** (Postgres `blobs` table, 64 MiB limit per blob): a sense writes `{"$blob": {"base64": …, "mime": …}}` anywhere in its output, and the node uploads the bytes and replaces that object with `"blob:<sha256>"` before sending the event. Blobs are content-addressed and read via `blob_get` (API: base64; `GET /v1/blobs/<hash>/raw`: bytes; agents: the `blob_get` tool, text as-is or base64, cut at 256 KiB). `blob_put` stores one from a client. A blob is deleted 7 days after it was last stored or read.
 
 ### Streams (ephemeral)
 
@@ -395,5 +395,5 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
   - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
 - **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub; the switchboard (routes, flow control, all delivery kinds, deliveries log, `list_routes`/`list_deliveries`/`list_senses`/`peek_mail`/`inject_event`).
-- **Implemented (v2), continued:** stream relay across nodes.
-- **In progress (v2):** blobs, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
+- **Implemented (v2), continued:** stream relay across nodes; blob store.
+- **In progress (v2):** HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.

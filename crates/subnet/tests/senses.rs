@@ -172,3 +172,29 @@ async fn streams_cross_nodes_over_websockets() {
     let got = events(&mut rx, "heard", 2).await;
     assert!(got.iter().all(|e| e["text"].as_str().unwrap().contains("far")), "{got:?}");
 }
+
+#[tokio::test]
+async fn senses_upload_inline_blobs_and_agents_can_read_them() {
+    let blob = r#"{"clip":{"$blob":{"base64":"c2FpZCBoZWxsbw==","mime":"text/plain"}}}"#;
+    let n = Net::new(&format!(
+        "node \"s\" {{}}\n{}sense \"mic\" {{\n  node = \"s\"\n  source {{ exec = [{:?}, \"emit\", {:?}] }}\n}}\n",
+        common::net::agent("reader", "You read blobs.", "{llm}", &["s"], ""),
+        kit(),
+        blob
+    ))
+    .await;
+    let mut rx = n.hub.subscribe();
+    n.node("s").await;
+    let ev = events(&mut rx, "mic", 1).await.pop().unwrap();
+    let reference = ev["clip"].as_str().unwrap().to_string();
+    assert!(reference.starts_with("blob:"), "{ev}");
+    let (mime, data) = n.hub.get_blob(&reference).await.unwrap();
+    assert_eq!((mime.as_str(), data.as_slice()), ("text/plain", &b"said hello"[..]));
+    // An agent reads it with the blob_get tool.
+    let r2 = reference.clone();
+    n.llm.push("You read blobs.", move |_| common::llm::tool_call("b", "blob_get", json!({"ref": r2})));
+    n.llm.push("You read blobs.", |body| common::llm::text(&[&common::llm::last_tool_result(body)]));
+    n.spawn("reader", "what does the clip say?").await;
+    let got: Value = serde_json::from_str(n.mail().await["content"].as_str().unwrap()).unwrap();
+    assert_eq!(got["text"], "said hello");
+}

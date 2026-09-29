@@ -20,6 +20,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 notify = "8"
 globset = "0.4"
 bytes = "1"
+base64 = "0.22"
 cel-interpreter = { version = "0.10", features = ["json"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 axum = { version = "0.8", features = ["ws"] }

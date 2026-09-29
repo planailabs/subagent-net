@@ -289,12 +289,17 @@ impl Node {
                 },
                 s = sense_rx.recv() => {
                     let msg = match s {
-                        Some(senses::SenseOut::Event { sense, data }) => ToHub::SenseEvent {
-                            sense,
-                            id: uuid::Uuid::new_v4().to_string(),
-                            at: chrono::Utc::now().timestamp_millis() as u64,
-                            data,
-                        },
+                        Some(senses::SenseOut::Event { sense, mut data }) => {
+                            for (hash, mime, base64) in senses::extract_blobs(&mut data) {
+                                let _ = out.send(ToHub::Blob { hash, mime, base64 });
+                            }
+                            ToHub::SenseEvent {
+                                sense,
+                                id: uuid::Uuid::new_v4().to_string(),
+                                at: chrono::Utc::now().timestamp_millis() as u64,
+                                data,
+                            }
+                        }
                         Some(senses::SenseOut::Status { sense, error }) => ToHub::SenseStatus { sense, error },
                         None => continue,
                     };

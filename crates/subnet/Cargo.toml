@@ -11,6 +11,7 @@ subnet-ops.workspace = true
 subnet-cluster.workspace = true
 subnet-switchboard.workspace = true
 bytes.workspace = true
+base64.workspace = true
 indexmap.workspace = true
 chrono.workspace = true
 croner.workspace = true

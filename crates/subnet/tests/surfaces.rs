@@ -245,3 +245,22 @@ async fn sse_stream_and_tree_filter() {
         assert_eq!(v["agent"], root.to_string(), "only the subscribed tree: {v}");
     }
 }
+
+#[tokio::test]
+async fn blobs_roundtrip_over_the_api() {
+    let (base, _llm) = setup(None).await;
+    let c = remote(&base, None, "").await.unwrap();
+    let r = c.call_raw("blob_put", json!({"base64": "aGVsbG8gYmxvYg==", "mime": "text/plain"})).await.unwrap();
+    let reference = r["ref"].as_str().unwrap().to_string();
+    assert!(reference.starts_with("blob:") && r["size"] == 10);
+    let hash = reference.trim_start_matches("blob:");
+    let b = c.call_raw("blob_get", json!({"hash": reference})).await.unwrap();
+    assert_eq!((b["mime"].as_str(), b["base64"].as_str()), (Some("text/plain"), Some("aGVsbG8gYmxvYg==")));
+    let raw = reqwest::get(format!("{base}/v1/blobs/{hash}/raw")).await.unwrap();
+    assert_eq!(raw.headers()["content-type"], "text/plain");
+    assert_eq!(raw.text().await.unwrap(), "hello blob");
+    let e = c.call_raw("blob_get", json!({"hash": "0".repeat(64)})).await.unwrap_err();
+    assert_eq!(e.kind, subnet_ops::ErrorKind::NotFound);
+    let e = c.call_raw("blob_get", json!({"hash": "../../etc/passwd"})).await.unwrap_err();
+    assert_eq!(e.kind, subnet_ops::ErrorKind::BadRequest);
+}

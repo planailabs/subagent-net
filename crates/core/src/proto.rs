@@ -60,6 +60,8 @@ pub enum Op {
     MailboxTake { name: String, max: u32 },
     /// Look at up to `max` messages without removing them.
     MailboxPeek { name: String, max: u32 },
+    /// Read a blob (`blob:<sha256>`).
+    BlobGet { reference: String },
 }
 
 /// A delivered message in a user/client mailbox.

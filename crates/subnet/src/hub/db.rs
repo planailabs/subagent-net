@@ -309,3 +309,37 @@ impl Db {
             .collect()
     }
 }
+
+impl Db {
+    /// Stores a blob (idempotent: the same bytes are the same blob).
+    pub async fn put_blob(&self, hash: &str, mime: &str, data: &[u8]) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "insert into blobs (hash, mime, size, data) values ($1, $2, $3, $4)
+             on conflict (hash) do update set touched_at = now()",
+        )
+        .bind(hash)
+        .bind(mime)
+        .bind(data.len() as i64)
+        .bind(data)
+        .execute(&self.0)
+        .await?;
+        Ok(())
+    }
+
+    /// A blob's type and bytes; reading it counts as a use.
+    pub async fn get_blob(&self, hash: &str) -> Result<Option<(String, Vec<u8>)>, sqlx::Error> {
+        let r = sqlx::query("update blobs set touched_at = now() where hash = $1 returning mime, data")
+            .bind(hash)
+            .fetch_optional(&self.0)
+            .await?;
+        r.map(|r| Ok((r.try_get("mime")?, r.try_get("data")?))).transpose()
+    }
+
+    pub async fn gc_blobs(&self, older_than_days: i64) -> Result<u64, sqlx::Error> {
+        let r = sqlx::query("delete from blobs where touched_at < now() - make_interval(days => $1::int)")
+            .bind(older_than_days)
+            .execute(&self.0)
+            .await?;
+        Ok(r.rows_affected())
+    }
+}

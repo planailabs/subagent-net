@@ -55,6 +55,11 @@ pub fn builtin_tools() -> Vec<ToolDef> {
             obj(json!({"name":{"type":"string"},"max":{"type":"integer","minimum":1}}), &["name"]),
         ),
         def(
+            "blob_get",
+            "Read a blob referred to as blob:<sha256> (text as-is, other data as base64; long blobs are cut).",
+            obj(json!({"ref":{"type":"string"}}), &["ref"]),
+        ),
+        def(
             "mailbox_peek",
             "Look at up to `max` messages in a mailbox without removing them.",
             obj(json!({"name":{"type":"string"},"max":{"type":"integer","minimum":1}}), &["name"]),
@@ -98,6 +103,11 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
         id: AgentId,
     }
     #[derive(Deserialize)]
+    struct BlobArg {
+        #[serde(rename = "ref")]
+        reference: String,
+    }
+    #[derive(Deserialize)]
     struct Mailbox {
         name: String,
         #[serde(default = "ten")]
@@ -115,6 +125,7 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
         "pause_agent" => parse::<Pause>(a).map(|p| Op::Pause { id: p.id, mode: p.mode, tree: p.tree }),
         "resume_agent" => parse::<Resume>(a).map(|r| Op::Resume { id: r.id, tree: r.tree }),
         "cancel_agent" => parse::<Id>(a).map(|i| Op::Cancel { id: i.id }),
+        "blob_get" => parse::<BlobArg>(a).map(|b| Op::BlobGet { reference: b.reference }),
         "mailbox_take" => parse::<Mailbox>(a).map(|m| Op::MailboxTake { name: m.name, max: m.max.max(1) }),
         "mailbox_peek" => parse::<Mailbox>(a).map(|m| Op::MailboxPeek { name: m.name, max: m.max.max(1) }),
         _ => return None,
@@ -133,7 +144,7 @@ mod tests {
     #[test]
     fn every_builtin_except_wait_maps_to_op() {
         let id = Uuid::new_v4();
-        let args = json!({"type":"t","prompt":"p","to":"user:u","content":"c","id":id,"mode":"hard","name":"box"}).to_string();
+        let args = json!({"type":"t","prompt":"p","to":"user:u","content":"c","id":id,"mode":"hard","name":"box","ref":"blob:x"}).to_string();
         for t in builtin_tools() {
             let r = builtin_op(&call(&t.name, &args));
             if t.name == WAIT_FOR {

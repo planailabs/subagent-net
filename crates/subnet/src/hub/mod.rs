@@ -3,6 +3,7 @@
 //! over `Hub::connect`, `Hub::handle` and `Hub::op`.
 
 pub mod auth;
+pub mod blobs;
 pub mod db;
 pub mod http;
 pub mod relay;
@@ -221,6 +222,7 @@ impl Hub {
         });
         hub.load_auth().await?;
         tokio::spawn(hub.clone().board_timers());
+        tokio::spawn(hub.clone().blob_gc());
         Ok(hub)
     }
 
@@ -407,6 +409,10 @@ impl Hub {
                 let node = self.st.lock().await.nodes.get(&conn).map(|n| n.name.clone()).unwrap_or_default();
                 self.arc().sense_event(node, subnet_switchboard::SenseEvent { id, sense, at, data });
                 Ok(())
+            }
+            ToHub::Blob { hash, mime, base64 } => {
+                let data = blobs::decode_b64(&base64)?;
+                self.put_blob_checked(&hash, &mime, &data).await
             }
             ToHub::SenseStatus { sense, error } => {
                 let mut st = self.st.lock().await;
@@ -705,6 +711,7 @@ impl Hub {
             Op::WaitInbox { timeout_ms } => j(self.wait_inbox(caller, timeout_ms).await),
             Op::MailboxTake { name, max } => j(self.mailbox(caller, &name, max, true).await),
             Op::MailboxPeek { name, max } => j(self.mailbox(caller, &name, max, false).await),
+            Op::BlobGet { reference } => j(self.blob_for_model(&reference).await),
         }
     }
 

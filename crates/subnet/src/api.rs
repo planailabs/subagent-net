@@ -288,6 +288,23 @@ pub struct SenseSummary {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BlobPutArgs {
+    pub base64: String,
+    #[serde(default = "octet_stream")]
+    pub mime: String,
+}
+
+fn octet_stream() -> String {
+    "application/octet-stream".into()
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BlobGetArgs {
+    /// The sha256 (or `blob:<sha256>`).
+    pub hash: String,
+}
+
 macro_rules! op {
     ($t:ident, $name:literal, $role:ident, $http:expr, $args:ty, $out:ty, $summary:literal) => {
         pub struct $t;
@@ -325,6 +342,8 @@ op!(ListDeliveries, "list_deliveries", Viewer, Some((Method::Get, "/v1/deliverie
 op!(ListSenses, "list_senses", Viewer, Some((Method::Get, "/v1/senses")), NoArgs, Vec<SenseSummary>, "Senses of the cluster and whether they run.");
 op!(PeekMail, "peek_mail", Operator, Some((Method::Get, "/v1/mail")), MailArgs, Vec<Mail>, "Pending messages at any address (not taken).");
 op!(InjectEvent, "inject_event", Operator, Some((Method::Post, "/v1/senses/{sense}/events")), InjectArgs, Injected, "Feed an event into the switchboard as if the sense had produced it.");
+op!(BlobPut, "blob_put", Operator, Some((Method::Post, "/v1/blobs")), BlobPutArgs, crate::hub::blobs::BlobRef, "Store a blob; returns its blob:<sha256> reference.");
+op!(BlobGetOp, "blob_get", Viewer, Some((Method::Get, "/v1/blobs/{hash}")), BlobGetArgs, crate::hub::blobs::Blob, "Read a blob as base64 (raw bytes: GET /v1/blobs/{hash}/raw).");
 op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events, optionally with its children) into a new agent.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
@@ -354,6 +373,8 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<ListSenses>(),
         OpMeta::of::<PeekMail>(),
         OpMeta::of::<InjectEvent>(),
+        OpMeta::of::<BlobPut>(),
+        OpMeta::of::<BlobGetOp>(),
     ]
 }
 
@@ -473,10 +494,26 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
         let h = h.clone();
         async move { Ok(h.peek_mail(&a.addr, a.max.unwrap_or(50)).await?) }
     });
-    let h = hub;
+    let h = hub.clone();
     r.add::<InjectEvent, _, _>(move |_, a| {
         let h = h.clone();
         async move { Ok(Injected { id: h.inject_event(&a.sense, a.data)? }) }
+    });
+    let h = hub.clone();
+    r.add::<BlobPut, _, _>(move |_, a| {
+        let h = h.clone();
+        async move {
+            let data = crate::hub::blobs::decode_b64(&a.base64)?;
+            Ok(h.put_blob(&data, &a.mime).await?)
+        }
+    });
+    let h = hub;
+    r.add::<BlobGetOp, _, _>(move |_, a| {
+        let h = h.clone();
+        async move {
+            let (mime, data) = h.get_blob(&a.hash).await?;
+            Ok(crate::hub::blobs::Blob { mime, size: data.len() as u64, base64: crate::hub::blobs::encode_b64(&data) })
+        }
     });
     r
 }
