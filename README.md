@@ -1,6 +1,6 @@
 # subagent-net
 
-A distributed network of resumable LLM agents, in Rust. Every agent is an event-sourced state machine. You can pause it three ways, resume it, fork it and message it, and agents can spawn and control their own sub-agents. Any OpenAI-compatible model works; tools come from MCP servers. The hub is itself an MCP server, so other agents (Claude Code, …) can drive the network.
+A distributed network of resumable LLM agents, in Rust, with senses (sensors, streams, webhooks, timers, files) wired to agents through a switchboard. Every agent is an event-sourced state machine. You can pause it three ways, resume it, fork it and message it, and agents can spawn and control their own sub-agents. Any OpenAI-compatible model works; tools come from MCP servers. The hub is itself an MCP server, so other agents (Claude Code, …) can drive the network.
 
 See [DESIGN.md](DESIGN.md) for how it works.
 
@@ -22,7 +22,10 @@ subnet list-agents
 subnet tail                      # live tokens and events
 subnet pause <id> --mode hard    # or safe / quick; --tree for descendants
 subnet resume <id>
+subnet tui                       # the agent park in the terminal
 ```
+
+Open http://127.0.0.1:7700 for the web UI: the agent park, live transcripts with pause/resume/approve, senses, the switchboard's routes and deliveries, and the cluster spec.
 
 A real deployment:
 
@@ -50,11 +53,13 @@ nix develop -c cargo test
 
 Web UI logic: `cd webui && npm test`.
 
-The tests start a throwaway Postgres under `target/tmp/testpg`, or use `$DATABASE_URL`. They cover:
+The tests start a throwaway Postgres under `target/tmp/testpg` (stop it with `pg_ctl -D target/tmp/testpg stop`), or use `$DATABASE_URL`. They cover:
 
-- the state machine: every pause mode, crash recovery, approval, children, budgets
-- the LLM client against a mock SSE server
-- the hub against real Postgres
-- MCP tools, over stdio and streamable HTTP, including cancellation
-- the user surfaces and the CLI binary
-- `kill -9` failover of spawner and hub processes mid-stream
+- the state machine: every pause mode, crash recovery, approval, children, budgets, parallel tools
+- the LLM client against a mock SSE server; external executors
+- the hub against real Postgres: placement, fencing, dormancy, snapshots, forks, auth, HA elections
+- cluster files, including the example in DESIGN.md
+- MCP servers (stdio and HTTP, local and routed through the hub) with cancellation
+- senses, streams across nodes, blobs, and the switchboard's routes and deliveries
+- the API (REST/RPC, OpenAPI, MCP, SSE), the CLI binary, the web UI's serving and sign-in, the TUI
+- `kill -9` of node and hub processes mid-stream, including a leader hub handing over to a standby
