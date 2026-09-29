@@ -252,3 +252,36 @@ async fn tool_shadowing_a_builtin_is_rejected() {
     let err = Spawner::new(&cfg("http://unused", &url, &[])).await.err().unwrap();
     assert!(err.to_string().contains("shadows a built-in"), "{err}");
 }
+
+/// Path of the `mcp_echo` example, which `cargo test` builds alongside.
+fn echo_server() -> String {
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_subnet"));
+    let p = bin.parent().unwrap().join("examples").join(format!("mcp_echo{}", std::env::consts::EXE_SUFFIX));
+    assert!(p.exists(), "build the example first: cargo build --example mcp_echo ({})", p.display());
+    p.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn stdio_mcp_server_with_env() {
+    let hub = Hub::open(&db_url().await, None).await.unwrap();
+    let llm = MockLlm::start().await;
+    let mut c = cfg(&llm.url, "unused", &[]);
+    c.types[0].mcp = vec![McpServerConfig {
+        name: "echo".into(),
+        command: Some(echo_server()),
+        args: vec![],
+        env: [("GREETING".to_string(), "hello from env".to_string())].into(),
+        url: None,
+    }];
+    attach(hub.clone(), Arc::new(Spawner::new(&c).await.unwrap())).await.unwrap();
+    llm.push(SYS, |_| tool_call("c1", "echo", json!({"text":"hi"})));
+    llm.push(SYS, |_| tool_call("c2", "env", json!({"name":"GREETING"})));
+    llm.push(SYS, |body| {
+        let msgs = body["messages"].as_array().unwrap();
+        let results: Vec<_> = msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
+        text(&[&results.join(" | ")])
+    });
+    hub.op(&Addr::User, Op::Spawn { ty: "tooler".into(), prompt: "go".into() }).await.unwrap();
+    let m = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
+    assert_eq!(m[0]["content"], "stdio echo: hi | hello from env");
+}
