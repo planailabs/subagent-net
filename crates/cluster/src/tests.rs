@@ -142,6 +142,8 @@ fn stream_publishers_have_no_stages_and_no_routes() {
     assert!(err(&staged).contains("no stages"));
     let sub = "sense \"words\" {\n  node = \"n1\"\n  source { stream = \"mic\" }\n  stage \"stt\" { exec = [\"stt\"] }\n}\n";
     with(&format!("{publ}{sub}")).unwrap();
+    let bad = sub.replace("exec = [\"stt\"]", "filter = \"true\"");
+    assert!(err(&format!("{publ}{bad}")).contains("first stage must be exec"));
 }
 
 #[test]

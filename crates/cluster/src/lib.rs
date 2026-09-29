@@ -521,6 +521,11 @@ impl Cluster {
                 }
                 _ => {}
             }
+            if matches!(s.source.kind(), Ok(SourceKind::Subscribe(_)))
+                && !s.stage.values().next().is_some_and(|st| st.exec.is_some())
+            {
+                return invalid(format!("{ctx}: a stream subscriber's first stage must be exec (it gets raw bytes)"));
+            }
             if s.source.publishes().is_some() && !s.stage.is_empty() {
                 return invalid(format!("{ctx}: a sense publishing a stream has no stages; subscribe to it instead"));
             }

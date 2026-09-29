@@ -55,6 +55,8 @@ fn no_agent<T>(id: AgentId) -> Result<T, HubError> {
 pub enum Notice {
     /// A committed agent event. `ancestors` lists parent, grandparent, …
     Agent { agent: AgentId, ancestors: Vec<AgentId>, seq: u64, event: Event },
+    /// An event from a sense.
+    Sense { sense: String, node: String, id: String, at: u64, data: Value },
 }
 
 /// What a subscriber wants to see.
@@ -66,14 +68,28 @@ pub struct NoticeFilter {
     /// This agent and its descendants.
     #[serde(default)]
     pub tree: Option<AgentId>,
+    /// Only this sense's events.
+    #[serde(default)]
+    pub sense: Option<String>,
+    /// Only agent notices (true) or only sense notices (false).
+    #[serde(default)]
+    pub agents: Option<bool>,
 }
 
 impl NoticeFilter {
     pub fn matches(&self, n: &Notice) -> bool {
         match n {
             Notice::Agent { agent, ancestors, .. } => {
-                self.agent.is_none_or(|a| a == *agent)
+                self.agents != Some(false)
+                    && self.sense.is_none()
+                    && self.agent.is_none_or(|a| a == *agent)
                     && self.tree.is_none_or(|t| t == *agent || ancestors.contains(&t))
+            }
+            Notice::Sense { sense, .. } => {
+                self.agents != Some(true)
+                    && self.agent.is_none()
+                    && self.tree.is_none()
+                    && self.sense.as_ref().is_none_or(|s| s == sense)
             }
         }
     }
@@ -101,6 +117,8 @@ struct NodeRec {
     configured: bool,
     /// What it couldn't start, id → error.
     errors: std::collections::BTreeMap<String, String>,
+    /// Its senses and their last problem, if any.
+    senses: std::collections::BTreeMap<String, Option<String>>,
 }
 
 /// An MCP call forwarded from one node to another.
@@ -238,6 +256,7 @@ impl Hub {
                 mcp_load: 0,
                 configured: false,
                 errors: Default::default(),
+                senses: Default::default(),
             },
         );
         Ok((conn, rx))
@@ -337,6 +356,18 @@ impl Hub {
                         n.mcp_load = n.mcp_load.saturating_sub(1);
                         let _ = n.tx.send(ToNode::McpAbort { id: h });
                     }
+                }
+                Ok(())
+            }
+            ToHub::SenseEvent { sense, id, at, data } => {
+                let node = self.st.lock().await.nodes.get(&conn).map(|n| n.name.clone()).unwrap_or_default();
+                let _ = self.notices.send(Notice::Sense { sense, node, id, at, data });
+                Ok(())
+            }
+            ToHub::SenseStatus { sense, error } => {
+                let mut st = self.st.lock().await;
+                if let Some(n) = st.nodes.get_mut(&conn) {
+                    n.senses.insert(sense, error);
                 }
                 Ok(())
             }
@@ -620,6 +651,7 @@ impl Hub {
                     agents: ready,
                     mcps,
                     errors: n.errors.clone(),
+                    senses: n.senses.clone(),
                 }
             })
             .collect();

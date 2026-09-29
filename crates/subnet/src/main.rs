@@ -48,6 +48,9 @@ enum Cmd {
         /// This node's name as declared in the cluster file.
         #[arg(long, env = "SUBNET_NODE")]
         name: String,
+        /// Serve webhook senses (`POST /hooks/<path>`) on this address.
+        #[arg(long, env = "SUBNET_WEBHOOKS")]
+        webhooks: Option<String>,
     },
     /// Run a hub, apply cluster files, and run every node they declare, all in
     /// one process.
@@ -56,6 +59,9 @@ enum Cmd {
         hub: HubArgs,
         #[arg(required = true)]
         files: Vec<PathBuf>,
+        /// Serve webhook senses of all nodes on this address.
+        #[arg(long)]
+        webhooks: Option<String>,
     },
     /// Stream events live (all agents, or one).
     Tail {
@@ -86,6 +92,18 @@ async fn serve_hub(a: HubArgs) -> anyhow::Result<Arc<Hub>> {
         }
     });
     Ok(hub)
+}
+
+async fn serve_webhooks(addr: &str, senses: Vec<Arc<subnet::node::senses::Senses>>) -> anyhow::Result<()> {
+    let l = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(%addr, "webhooks listening");
+    let app = subnet::node::senses::webhook_router(senses);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(l, app).await {
+            tracing::error!(error = %e, "webhook server stopped");
+        }
+    });
+    Ok(())
 }
 
 fn read_files(paths: &[PathBuf]) -> anyhow::Result<Vec<ClusterFile>> {
@@ -189,17 +207,26 @@ async fn main() -> anyhow::Result<()> {
             serve_hub(a).await?;
             std::future::pending::<()>().await;
         }
-        Cmd::Node { name } => {
+        Cmd::Node { name, webhooks } => {
             let node = Arc::new(Node::new(&name, cli.token));
+            if let Some(addr) = webhooks {
+                serve_webhooks(&addr, vec![node.senses.clone()]).await?;
+            }
             subnet::node::ws::run(node, &cli.hub).await?;
         }
-        Cmd::Dev { hub, files } => {
+        Cmd::Dev { hub, files, webhooks } => {
             let files = read_files(&files)?;
             let hub = serve_hub(hub).await?;
             let applied = hub.apply_cluster(files, false, &subnet_core::addr::Addr::root()).await?;
             tracing::info!(version = ?applied.version, "cluster applied");
+            let mut senses = vec![];
             for name in hub.cluster().spec.nodes.keys() {
-                attach(hub.clone(), Arc::new(Node::new(name, None))).await?;
+                let node = Arc::new(Node::new(name, None));
+                senses.push(node.senses.clone());
+                attach(hub.clone(), node).await?;
+            }
+            if let Some(addr) = webhooks {
+                serve_webhooks(&addr, senses).await?;
             }
             std::future::pending::<()>().await;
         }

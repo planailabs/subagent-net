@@ -5,6 +5,7 @@
 
 pub mod external;
 pub mod mcp;
+pub mod senses;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -98,6 +99,9 @@ pub struct Node {
     pub name: String,
     pub token: Option<String>,
     rt: RwLock<Rt>,
+    pub senses: Arc<senses::Senses>,
+    /// Sense output, forwarded to whichever hub connection is up.
+    sense_rx: tokio::sync::Mutex<mpsc::Receiver<senses::SenseOut>>,
 }
 
 type Pending<T> = std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<T, String>>>>;
@@ -157,7 +161,15 @@ impl Link {
 
 impl Node {
     pub fn new(name: &str, token: Option<String>) -> Self {
-        Self { name: name.to_string(), token, rt: RwLock::new(Rt::default()) }
+        // ponytail: bounded; events produced while the hub is unreachable beyond this are dropped (and logged).
+        let (tx, rx) = mpsc::channel(1024);
+        Self {
+            name: name.to_string(),
+            token,
+            rt: RwLock::new(Rt::default()),
+            senses: senses::Senses::new(tx),
+            sense_rx: tokio::sync::Mutex::new(rx),
+        }
     }
 
     pub fn hello(&self) -> ToHub {
@@ -167,6 +179,7 @@ impl Node {
     /// Starts what `cfg` asks for, stops what it no longer does, and reports
     /// what is available. Runtimes of unchanged types are kept.
     pub async fn configure(&self, cfg: &NodeConfig) -> ToHub {
+        self.senses.configure(&cfg.senses);
         let mut rt = self.rt.write().await;
         rt.agents.retain(|id, _| cfg.agents.iter().any(|a| &a.id == id));
         rt.mcps.retain(|id, _| cfg.mcps.iter().any(|m| &m.id == id));
@@ -230,7 +243,28 @@ impl Node {
         let _guard = root.clone().drop_guard();
         let mut agents: HashMap<AgentId, (mpsc::UnboundedSender<(u64, Event)>, CancellationToken)> = HashMap::new();
         let mut invocations: HashMap<u64, CancellationToken> = HashMap::new();
-        while let Some(msg) = inbox.recv().await {
+        let mut sense_rx = self.sense_rx.lock().await;
+        loop {
+            let msg = tokio::select! {
+                m = inbox.recv() => match m {
+                    Some(m) => m,
+                    None => break,
+                },
+                s = sense_rx.recv() => {
+                    let msg = match s {
+                        Some(senses::SenseOut::Event { sense, data }) => ToHub::SenseEvent {
+                            sense,
+                            id: uuid::Uuid::new_v4().to_string(),
+                            at: chrono::Utc::now().timestamp_millis() as u64,
+                            data,
+                        },
+                        Some(senses::SenseOut::Status { sense, error }) => ToHub::SenseStatus { sense, error },
+                        None => continue,
+                    };
+                    let _ = out.send(msg);
+                    continue;
+                }
+            };
             match msg {
                 ToNode::Welcome => tracing::info!(name = %self.name, "connected to hub"),
                 ToNode::Rejected { reason } => {

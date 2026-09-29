@@ -82,6 +82,8 @@ pub struct NodeSummary {
     pub mcps: Vec<String>,
     /// What it couldn't start (id → error), e.g. a missing credential.
     pub errors: std::collections::BTreeMap<String, String>,
+    /// Its senses and their last problem (`null` = fine).
+    pub senses: std::collections::BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
