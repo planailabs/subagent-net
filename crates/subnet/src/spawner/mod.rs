@@ -3,6 +3,7 @@
 //! the hub and performs the resulting effects (LLM calls, tool calls).
 
 pub mod config;
+pub mod ws;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,6 +103,9 @@ impl Spawner {
     /// dropped at the end: the hub reassigns them.
     pub async fn serve(&self, mut inbox: mpsc::UnboundedReceiver<ToSpawner>, out: mpsc::UnboundedSender<ToHub>) {
         let link = Arc::new(Link { out, next: AtomicU64::new(1), pending: Default::default() });
+        // Every agent dies with this connection, even if this future is dropped.
+        let root = CancellationToken::new();
+        let _guard = root.clone().drop_guard();
         let mut agents: HashMap<AgentId, (mpsc::UnboundedSender<(u64, Event)>, CancellationToken)> = HashMap::new();
         while let Some(msg) = inbox.recv().await {
             match msg {
@@ -119,7 +123,7 @@ impl Spawner {
                         life.cancel();
                     }
                     let (tx, rx) = mpsc::unbounded_channel();
-                    let life = CancellationToken::new();
+                    let life = root.child_token();
                     let runner = Runner::new(agent, epoch, spec, &events, rt, link.clone(), life.clone());
                     tokio::spawn(runner.run(rx));
                     agents.insert(agent, (tx, life));
@@ -141,9 +145,6 @@ impl Spawner {
                     }
                 }
             }
-        }
-        for (_, (_, life)) in agents {
-            life.cancel();
         }
     }
 }

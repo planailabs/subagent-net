@@ -84,3 +84,60 @@ async fn bad_hello_is_rejected() {
     ws.send(Message::Text("{\"t\":\"garbage\"}".into())).await.unwrap();
     assert!(matches!(next(&mut ws).await, ToSpawner::Rejected { .. }));
 }
+
+fn spawner_cfg(llm_url: &str, token_env: Option<&str>) -> subnet::spawner::config::Config {
+    let t = subnet::spawner::config::TypeConfig {
+        name: "worker".into(),
+        description: String::new(),
+        system: "sys".into(),
+        model: subnet_llm::ModelConfig {
+            base_url: llm_url.into(),
+            model: "m".into(),
+            api_key_env: None,
+            prefill: false,
+            params: Default::default(),
+        },
+        mcp: vec![],
+        spawns: vec![],
+        budget: Budget::default(),
+        approve: vec![],
+        idempotent: vec![],
+    };
+    subnet::spawner::config::Config {
+        hub: String::new(),
+        name: "ws-spawner".into(),
+        capacity: 2,
+        token_env: token_env.map(Into::into),
+        types: vec![t],
+    }
+}
+
+#[tokio::test]
+async fn real_spawner_over_websocket_answers() {
+    let llm = common::llm::MockLlm::start().await;
+    llm.say("sys", &["over the wire"]);
+    let hub = Hub::open(&db_url().await, None).await.unwrap();
+    let url = serve(hub.clone()).await;
+    let sp = Arc::new(subnet::spawner::Spawner::new(&spawner_cfg(&llm.url, None)).unwrap());
+    let task = tokio::spawn(async move { subnet::spawner::ws::run(sp, &url).await });
+    // Wait for the type to show up.
+    for _ in 0..100 {
+        if !hub.op(&Addr::User, Op::ListTypes).await.unwrap().as_array().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    hub.op(&Addr::User, Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap();
+    let mail = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(5000) }).await.unwrap();
+    assert_eq!(mail[0]["content"], "over the wire");
+    task.abort();
+}
+
+#[tokio::test]
+async fn rejected_spawner_stops() {
+    let hub = Hub::open(&db_url().await, Some("tok".into())).await.unwrap();
+    let url = serve(hub).await;
+    let sp = Arc::new(subnet::spawner::Spawner::new(&spawner_cfg("http://unused", None)).unwrap());
+    let r = tokio::time::timeout(std::time::Duration::from_secs(5), subnet::spawner::ws::run(sp, &url)).await.unwrap();
+    assert!(r.unwrap_err().to_string().contains("bad token"));
+}
