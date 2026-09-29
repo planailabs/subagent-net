@@ -1,14 +1,20 @@
-//! HTTP surface of the hub: the spawner WebSocket.
+//! HTTP surface of the hub: the spawner WebSocket, the MCP endpoint for users
+//! and clients, and the live event stream.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::extract::{Query, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use serde::Deserialize;
+use subnet_core::addr::AgentId;
 use subnet_core::proto::{ToHub, ToSpawner};
+use tokio::sync::broadcast::error::RecvError;
 
 use super::Hub;
 
@@ -17,7 +23,56 @@ const PING_EVERY: Duration = Duration::from_secs(10);
 const DEAD_AFTER: Duration = Duration::from_secs(30);
 
 pub fn router(hub: Arc<Hub>) -> Router {
-    Router::new().route("/spawner", get(spawner_ws)).with_state(hub)
+    // Spawners authenticate in their hello; users and clients per request.
+    let user = Router::new()
+        .nest_service("/mcp", super::mcp::service(hub.clone()))
+        .route("/events", get(events_ws))
+        .layer(middleware::from_fn_with_state(hub.clone(), auth));
+    Router::new().route("/spawner", get(spawner_ws)).merge(user).with_state(hub)
+}
+
+#[derive(Deserialize)]
+struct TokenQuery {
+    token: Option<String>,
+}
+
+/// `Authorization: Bearer <token>`, or `?token=` for WebSocket clients that
+/// can't set headers.
+async fn auth(State(hub): State<Arc<Hub>>, Query(q): Query<TokenQuery>, req: Request, next: Next) -> Response {
+    let bearer = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    if hub.token_ok(bearer.or(q.token).as_deref()) {
+        next.run(req).await
+    } else {
+        StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    agent: Option<AgentId>,
+}
+
+/// Streams committed events as JSON, optionally for one agent.
+async fn events_ws(State(hub): State<Arc<Hub>>, Query(q): Query<EventsQuery>, ws: WebSocketUpgrade) -> Response {
+    let mut rx = hub.subscribe();
+    ws.on_upgrade(move |mut ws| async move {
+        loop {
+            let msg = match rx.recv().await {
+                Ok(n) if q.agent.is_some_and(|a| a != n.agent) => continue,
+                Ok(n) => serde_json::to_string(&n).unwrap(),
+                Err(RecvError::Lagged(k)) => serde_json::json!({"lagged": k}).to_string(),
+                Err(RecvError::Closed) => break,
+            };
+            if ws.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 async fn spawner_ws(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Response {

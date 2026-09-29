@@ -4,6 +4,7 @@
 
 pub mod db;
 pub mod http;
+pub mod mcp;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -97,6 +98,16 @@ impl Hub {
         }
         tracing::info!(agents = st.agents.len(), "hub loaded");
         Ok(Arc::new(Self { db, st: Mutex::new(st), token, mail: Notify::new(), notices: broadcast::channel(4096).0 }))
+    }
+
+    /// For in-process spawners, which are trusted.
+    pub(crate) fn token(&self) -> Option<String> {
+        self.token.clone()
+    }
+
+    /// True if no token is configured or `given` matches it.
+    pub fn token_ok(&self, given: Option<&str>) -> bool {
+        self.token.as_deref().is_none_or(|t| given == Some(t))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notice> {

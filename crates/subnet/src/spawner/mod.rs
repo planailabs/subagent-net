@@ -346,7 +346,11 @@ impl ToolTask {
 
 /// Runs a spawner against an in-process hub (single-process mode and tests).
 pub async fn attach(hub: Arc<crate::hub::Hub>, spawner: Arc<Spawner>) -> anyhow::Result<crate::hub::ConnId> {
-    let (conn, inbox) = hub.connect(spawner.hello()).await.map_err(anyhow::Error::msg)?;
+    let mut hello = spawner.hello();
+    if let ToHub::Hello { token, .. } = &mut hello {
+        *token = hub.token();
+    }
+    let (conn, inbox) = hub.connect(hello).await.map_err(anyhow::Error::msg)?;
     let (out, mut out_rx) = mpsc::unbounded_channel();
     let h = hub.clone();
     tokio::spawn(async move {
