@@ -58,7 +58,11 @@ fn function_type() -> String {
 
 impl ToolCall {
     pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: impl Into<String>) -> Self {
-        Self { id: id.into(), kind: function_type(), function: FunctionCall { name: name.into(), arguments: arguments.into() } }
+        Self {
+            id: id.into(),
+            kind: function_type(),
+            function: FunctionCall { name: name.into(), arguments: arguments.into() },
+        }
     }
 }
 

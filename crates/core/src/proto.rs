@@ -35,19 +35,49 @@ impl TypeInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
-    Spawn { ty: String, prompt: String },
-    Send { to: Addr, content: String },
+    Spawn {
+        ty: String,
+        prompt: String,
+    },
+    Send {
+        to: Addr,
+        content: String,
+    },
     ListAgents,
     ListTypes,
-    Pause { id: AgentId, mode: PauseMode, #[serde(default)] tree: bool },
-    Resume { id: AgentId, #[serde(default)] tree: bool },
-    Cancel { id: AgentId },
-    Approve { id: AgentId, call_id: String, approved: bool },
+    Pause {
+        id: AgentId,
+        mode: PauseMode,
+        #[serde(default)]
+        tree: bool,
+    },
+    Resume {
+        id: AgentId,
+        #[serde(default)]
+        tree: bool,
+    },
+    Cancel {
+        id: AgentId,
+    },
+    Approve {
+        id: AgentId,
+        call_id: String,
+        approved: bool,
+    },
     /// Copy an agent's log (up to `at` events) into a new, parentless agent.
-    Fork { id: AgentId, #[serde(default)] at: Option<u64> },
-    Transcript { id: AgentId },
+    Fork {
+        id: AgentId,
+        #[serde(default)]
+        at: Option<u64>,
+    },
+    Transcript {
+        id: AgentId,
+    },
     /// Block until a message for the caller arrives (for MCP clients).
-    WaitInbox { #[serde(default)] timeout_ms: Option<u64> },
+    WaitInbox {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
 }
 
 /// A delivered message in a user/client mailbox.
@@ -62,7 +92,13 @@ pub struct Mail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ToHub {
-    Hello { name: String, #[serde(default)] token: Option<String>, types: Vec<TypeInfo>, capacity: u32 },
+    Hello {
+        name: String,
+        #[serde(default)]
+        token: Option<String>,
+        types: Vec<TypeInfo>,
+        capacity: u32,
+    },
     /// Events the spawner wants committed to an agent's log.
     Propose { agent: AgentId, epoch: u64, events: Vec<Event> },
     /// A built-in tool call made by an agent.
@@ -73,13 +109,29 @@ pub enum ToHub {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ToSpawner {
     Welcome,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
     /// Run this agent: replay `events`, recover, then follow `Commit`s.
-    Assign { agent: AgentId, epoch: u64, spec: Spec, events: Vec<Event> },
-    Commit { agent: AgentId, seq: u64, event: Event },
+    Assign {
+        agent: AgentId,
+        epoch: u64,
+        spec: Spec,
+        events: Vec<Event>,
+    },
+    Commit {
+        agent: AgentId,
+        seq: u64,
+        event: Event,
+    },
     /// Stop running this agent (moved elsewhere or stale epoch).
-    Revoke { agent: AgentId },
-    Reply { id: u64, result: Result<Value, String> },
+    Revoke {
+        agent: AgentId,
+    },
+    Reply {
+        id: u64,
+        result: Result<Value, String>,
+    },
 }
 
 #[cfg(test)]

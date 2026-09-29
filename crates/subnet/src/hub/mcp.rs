@@ -145,48 +145,86 @@ impl HubMcp {
     }
 
     #[tool(description = "Spawn an agent of a type with a task. Its answer arrives in your inbox (wait_inbox).")]
-    async fn spawn(&self, Parameters(a): Parameters<SpawnArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn spawn(
+        &self,
+        Parameters(a): Parameters<SpawnArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Spawn { ty: a.ty, prompt: a.prompt }).await
     }
 
     #[tool(description = "Send a message to an agent (it answers into your inbox), the user or a client.")]
-    async fn send(&self, Parameters(a): Parameters<SendArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn send(
+        &self,
+        Parameters(a): Parameters<SendArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         let to = a.to.parse()?;
         self.run(&ctx, Op::Send { to, content: a.content }).await
     }
 
     #[tool(description = "Block until messages for you arrive (or timeout) and return them.")]
-    async fn wait_inbox(&self, Parameters(a): Parameters<WaitArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn wait_inbox(
+        &self,
+        Parameters(a): Parameters<WaitArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::WaitInbox { timeout_ms: a.timeout_ms }).await
     }
 
-    #[tool(description = "Pause an agent: safe (finish turn), quick (finish in-flight call) or hard (abort, keep partial output).")]
-    async fn pause(&self, Parameters(a): Parameters<PauseArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    #[tool(
+        description = "Pause an agent: safe (finish turn), quick (finish in-flight call) or hard (abort, keep partial output)."
+    )]
+    async fn pause(
+        &self,
+        Parameters(a): Parameters<PauseArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Pause { id: id(&a.id)?, mode: a.mode.into(), tree: a.tree }).await
     }
 
     #[tool(description = "Resume a paused or failed agent.")]
-    async fn resume(&self, Parameters(a): Parameters<ResumeArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn resume(
+        &self,
+        Parameters(a): Parameters<ResumeArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Resume { id: id(&a.id)?, tree: a.tree }).await
     }
 
     #[tool(description = "Cancel an agent and all its descendants.")]
-    async fn cancel(&self, Parameters(a): Parameters<IdArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn cancel(
+        &self,
+        Parameters(a): Parameters<IdArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Cancel { id: id(&a.id)? }).await
     }
 
     #[tool(description = "Approve or deny a tool call an agent is waiting on.")]
-    async fn approve(&self, Parameters(a): Parameters<ApproveArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn approve(
+        &self,
+        Parameters(a): Parameters<ApproveArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Approve { id: id(&a.id)?, call_id: a.call_id, approved: a.approved }).await
     }
 
     #[tool(description = "Copy an agent's history (optionally only the first `at` events) into a new agent.")]
-    async fn fork(&self, Parameters(a): Parameters<ForkArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn fork(
+        &self,
+        Parameters(a): Parameters<ForkArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Fork { id: id(&a.id)?, at: a.at }).await
     }
 
     #[tool(description = "An agent's transcript, partial output, queued inbox and state.")]
-    async fn transcript(&self, Parameters(a): Parameters<IdArgs>, ctx: RequestContext<RoleServer>) -> Result<String, String> {
+    async fn transcript(
+        &self,
+        Parameters(a): Parameters<IdArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
         self.run(&ctx, Op::Transcript { id: id(&a.id)? }).await
     }
 }

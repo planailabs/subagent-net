@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock, ServerResult, Tool,
-};
+use rmcp::model::{CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock, ServerResult, Tool};
 use rmcp::service::{PeerRequestOptions, RunningService};
 use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
@@ -58,7 +56,11 @@ impl McpTools {
             let idx = me.clients.len();
             for t in tools {
                 let name = t.name.to_string();
-                anyhow::ensure!(!reserved.contains(&name), "mcp server {:?}: tool {name:?} shadows a built-in", cfg.name);
+                anyhow::ensure!(
+                    !reserved.contains(&name),
+                    "mcp server {:?}: tool {name:?} shadows a built-in",
+                    cfg.name
+                );
                 anyhow::ensure!(!me.tools.contains_key(&name), "mcp server {:?}: duplicate tool {name:?}", cfg.name);
                 me.tools.insert(name, (idx, t));
             }

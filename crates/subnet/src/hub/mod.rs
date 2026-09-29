@@ -165,11 +165,7 @@ impl Hub {
             }
             ToHub::Request { id, agent, epoch, op } => {
                 let owns = self.owns(&*self.st.lock().await, conn, agent, epoch);
-                let result = if owns {
-                    self.op(&Addr::Agent(agent), op).await
-                } else {
-                    Err("stale epoch".into())
-                };
+                let result = if owns { self.op(&Addr::Agent(agent), op).await } else { Err("stale epoch".into()) };
                 self.send(conn, ToSpawner::Reply { id, result }).await;
                 Ok(())
             }
@@ -224,7 +220,13 @@ impl Hub {
         Ok(())
     }
 
-    async fn commit_one(&self, st: &mut State, id: AgentId, events: Vec<Event>, work: &mut VecDeque<Work>) -> Result<(), HubError> {
+    async fn commit_one(
+        &self,
+        st: &mut State,
+        id: AgentId,
+        events: Vec<Event>,
+        work: &mut VecDeque<Work>,
+    ) -> Result<(), HubError> {
         if events.is_empty() {
             return Ok(());
         }
@@ -260,7 +262,9 @@ impl Hub {
             work.extend(
                 st.agents
                     .iter()
-                    .filter(|(_, p)| p.spawner.is_none() && s.types.iter().any(|t| t.id() == p.a.spec.ty) && wants_runner(&p.a))
+                    .filter(|(_, p)| {
+                        p.spawner.is_none() && s.types.iter().any(|t| t.id() == p.a.spec.ty) && wants_runner(&p.a)
+                    })
                     .map(|(p, _)| Work::Place(*p)),
             );
         }
@@ -269,7 +273,10 @@ impl Hub {
             for addr in to {
                 match addr {
                     Addr::Agent(p) if Some(p) == parent => {
-                        work.push_back(Work::Commit(p, vec![Event::ChildReport { id, status, content: content.clone() }]));
+                        work.push_back(Work::Commit(
+                            p,
+                            vec![Event::ChildReport { id, status, content: content.clone() }],
+                        ));
                     }
                     Addr::Agent(x) if st.agents.contains_key(&x) => {
                         let ev = Event::Inbox { from: Addr::Agent(id), content: content.clone(), reply: true };
@@ -306,9 +313,11 @@ impl Hub {
         let conn = match free {
             Some(c) => c,
             None => {
-                let victim = st.spawners.iter().filter(|(_, s)| offering(s)).find_map(|(c, s)| {
-                    s.agents.iter().find(|v| !wants_runner(&st.agents[v].a)).map(|v| (*c, *v))
-                });
+                let victim = st
+                    .spawners
+                    .iter()
+                    .filter(|(_, s)| offering(s))
+                    .find_map(|(c, s)| s.agents.iter().find(|v| !wants_runner(&st.agents[v].a)).map(|v| (*c, *v)));
                 let Some((c, v)) = victim else {
                     tracing::debug!(%id, %ty, "no spawner for agent, pending");
                     return Ok(());
@@ -466,7 +475,8 @@ impl Hub {
 
     async fn spawn(&self, st: &mut State, caller: &Addr, ty: &str, prompt: String) -> Result<Value, HubError> {
         // Newest registration wins when several hashes share a name.
-        let Some(info) = st.spawners.values().flat_map(|s| &s.types).filter(|t| t.name == ty || t.id() == ty).last().cloned()
+        let Some(info) =
+            st.spawners.values().flat_map(|s| &s.types).filter(|t| t.name == ty || t.id() == ty).last().cloned()
         else {
             return bad(format!("no live spawner offers type {ty:?}"));
         };
@@ -587,9 +597,9 @@ fn list_types(st: &State) -> Value {
     for s in st.spawners.values() {
         let free = s.capacity.saturating_sub(s.agents.len() as u32);
         for t in &s.types {
-            let e = out.entry(t.id()).or_insert_with(|| {
-                json!({"name": t.name, "id": t.id(), "description": t.description, "spawners": 0, "free": 0})
-            });
+            let e = out.entry(t.id()).or_insert_with(
+                || json!({"name": t.name, "id": t.id(), "description": t.description, "spawners": 0, "free": 0}),
+            );
             e["spawners"] = json!(e["spawners"].as_u64().unwrap() + 1);
             e["free"] = json!(e["free"].as_u64().unwrap() + free as u64);
         }

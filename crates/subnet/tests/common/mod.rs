@@ -75,7 +75,10 @@ pub async fn db_url() -> String {
 }
 
 pub async fn recv(rx: &mut UnboundedReceiver<ToSpawner>) -> ToSpawner {
-    tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("timed out waiting for hub").expect("channel closed")
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for hub")
+        .expect("channel closed")
 }
 
 /// Asserts nothing arrives for a short while.

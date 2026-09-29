@@ -49,7 +49,11 @@ async fn spawner_over_websocket_gets_assignments_and_loses_them_on_disconnect() 
     let url = serve(hub.clone()).await;
 
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    send(&mut ws, &ToHub::Hello { name: "remote".into(), token: Some("tok".into()), types: vec![worker()], capacity: 2 }).await;
+    send(
+        &mut ws,
+        &ToHub::Hello { name: "remote".into(), token: Some("tok".into()), types: vec![worker()], capacity: 2 },
+    )
+    .await;
     assert_eq!(next(&mut ws).await, ToSpawner::Welcome);
 
     let id = id_of(&hub.op(&Addr::User, Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap());

@@ -24,7 +24,13 @@ async fn setup(token: Option<&str>) -> (String, MockLlm) {
         name: "helper".into(),
         description: "helps".into(),
         system: SYS.into(),
-        model: ModelConfig { base_url: llm.url.clone(), model: "m".into(), api_key_env: None, prefill: false, params: Default::default() },
+        model: ModelConfig {
+            base_url: llm.url.clone(),
+            model: "m".into(),
+            api_key_env: None,
+            prefill: false,
+            params: Default::default(),
+        },
         mcp: vec![],
         spawns: vec![],
         budget: Budget::default(),
@@ -115,7 +121,8 @@ async fn tail_filters_by_agent() {
     llm.say(SYS, &["a"]);
     llm.say(SYS, &["b"]);
     let u = Remote::connect(&base, None, "user").await.unwrap();
-    let first = u.call("spawn", json!({"type":"helper","prompt":"1"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    let first =
+        u.call("spawn", json!({"type":"helper","prompt":"1"})).await.unwrap()["id"].as_str().unwrap().to_string();
     u.call("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
     let seen = Arc::new(Mutex::new(vec![]));
     let s2 = seen.clone();

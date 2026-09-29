@@ -41,10 +41,7 @@ struct Sp {
 }
 
 async fn spawner(hub: &Hub, name: &str, types: Vec<TypeInfo>, capacity: u32) -> Sp {
-    let (conn, mut rx) = hub
-        .connect(ToHub::Hello { name: name.into(), token: None, types, capacity })
-        .await
-        .unwrap();
+    let (conn, mut rx) = hub.connect(ToHub::Hello { name: name.into(), token: None, types, capacity }).await.unwrap();
     assert_eq!(recv(&mut rx).await, ToSpawner::Welcome);
     Sp { conn, rx }
 }
@@ -175,7 +172,8 @@ async fn least_loaded_spawner_wins() {
 #[tokio::test]
 async fn bad_token_is_rejected() {
     let hub = Hub::open(&db_url().await, Some("secret".into())).await.unwrap();
-    let hello = |t: Option<&str>| ToHub::Hello { name: "s".into(), token: t.map(Into::into), types: vec![], capacity: 1 };
+    let hello =
+        |t: Option<&str>| ToHub::Hello { name: "s".into(), token: t.map(Into::into), types: vec![], capacity: 1 };
     assert!(hub.connect(hello(None)).await.is_err());
     assert!(hub.connect(hello(Some("wrong"))).await.is_err());
     assert!(hub.connect(hello(Some("secret"))).await.is_ok());
@@ -475,7 +473,9 @@ async fn paused_agents_give_up_their_slot_and_come_back_on_resume() {
     let a = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let ((_, ea), _) = next_assign(&mut sp).await;
     hub.op(&Addr::User, Op::Pause { id: a, mode: PauseMode::Hard, tree: false }).await.unwrap();
-    hub.handle(sp.conn, ToHub::Propose { agent: a, epoch: ea, events: vec![text("par"), Event::LlmAborted] }).await.unwrap();
+    hub.handle(sp.conn, ToHub::Propose { agent: a, epoch: ea, events: vec![text("par"), Event::LlmAborted] })
+        .await
+        .unwrap();
     assert_eq!(transcript(&hub, a).await["paused"], true);
     let b = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let ((got, _), revoked) = next_assign(&mut sp).await;
@@ -506,7 +506,9 @@ async fn agents_waiting_on_children_do_not_hold_a_slot() {
         arguments: Some(json!({"ids": [kid]}).to_string()),
     };
     let wait = Event::LlmDelta { delta: Delta { tool_calls: vec![call], ..Default::default() } };
-    hub.handle(sp.conn, ToHub::Propose { agent: boss_id, epoch: eb, events: vec![wait, Event::LlmDone] }).await.unwrap();
+    hub.handle(sp.conn, ToHub::Propose { agent: boss_id, epoch: eb, events: vec![wait, Event::LlmDone] })
+        .await
+        .unwrap();
     let ((got, _), revoked) = next_assign(&mut sp).await;
     assert_eq!((got, revoked), (kid, vec![boss_id]));
 }

@@ -27,7 +27,11 @@ fn bin() -> Command {
 }
 
 fn hub(db: &str, port: u16) -> Child {
-    bin().args(["hub", "--db", db, "--listen", &format!("127.0.0.1:{port}")]).env("SUBNET_TOKEN", "tok").spawn().unwrap()
+    bin()
+        .args(["hub", "--db", db, "--listen", &format!("127.0.0.1:{port}")])
+        .env("SUBNET_TOKEN", "tok")
+        .spawn()
+        .unwrap()
 }
 
 fn spawner(name: &str, port: u16, llm: &str) -> Child {
@@ -95,7 +99,8 @@ async fn killed_spawner_hands_agent_over_with_partial() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let id = r.call("spawn", json!({"type":"worker","prompt":"count"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    let id =
+        r.call("spawn", json!({"type":"worker","prompt":"count"})).await.unwrap()["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
         if partial_len(&r, &id).await >= 8 {
             break;
@@ -134,7 +139,8 @@ async fn killed_hub_restarts_and_spawner_reconnects() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let id = r.call("spawn", json!({"type":"worker","prompt":"greek"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    let id =
+        r.call("spawn", json!({"type":"worker","prompt":"greek"})).await.unwrap()["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
         if partial_len(&r, &id).await >= 6 {
             break;

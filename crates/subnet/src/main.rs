@@ -176,13 +176,26 @@ fn show_event(v: Value) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    // Servers log their work; client commands only problems.
+    let default = match cli.cmd {
+        Cmd::Hub(_) | Cmd::Spawner { .. } | Cmd::Dev { .. } => "info,rmcp=warn",
+        _ => "warn",
+    };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into()))
         .init();
-    let cli = Cli::parse();
     let token = cli.token.clone();
     let remote = || Remote::connect(&cli.hub, cli.token.as_deref(), &cli.who);
+    // One call, printed, then a clean close.
+    let one = async |tool: &str, args: Value| -> anyhow::Result<()> {
+        let r = remote().await?;
+        let v = r.call(tool, args).await;
+        r.close().await?;
+        print(&v?);
+        Ok(())
+    };
     let mode = |m: Mode| match m {
         Mode::Safe => "safe",
         Mode::Quick => "quick",
@@ -204,8 +217,8 @@ async fn main() -> anyhow::Result<()> {
             attach(hub, Arc::new(Spawner::new(&cfg).await?)).await?;
             std::future::pending::<()>().await;
         }
-        Cmd::Types => print(&remote().await?.call("list_types", Value::Null).await?),
-        Cmd::Agents => print(&remote().await?.call("list_agents", Value::Null).await?),
+        Cmd::Types => one("list_types", Value::Null).await?,
+        Cmd::Agents => one("list_agents", Value::Null).await?,
         Cmd::Spawn { ty, prompt, wait } => {
             let r = remote().await?;
             let v = r.call("spawn", json!({"type": ty, "prompt": prompt})).await?;
@@ -214,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 print(&v);
             }
+            r.close().await?;
         }
         Cmd::Send { to, content, wait } => {
             let r = remote().await?;
@@ -224,20 +238,17 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 print(&v);
             }
+            r.close().await?;
         }
-        Cmd::Inbox { timeout_ms } => {
-            print(&remote().await?.call("wait_inbox", json!({"timeout_ms": timeout_ms})).await?)
-        }
-        Cmd::Pause { id, mode: m, tree } => {
-            print(&remote().await?.call("pause", json!({"id": id, "mode": mode(m), "tree": tree})).await?)
-        }
-        Cmd::Resume { id, tree } => print(&remote().await?.call("resume", json!({"id": id, "tree": tree})).await?),
-        Cmd::Cancel { id } => print(&remote().await?.call("cancel", json!({"id": id})).await?),
+        Cmd::Inbox { timeout_ms } => one("wait_inbox", json!({"timeout_ms": timeout_ms})).await?,
+        Cmd::Pause { id, mode: m, tree } => one("pause", json!({"id": id, "mode": mode(m), "tree": tree})).await?,
+        Cmd::Resume { id, tree } => one("resume", json!({"id": id, "tree": tree})).await?,
+        Cmd::Cancel { id } => one("cancel", json!({"id": id})).await?,
         Cmd::Approve { id, call_id, deny } => {
-            print(&remote().await?.call("approve", json!({"id": id, "call_id": call_id, "approved": !deny})).await?)
+            one("approve", json!({"id": id, "call_id": call_id, "approved": !deny})).await?
         }
-        Cmd::Fork { id, at } => print(&remote().await?.call("fork", json!({"id": id, "at": at})).await?),
-        Cmd::Transcript { id } => print(&remote().await?.call("transcript", json!({"id": id})).await?),
+        Cmd::Fork { id, at } => one("fork", json!({"id": id, "at": at})).await?,
+        Cmd::Transcript { id } => one("transcript", json!({"id": id})).await?,
         Cmd::Tail { id } => tail(&cli.hub, cli.token.as_deref(), id, show_event).await?,
     }
     Ok(())

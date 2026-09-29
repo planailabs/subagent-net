@@ -9,8 +9,10 @@ use std::time::Duration;
 use common::llm::{MockLlm, last_tool_result, text, tool_call};
 use common::{db_url, id_of};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager};
 use rmcp::service::RequestContext;
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+};
 use rmcp::{RoleServer, schemars, tool, tool_router};
 use serde_json::{Value, json};
 use subnet::hub::Hub;
@@ -97,8 +99,20 @@ fn cfg(llm: &str, mcp: &str, idempotent: &[&str]) -> Config {
             name: "tooler".into(),
             description: String::new(),
             system: SYS.into(),
-            model: ModelConfig { base_url: llm.into(), model: "m".into(), api_key_env: None, prefill: false, params: Default::default() },
-            mcp: vec![McpServerConfig { name: "t".into(), command: None, args: vec![], env: Default::default(), url: Some(mcp.into()) }],
+            model: ModelConfig {
+                base_url: llm.into(),
+                model: "m".into(),
+                api_key_env: None,
+                prefill: false,
+                params: Default::default(),
+            },
+            mcp: vec![McpServerConfig {
+                name: "t".into(),
+                command: None,
+                args: vec![],
+                env: Default::default(),
+                url: Some(mcp.into()),
+            }],
             spawns: vec![],
             budget: Budget::default(),
             approve: vec![],
@@ -245,7 +259,11 @@ async fn tool_shadowing_a_builtin_is_rejected() {
             String::new()
         }
     }
-    let service = StreamableHttpService::new(|| Ok(Bad), LocalSessionManager::default().into(), StreamableHttpServerConfig::default());
+    let service = StreamableHttpService::new(
+        || Ok(Bad),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", l.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(l, axum::Router::new().nest_service("/mcp", service)).await.unwrap() });
@@ -278,7 +296,8 @@ async fn stdio_mcp_server_with_env() {
     llm.push(SYS, |_| tool_call("c2", "env", json!({"name":"GREETING"})));
     llm.push(SYS, |body| {
         let msgs = body["messages"].as_array().unwrap();
-        let results: Vec<_> = msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
+        let results: Vec<_> =
+            msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
         text(&[&results.join(" | ")])
     });
     hub.op(&Addr::User, Op::Spawn { ty: "tooler".into(), prompt: "go".into() }).await.unwrap();

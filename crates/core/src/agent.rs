@@ -64,18 +64,47 @@ pub enum Status {
 pub enum Event {
     /// `reply` marks an automatic turn-end answer: it wakes the agent but its
     /// sender is not owed an answer back, so agents can't ping-pong forever.
-    Inbox { from: Addr, content: String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] reply: bool },
-    LlmDelta { delta: Delta },
+    Inbox {
+        from: Addr,
+        content: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reply: bool,
+    },
+    LlmDelta {
+        delta: Delta,
+    },
     LlmDone,
     LlmAborted,
-    LlmFailed { error: String },
-    ToolResult { call_id: String, content: String, #[serde(default)] is_error: bool },
-    ToolAborted { call_id: String },
-    Approval { call_id: String, approved: bool },
+    LlmFailed {
+        error: String,
+    },
+    ToolResult {
+        call_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
+    ToolAborted {
+        call_id: String,
+    },
+    Approval {
+        call_id: String,
+        approved: bool,
+    },
     /// `reserved` tokens are carved out of this agent's budget for the child.
-    ChildSpawned { id: AgentId, #[serde(default)] reserved: u64 },
-    ChildReport { id: AgentId, status: Status, content: String },
-    PauseRequested { mode: PauseMode },
+    ChildSpawned {
+        id: AgentId,
+        #[serde(default)]
+        reserved: u64,
+    },
+    ChildReport {
+        id: AgentId,
+        status: Status,
+        content: String,
+    },
+    PauseRequested {
+        mode: PauseMode,
+    },
     Resumed,
     Cancelled,
     /// The agent was (re)placed on a spawner: whatever was in flight before is
@@ -105,22 +134,33 @@ pub enum Effect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ToolWait {
-    Ready { retry: bool },
+    Ready {
+        retry: bool,
+    },
     Running,
     Approval,
     /// Approved by the user, not started yet (e.g. paused meanwhile).
     Approved,
-    Children { ids: Vec<AgentId> },
+    Children {
+        ids: Vec<AgentId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
     Idle,
-    Thinking { running: bool },
+    Thinking {
+        running: bool,
+    },
     /// Tool calls of the last assistant message; the front one is current.
-    Tools { queue: VecDeque<ToolCall>, wait: ToolWait },
-    Failed { error: String },
+    Tools {
+        queue: VecDeque<ToolCall>,
+        wait: ToolWait,
+    },
+    Failed {
+        error: String,
+    },
     Cancelled,
 }
 
@@ -416,7 +456,8 @@ impl Agent {
         struct Args {
             ids: Vec<Addr>,
         }
-        let args: Args = serde_json::from_str(&call.function.arguments).map_err(|e| format!("error: bad arguments: {e}"))?;
+        let args: Args =
+            serde_json::from_str(&call.function.arguments).map_err(|e| format!("error: bad arguments: {e}"))?;
         let mut ids = vec![];
         for a in args.ids {
             match a {

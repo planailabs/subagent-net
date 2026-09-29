@@ -34,6 +34,12 @@ impl Remote {
         Ok(Self { client })
     }
 
+    /// Closes the MCP session cleanly.
+    pub async fn close(self) -> anyhow::Result<()> {
+        self.client.cancel().await?;
+        Ok(())
+    }
+
     /// Calls a hub tool and parses its JSON answer.
     pub async fn call(&self, tool: &str, args: Value) -> anyhow::Result<Value> {
         let mut p = CallToolRequestParams::new(tool.to_string());

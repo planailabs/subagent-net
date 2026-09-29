@@ -507,12 +507,16 @@ fn llm_failure_then_resume_continues_partial() {
 fn token_budget_fails_the_agent() {
     let mut h = H::new(Spec { budget: Budget { max_tokens: Some(10), ..Default::default() }, ..spec() });
     h.user("x");
-    h.ev(Event::LlmDelta { delta: Delta { usage: Some(Usage { prompt_tokens: 8, completion_tokens: 4 }), ..Default::default() } });
+    h.ev(Event::LlmDelta {
+        delta: Delta { usage: Some(Usage { prompt_tokens: 8, completion_tokens: 4 }), ..Default::default() },
+    });
     h.call(0, "c1", "a", "{}");
     h.done();
     assert_eq!(h.a.usage.total(), 12);
     let fx = h.result("c1", "r");
-    assert!(matches!(fx.as_slice(), [Effect::Report { status: Status::Failed, content, .. }] if content.contains("budget")));
+    assert!(
+        matches!(fx.as_slice(), [Effect::Report { status: Status::Failed, content, .. }] if content.contains("budget"))
+    );
 }
 
 #[test]

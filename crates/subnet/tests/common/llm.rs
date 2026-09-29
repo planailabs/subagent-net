@@ -76,9 +76,11 @@ async fn handle(State((inner, gap)): State<Shared>, Json(body): Json<Value>) -> 
 }
 
 pub fn text(parts: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> =
-        parts.iter().map(|p| json!({"choices":[{"delta":{"content":p}}]}).to_string()).collect();
-    v.push(json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}).to_string());
+    let mut v: Vec<String> = parts.iter().map(|p| json!({"choices":[{"delta":{"content":p}}]}).to_string()).collect();
+    v.push(
+        json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}})
+            .to_string(),
+    );
     v.push("[DONE]".into());
     v
 }

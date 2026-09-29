@@ -229,7 +229,10 @@ mod tests {
 
     #[test]
     fn parses_text_chunk() {
-        let d = parse_chunk(r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}"#).unwrap();
+        let d = parse_chunk(
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}"#,
+        )
+        .unwrap();
         assert_eq!(d.content.as_deref(), Some("hi"));
         assert!(d.tool_calls.is_empty());
     }
@@ -248,7 +251,8 @@ mod tests {
 
     #[test]
     fn parses_usage_only_chunk() {
-        let d = parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#).unwrap();
+        let d = parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#)
+            .unwrap();
         assert_eq!(d.usage, Some(Usage { prompt_tokens: 5, completion_tokens: 2 }));
     }
 

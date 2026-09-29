@@ -40,9 +40,8 @@ impl TypeRt {
         let llm = Client::from_env(cfg.model.clone())
             .map_err(|e| anyhow::anyhow!("type {}: api key env {:?}: {e}", cfg.name, cfg.model.api_key_env))?;
         let builtins: Vec<_> = builtin_tools().into_iter().map(|t| t.name).collect();
-        let mcp = mcp::McpTools::connect(&cfg.mcp, &builtins)
-            .await
-            .map_err(|e| anyhow::anyhow!("type {}: {e}", cfg.name))?;
+        let mcp =
+            mcp::McpTools::connect(&cfg.mcp, &builtins).await.map_err(|e| anyhow::anyhow!("type {}: {e}", cfg.name))?;
         Ok(Self { cfg, llm, mcp })
     }
 
@@ -88,7 +87,10 @@ pub struct Spawner {
 
 impl Spawner {
     pub async fn new(cfg: &Config) -> anyhow::Result<Self> {
-        let token = cfg.token_env.as_deref().map(std::env::var).transpose()?;
+        let token = match cfg.token_env.as_deref() {
+            Some(var) => Some(std::env::var(var).map_err(|e| anyhow::anyhow!("token_env {var}: {e}"))?),
+            None => None,
+        };
         let mut types = HashMap::new();
         for t in &cfg.types {
             let rt = TypeRt::new(t.clone()).await?;
@@ -170,7 +172,15 @@ struct Runner {
 }
 
 impl Runner {
-    fn new(id: AgentId, epoch: u64, spec: Spec, events: &[Event], rt: Arc<TypeRt>, link: Arc<Link>, life: CancellationToken) -> Self {
+    fn new(
+        id: AgentId,
+        epoch: u64,
+        spec: Spec,
+        events: &[Event],
+        rt: Arc<TypeRt>,
+        link: Arc<Link>,
+        life: CancellationToken,
+    ) -> Self {
         // The hub ends every assignment's log with `Recovered`; its effects
         // are where this runner starts.
         let (last, prefix) = events.split_last().expect("assignment without events");

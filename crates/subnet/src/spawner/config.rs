@@ -161,7 +161,9 @@ model = { base_url = "https://api.openai.com/v1", model = "gpt-5", api_key_env =
 
     #[test]
     fn rejects_bad_configs() {
-        let dup = format!("{EXAMPLE}\n[[type]]\nname = \"coder\"\nsystem = \"\"\nmodel = {{ base_url = \"x\", model = \"y\" }}\n");
+        let dup = format!(
+            "{EXAMPLE}\n[[type]]\nname = \"coder\"\nsystem = \"\"\nmodel = {{ base_url = \"x\", model = \"y\" }}\n"
+        );
         assert!(Config::parse(&dup).unwrap_err().to_string().contains("duplicate"));
         let both = EXAMPLE.replace(r#"command = "mcp-fs""#, r#"command = "mcp-fs", url = "http://x""#);
         assert!(Config::parse(&both).is_err());
