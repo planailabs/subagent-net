@@ -78,6 +78,9 @@ pub enum Event {
     PauseRequested { mode: PauseMode },
     Resumed,
     Cancelled,
+    /// The agent was (re)placed on a spawner: whatever was in flight before is
+    /// gone. Logged so every replica folds the same state.
+    Recovered,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,9 +187,9 @@ impl Agent {
         a
     }
 
-    /// After a replay, whatever was in flight is gone: mark it so and return the
-    /// effects that continue from here.
-    pub fn recover(&mut self) -> Vec<Effect> {
+    /// Whatever was in flight is gone: mark it so and return the effects that
+    /// continue from here. Applied via `Event::Recovered`.
+    fn recover(&mut self) -> Vec<Effect> {
         match &mut self.phase {
             Phase::Thinking { running } => *running = false,
             Phase::Tools { wait: w @ ToolWait::Running, .. } => *w = ToolWait::Ready { retry: true },
@@ -329,6 +332,7 @@ impl Agent {
                 }
                 self.advance(&mut fx);
             }
+            Event::Recovered => fx = self.recover(),
             Event::Cancelled => {
                 if self.terminal() {
                     return fx;

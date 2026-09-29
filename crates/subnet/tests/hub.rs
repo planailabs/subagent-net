@@ -87,7 +87,7 @@ async fn spawned_agent_waits_for_a_spawner_then_is_assigned() {
     let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let (agent, epoch, events) = expect_assign(&mut sp).await;
     assert_eq!((agent, epoch), (id, 1));
-    assert_eq!(events, vec![Event::Inbox { from: Addr::User, content: "go".into(), reply: false }]);
+    assert_eq!(events, vec![Event::Inbox { from: Addr::User, content: "go".into(), reply: false }, Event::Recovered]);
 }
 
 #[tokio::test]
@@ -99,7 +99,8 @@ async fn pending_agents_are_placed_when_spawner_connects() {
     hub.disconnect(a.conn).await;
     let mut b = spawner(&hub, "b", vec![worker()], 4).await;
     let (agent, epoch, events) = expect_assign(&mut b).await;
-    assert_eq!((agent, epoch, events.len()), (id, 2, 1));
+    // inbox, recovered (on a), recovered (on b)
+    assert_eq!((agent, epoch, events.len()), (id, 2, 3));
 }
 
 #[tokio::test]
@@ -109,8 +110,8 @@ async fn proposals_are_committed_and_echoed() {
     let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("hi"), Event::LlmDone] }).await.unwrap();
-    assert_eq!(expect_commit(&mut sp).await, (id, 2, text("hi")));
-    assert_eq!(expect_commit(&mut sp).await, (id, 3, Event::LlmDone));
+    assert_eq!(expect_commit(&mut sp).await, (id, 3, text("hi")));
+    assert_eq!(expect_commit(&mut sp).await, (id, 4, Event::LlmDone));
     let t = transcript(&hub, id).await;
     assert_eq!(t["messages"][1]["content"], "hi");
     assert_eq!(t["phase"], "idle");
@@ -131,7 +132,7 @@ async fn stale_epoch_writes_are_fenced() {
     hub.handle(a.conn, ToHub::Propose { agent: id, epoch: 1, events: vec![text("stale")] }).await.unwrap();
     hub.handle(b.conn, ToHub::Propose { agent: id, epoch: 1, events: vec![text("stale")] }).await.unwrap();
     assert_eq!(recv(&mut b.rx).await, ToSpawner::Revoke { agent: id });
-    assert_eq!(transcript(&hub, id).await["seq"], 1);
+    assert_eq!(transcript(&hub, id).await["seq"], 3, "inbox + two recoveries, nothing stale");
 }
 
 #[tokio::test]
@@ -142,7 +143,7 @@ async fn spawner_may_only_propose_its_own_events() {
     let (_, epoch, _) = expect_assign(&mut sp).await;
     let forged = Event::Inbox { from: Addr::User, content: "forged".into(), reply: false };
     assert!(hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![forged] }).await.is_err());
-    assert_eq!(transcript(&hub, id).await["seq"], 1);
+    assert_eq!(transcript(&hub, id).await["seq"], 2);
 }
 
 #[tokio::test]
@@ -395,11 +396,12 @@ async fn hub_restart_reloads_state_and_keeps_fencing() {
     let hub = Hub::open(&url, None).await.unwrap();
     let after = transcript(&hub, id).await;
     assert_eq!(after["partial"], before["partial"]);
-    assert_eq!(after["seq"], 2);
+    assert_eq!(after["seq"], 3);
     let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
     let (_, epoch2, events) = expect_assign(&mut sp).await;
     assert_eq!(epoch2, epoch + 1, "epoch survives restarts");
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3], Event::Recovered);
 }
 
 #[tokio::test]
@@ -409,9 +411,10 @@ async fn fork_copies_a_prefix() {
     let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("a"), Event::LlmDone] }).await.unwrap();
-    let f = id_of(&hub.op(&Addr::User, Op::Fork { id, at: Some(2) }).await.unwrap());
+    // inbox, recovered, "a" | done
+    let f = id_of(&hub.op(&Addr::User, Op::Fork { id, at: Some(3) }).await.unwrap());
     let t = transcript(&hub, f).await;
-    assert_eq!(t["seq"], 2);
+    assert_eq!(t["seq"], 4, "the fork is placed, which logs a recovery");
     assert_eq!(t["partial"]["content"], "a");
     assert_eq!(t["parent"], Value::Null);
     assert!(hub.op(&Addr::Agent(id), Op::Fork { id, at: None }).await.is_err());
@@ -425,4 +428,91 @@ async fn list_types_aggregates_spawners() {
     let v = hub.op(&Addr::User, Op::ListTypes).await.unwrap();
     let w = v.as_array().unwrap().iter().find(|t| t["name"] == "worker").unwrap();
     assert_eq!((w["spawners"].as_u64(), w["free"].as_u64()), (Some(2), Some(5)));
+}
+
+async fn finish_turn(hub: &Hub, sp: &mut Sp, id: AgentId, epoch: u64, s: &str) {
+    hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text(s), Event::LlmDone] }).await.unwrap();
+}
+
+/// Drains messages until an Assign arrives; returns it and any Revokes seen.
+async fn next_assign(sp: &mut Sp) -> ((AgentId, u64), Vec<AgentId>) {
+    let mut revoked = vec![];
+    loop {
+        match recv(&mut sp.rx).await {
+            ToSpawner::Assign { agent, epoch, .. } => return ((agent, epoch), revoked),
+            ToSpawner::Revoke { agent } => revoked.push(agent),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn idle_agents_are_evicted_for_agents_with_work() {
+    let hub = hub().await;
+    let mut sp = spawner(&hub, "s", vec![worker()], 1).await;
+    let a = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let ((_, ea), _) = next_assign(&mut sp).await;
+    finish_turn(&hub, &mut sp, a, ea, "a done").await;
+    // b needs the only slot: a is idle, so it's evicted.
+    let b = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let ((got, eb), revoked) = next_assign(&mut sp).await;
+    assert_eq!((got, revoked), (b, vec![a]));
+    // a gets a message while b is busy: it waits for a slot...
+    hub.op(&Addr::User, Op::Send { to: Addr::Agent(a), content: "again".into() }).await.unwrap();
+    quiet(&mut sp.rx).await;
+    assert_eq!(transcript(&hub, a).await["spawner"], Value::Null);
+    // ...which frees up as soon as b goes idle.
+    finish_turn(&hub, &mut sp, b, eb, "b done").await;
+    let ((got, ea2), revoked) = next_assign(&mut sp).await;
+    assert_eq!((got, revoked), (a, vec![b]));
+    assert_eq!(ea2, ea + 1);
+}
+
+#[tokio::test]
+async fn paused_agents_give_up_their_slot_and_come_back_on_resume() {
+    let hub = hub().await;
+    let mut sp = spawner(&hub, "s", vec![worker()], 1).await;
+    let a = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let ((_, ea), _) = next_assign(&mut sp).await;
+    hub.op(&Addr::User, Op::Pause { id: a, mode: PauseMode::Hard, tree: false }).await.unwrap();
+    hub.handle(sp.conn, ToHub::Propose { agent: a, epoch: ea, events: vec![text("par"), Event::LlmAborted] }).await.unwrap();
+    assert_eq!(transcript(&hub, a).await["paused"], true);
+    let b = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let ((got, _), revoked) = next_assign(&mut sp).await;
+    assert_eq!((got, revoked), (b, vec![a]));
+    hub.op(&Addr::User, Op::Resume { id: a, tree: false }).await.unwrap();
+    // b is busy (thinking): a waits; cancel b and a gets the slot.
+    hub.op(&Addr::User, Op::Cancel { id: b }).await.unwrap();
+    let ((got, _), _) = next_assign(&mut sp).await;
+    assert_eq!(got, a);
+    assert_eq!(transcript(&hub, a).await["partial"]["content"], "par");
+}
+
+#[tokio::test]
+async fn agents_waiting_on_children_do_not_hold_a_slot() {
+    let hub = hub().await;
+    let mut b = boss();
+    b.budget.max_tokens = None;
+    let mut sp = spawner(&hub, "s", vec![b, worker()], 1).await;
+    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let ((_, eb), _) = next_assign(&mut sp).await;
+    let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    // The boss is thinking, so the kid can't run yet.
+    quiet_except_commits(&mut sp).await;
+    let call = subnet_core::chat::ToolCallDelta {
+        index: 0,
+        id: Some("w".into()),
+        name: Some("wait_for".into()),
+        arguments: Some(json!({"ids": [kid]}).to_string()),
+    };
+    let wait = Event::LlmDelta { delta: Delta { tool_calls: vec![call], ..Default::default() } };
+    hub.handle(sp.conn, ToHub::Propose { agent: boss_id, epoch: eb, events: vec![wait, Event::LlmDone] }).await.unwrap();
+    let ((got, _), revoked) = next_assign(&mut sp).await;
+    assert_eq!((got, revoked), (kid, vec![boss_id]));
+}
+
+async fn quiet_except_commits(sp: &mut Sp) {
+    while let Ok(Some(m)) = tokio::time::timeout(Duration::from_millis(100), sp.rx.recv()).await {
+        assert!(matches!(m, ToSpawner::Commit { .. }), "unexpected {m:?}");
+    }
 }

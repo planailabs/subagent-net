@@ -6,7 +6,7 @@ pub mod db;
 pub mod http;
 pub mod mcp;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use uuid::Uuid;
 
 use subnet_core::addr::{Addr, AgentId};
-use subnet_core::agent::{Agent, Budget, Effect, Event, Phase, Spec, ToolWait};
+use subnet_core::agent::{Agent, Budget, Effect, Event, PauseMode, Phase, Spec, ToolWait};
 use subnet_core::proto::{Mail, Op, ToHub, ToSpawner, TypeInfo};
 
 use db::Db;
@@ -195,96 +195,139 @@ impl Hub {
         }
     }
 
-    // ---------- log ----------
+    // ---------- log and placement ----------
 
-    /// Appends events to an agent's log, updates the replica, forwards them to
-    /// the owning spawner and routes resulting reports. Reports are routed here,
-    /// from the hub's replica, so each is delivered exactly once whatever
-    /// happens to the spawner.
     async fn commit(&self, st: &mut State, id: AgentId, events: Vec<Event>) -> Result<(), HubError> {
-        let mut work = std::collections::VecDeque::from([(id, events)]);
-        while let Some((id, events)) = work.pop_front() {
-            if events.is_empty() {
-                continue;
-            }
-            let Some(r) = st.agents.get_mut(&id) else { return bad(format!("no agent {id}")) };
-            self.db.append(id, r.seq + 1, &events).await?;
-            let mut reports = vec![];
-            for event in events {
-                r.seq += 1;
-                for fx in r.a.apply(&event) {
-                    if let Effect::Report { to, status, content } = fx {
-                        reports.push((to, status, content));
-                    }
-                }
-                let seq = r.seq;
-                if let Some(s) = r.spawner.and_then(|c| st.spawners.get(&c)) {
-                    let _ = s.tx.send(ToSpawner::Commit { agent: id, seq, event: event.clone() });
-                }
-                let _ = self.notices.send(Notice { agent: id, seq, event });
-            }
-            if r.a.phase == Phase::Cancelled
-                && let Some(c) = r.spawner.take()
-                && let Some(s) = st.spawners.get_mut(&c)
-            {
-                s.agents.remove(&id);
-                let _ = s.tx.send(ToSpawner::Revoke { agent: id });
-            }
-            let parent = r.a.spec.parent;
-            for (to, status, content) in reports {
-                for addr in to {
-                    match addr {
-                        Addr::Agent(p) if Some(p) == parent => {
-                            work.push_back((p, vec![Event::ChildReport { id, status, content: content.clone() }]));
-                        }
-                        Addr::Agent(x) if st.agents.contains_key(&x) => {
-                            work.push_back((x, vec![Event::Inbox { from: Addr::Agent(id), content: content.clone(), reply: true }]));
-                        }
-                        Addr::Agent(x) => tracing::warn!(from = %id, to = %x, "report to unknown agent dropped"),
-                        other => {
-                            let mail = Mail { from: Addr::Agent(id), content: content.clone(), status: Some(status) };
-                            self.put_mail(&other, &mail).await?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.run(st, vec![Work::Commit(id, events)]).await
     }
-
-    // ---------- placement ----------
 
     async fn place_pending(&self, st: &mut State) -> Result<(), HubError> {
-        let pending: Vec<_> = st
-            .agents
-            .iter()
-            .filter(|(_, r)| r.spawner.is_none() && r.a.phase != Phase::Cancelled)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in pending {
-            self.place(st, id).await?;
+        let pending = st.agents.iter().filter(|(_, r)| r.spawner.is_none()).map(|(id, _)| Work::Place(*id)).collect();
+        self.run(st, pending).await
+    }
+
+    /// Processes commits and placements until nothing follows from them.
+    ///
+    /// A commit appends events to an agent's log, updates the replica,
+    /// forwards the events to the owning spawner and routes resulting reports.
+    /// Reports are routed here, from the hub's replica, so each is delivered
+    /// exactly once whatever happens to the spawner. An unassigned agent that
+    /// now has work is placed.
+    async fn run(&self, st: &mut State, work: Vec<Work>) -> Result<(), HubError> {
+        let mut work = std::collections::VecDeque::from(work);
+        while let Some(w) = work.pop_front() {
+            match w {
+                Work::Commit(id, events) => self.commit_one(st, id, events, &mut work).await?,
+                Work::Place(id) => self.place_one(st, id, &mut work).await?,
+            }
         }
         Ok(())
     }
 
-    /// Assigns an agent to the least-loaded live spawner offering its exact
-    /// type. Without one it stays pending until such a spawner connects.
-    async fn place(&self, st: &mut State, id: AgentId) -> Result<(), HubError> {
+    async fn commit_one(&self, st: &mut State, id: AgentId, events: Vec<Event>, work: &mut VecDeque<Work>) -> Result<(), HubError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let Some(r) = st.agents.get_mut(&id) else { return bad(format!("no agent {id}")) };
+        self.db.append(id, r.seq + 1, &events).await?;
+        let mut reports = vec![];
+        for event in events {
+            r.seq += 1;
+            for fx in r.a.apply(&event) {
+                if let Effect::Report { to, status, content } = fx {
+                    reports.push((to, status, content));
+                }
+            }
+            let seq = r.seq;
+            if let Some(s) = r.spawner.and_then(|c| st.spawners.get(&c)) {
+                let _ = s.tx.send(ToSpawner::Commit { agent: id, seq, event: event.clone() });
+            }
+            let _ = self.notices.send(Notice { agent: id, seq, event });
+        }
+        let was_on = r.spawner;
+        if r.a.phase == Phase::Cancelled {
+            unassign(st, id);
+        }
         let r = &st.agents[&id];
+        if r.spawner.is_none() && wants_runner(&r.a) {
+            work.push_back(Work::Place(id));
+        } else if let Some(conn) = was_on
+            && !wants_runner(&r.a)
+            && let Some(s) = st.spawners.get(&conn)
+        {
+            // Its slot can be taken over by an agent waiting for one.
+            // ponytail: O(agents) scan per idle transition; index pending agents by type if it shows up.
+            work.extend(
+                st.agents
+                    .iter()
+                    .filter(|(_, p)| p.spawner.is_none() && s.types.iter().any(|t| t.id() == p.a.spec.ty) && wants_runner(&p.a))
+                    .map(|(p, _)| Work::Place(*p)),
+            );
+        }
+        let parent = r.a.spec.parent;
+        for (to, status, content) in reports {
+            for addr in to {
+                match addr {
+                    Addr::Agent(p) if Some(p) == parent => {
+                        work.push_back(Work::Commit(p, vec![Event::ChildReport { id, status, content: content.clone() }]));
+                    }
+                    Addr::Agent(x) if st.agents.contains_key(&x) => {
+                        let ev = Event::Inbox { from: Addr::Agent(id), content: content.clone(), reply: true };
+                        work.push_back(Work::Commit(x, vec![ev]));
+                    }
+                    Addr::Agent(x) => tracing::warn!(from = %id, to = %x, "report to unknown agent dropped"),
+                    other => {
+                        let mail = Mail { from: Addr::Agent(id), content: content.clone(), status: Some(status) };
+                        self.put_mail(&other, &mail).await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Assigns an agent that wants a runner to the least-loaded live spawner
+    /// offering its exact type, evicting an agent with nothing to do if every
+    /// such spawner is full. Without a spawner the agent stays pending until
+    /// one connects; agents with nothing to do stay unassigned and cost nothing.
+    async fn place_one(&self, st: &mut State, id: AgentId, work: &mut VecDeque<Work>) -> Result<(), HubError> {
+        let r = &st.agents[&id];
+        if r.spawner.is_some() || !wants_runner(&r.a) {
+            return Ok(());
+        }
         let ty = r.a.spec.ty.clone();
-        let Some((&conn, _)) = st
+        let offering = |s: &SpawnerRec| s.types.iter().any(|t| t.id() == ty);
+        let free = st
             .spawners
             .iter()
-            .filter(|(_, s)| s.types.iter().any(|t| t.id() == ty) && (s.agents.len() as u32) < s.capacity)
+            .filter(|(_, s)| offering(s) && (s.agents.len() as u32) < s.capacity)
             .min_by_key(|(c, s)| (s.agents.len(), **c))
-        else {
-            tracing::debug!(%id, %ty, "no spawner for agent, pending");
-            return Ok(());
+            .map(|(c, _)| *c);
+        let conn = match free {
+            Some(c) => c,
+            None => {
+                let victim = st.spawners.iter().filter(|(_, s)| offering(s)).find_map(|(c, s)| {
+                    s.agents.iter().find(|v| !wants_runner(&st.agents[v].a)).map(|v| (*c, *v))
+                });
+                let Some((c, v)) = victim else {
+                    tracing::debug!(%id, %ty, "no spawner for agent, pending");
+                    return Ok(());
+                };
+                tracing::info!(agent = %v, "evicting idle agent to make room");
+                unassign(st, v);
+                c
+            }
         };
+        // Whatever ran before is gone; log that so every replica agrees.
+        self.commit_one(st, id, vec![Event::Recovered], work).await?;
+        work.retain(|w| !matches!(w, Work::Place(p) if *p == id));
+        if !wants_runner(&st.agents[&id].a) {
+            return Ok(()); // e.g. recovery ran it out of budget
+        }
+        let r = st.agents.get_mut(&id).unwrap();
         let epoch = r.epoch + 1;
         self.db.set_epoch(id, epoch).await?;
         let events = self.db.events(id, 0).await?;
-        let r = st.agents.get_mut(&id).unwrap();
         r.epoch = epoch;
         r.spawner = Some(conn);
         let s = st.spawners.get_mut(&conn).unwrap();
@@ -365,7 +408,6 @@ impl Hub {
                 let a = Agent::new(new, spec);
                 st.agents.insert(new, AgentRec { a, seq: 0, epoch: 0, spawner: None });
                 self.commit(st, new, events).await?;
-                self.place(st, new).await?;
                 Ok(json!({"id": new}))
             }
             Op::Transcript { id } => {
@@ -471,8 +513,42 @@ impl Hub {
             self.commit(st, p, vec![Event::ChildSpawned { id, reserved }]).await?;
         }
         self.commit(st, id, vec![Event::Inbox { from: caller.clone(), content: prompt, reply: false }]).await?;
-        self.place(st, id).await?;
         Ok(json!({"id": id, "type": info.id()}))
+    }
+}
+
+enum Work {
+    Commit(AgentId, Vec<Event>),
+    Place(AgentId),
+}
+
+/// Takes an agent off its spawner.
+fn unassign(st: &mut State, id: AgentId) {
+    if let Some(c) = st.agents.get_mut(&id).and_then(|r| r.spawner.take())
+        && let Some(s) = st.spawners.get_mut(&c)
+    {
+        s.agents.remove(&id);
+        let _ = s.tx.send(ToSpawner::Revoke { agent: id });
+    }
+}
+
+/// Does this agent need a spawner right now? Idle, paused, failed or waiting
+/// (on children or approval) agents don't: an event that gives them work
+/// places them again.
+fn wants_runner(a: &Agent) -> bool {
+    if a.inflight() {
+        return true;
+    }
+    let open = match a.pause {
+        None => true,
+        Some(PauseMode::Safe) => a.phase != Phase::Idle,
+        Some(_) => false,
+    };
+    open && match &a.phase {
+        Phase::Idle => !a.inbox.is_empty() || a.children.values().any(|r| !r.is_empty()),
+        Phase::Thinking { .. } => true,
+        Phase::Tools { wait, .. } => matches!(wait, ToolWait::Ready { .. } | ToolWait::Approved),
+        Phase::Failed { .. } | Phase::Cancelled => false,
     }
 }
 

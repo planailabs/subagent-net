@@ -171,8 +171,14 @@ struct Runner {
 
 impl Runner {
     fn new(id: AgentId, epoch: u64, spec: Spec, events: &[Event], rt: Arc<TypeRt>, link: Arc<Link>, life: CancellationToken) -> Self {
-        let mut a = Agent::replay(id, spec, events);
-        let startup = a.recover();
+        // The hub ends every assignment's log with `Recovered`; its effects
+        // are where this runner starts.
+        let (last, prefix) = events.split_last().expect("assignment without events");
+        if *last != Event::Recovered {
+            tracing::error!(agent = %id, ?last, "assignment does not end with Recovered");
+        }
+        let mut a = Agent::replay(id, spec, prefix);
+        let startup = a.apply(last);
         let inflight = life.child_token();
         Self { id, epoch, a, seq: events.len() as u64, rt, link, life, inflight, startup }
     }

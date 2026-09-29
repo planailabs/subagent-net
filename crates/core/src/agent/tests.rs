@@ -51,13 +51,12 @@ impl H {
     fn resume(&mut self) -> Vec<Effect> {
         self.ev(Event::Resumed)
     }
-    /// Crash + restart: replay the log from scratch and recover.
+    /// Crash + restart: replay the log from scratch, then the hub logs `Recovered`.
     fn crash(&mut self) -> Vec<Effect> {
-        let mut a = Agent::replay(self.a.id, self.a.spec.clone(), &self.log);
+        let a = Agent::replay(self.a.id, self.a.spec.clone(), &self.log);
         assert_eq!(a, self.a, "replay must reproduce the live state");
-        let fx = a.recover();
         self.a = a;
-        fx
+        self.ev(Event::Recovered)
     }
     fn contents(&self) -> Vec<(Role, String)> {
         self.a.messages.iter().map(|m| (m.role, m.content.clone().unwrap_or_default())).collect()
@@ -567,4 +566,5 @@ fn replay_of_long_session_matches_live_state() {
     h.text("u");
     h.done();
     h.crash(); // asserts replay == live
+    h.crash(); // including the Recovered event
 }
