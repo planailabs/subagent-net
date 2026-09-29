@@ -87,6 +87,22 @@ pub struct Delta {
     pub tool_calls: Vec<ToolCallDelta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+}
+
+impl Usage {
+    pub fn total(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -107,6 +123,7 @@ pub struct Accumulator {
     pub content: String,
     pub tool_calls: Vec<ToolCallDelta>,
     pub finish_reason: Option<String>,
+    pub usage: Option<Usage>,
 }
 
 impl Accumulator {
@@ -134,6 +151,9 @@ impl Accumulator {
         }
         if d.finish_reason.is_some() {
             self.finish_reason.clone_from(&d.finish_reason);
+        }
+        if d.usage.is_some() {
+            self.usage = d.usage;
         }
     }
 
@@ -249,6 +269,13 @@ mod tests {
         let mut a = Accumulator::default();
         a.push(&tc(2, None, Some("f"), Some("{}")));
         assert_eq!(a.finish().tool_calls[0].id, "call_2");
+    }
+
+    #[test]
+    fn keeps_last_usage() {
+        let mut a = Accumulator::default();
+        a.push(&Delta { usage: Some(Usage { prompt_tokens: 3, completion_tokens: 4 }), ..Default::default() });
+        assert_eq!(a.usage.unwrap().total(), 7);
     }
 
     #[test]
