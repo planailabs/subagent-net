@@ -45,7 +45,7 @@ async fn session(spawner: &Spawner, ws: Ws) -> Option<String> {
         loop {
             tokio::select! {
                 out = out_rx.recv() => {
-                    let Some(m) = out else { return None };
+                    let m = out?; // channel closed: plain disconnect
                     if sink.send(Message::Text(serde_json::to_string(&m).unwrap().into())).await.is_err() {
                         return None;
                     }
