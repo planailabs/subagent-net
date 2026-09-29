@@ -337,12 +337,14 @@ The web UI and the TUI use the same API.
 
 ## High availability
 
-- Hubs share one Postgres. Each hub tries `pg_try_advisory_lock(<cluster lock>)` on a dedicated connection; the holder is the **leader**.
-- Standbys answer `503` with `x-subnet-leader: <url>` on every endpoint, and retry the lock every second.
-- Nodes connect to `<hub>/node`.
-- If the leader's database session dies, the lock is released and a standby takes over. It loads state from Postgres, bumps every agent's epoch on placement as usual, and nodes reconnect to it.
-- Nodes and clients take a comma-separated list of hub URLs and rotate through it, following `x-subnet-leader` hints.
-- **Sharding later:** all hub state access goes through `Hub::agent(id)`-style lookups and the work queue, so a future shard router can own a subset of agents per hub.
+- Hubs share one Postgres. Each hub competes for `pg_try_advisory_lock` on a dedicated connection (retrying every 200 ms); the holder is the **leader**.
+- On winning, the leader bumps `hub_leader.term`, records its advertised URL (`subnet hub --advertise <url>`, default `http://<listen>`), loads all state from the database, and serves. Nodes and clients reconnect to it; agents get new epochs on placement as usual.
+- **Fencing:** every event append checks, in the same transaction, that `hub_leader.term` is still this hub's term. A deposed leader (lost its lock connection, partitioned) can't write agent logs even if other connections still work; its first refused write makes it step down.
+- A leader that loses its lock connection, or is fenced, steps down: it drops all in-memory state, closes node connections, and becomes a standby again.
+- **Standbys** answer every request with `503` and `x-subnet-leader: <url>` when they know the leader. The API client and nodes take a comma-separated list of hub URLs, follow the hint, and otherwise rotate through the list.
+- `Hub::open` (single hub, tests) waits to lead; `subnet hub` starts as a standby and leads once elected. `shutdown` releases leadership.
+- Route state (throttle windows, open batches, debounce timers) is in memory and restarts empty on the new leader.
+- **Sharding later:** all hub state access goes through `Hub` methods and the commit/placement work queue, so a future shard router can own a subset of agents per hub.
 
 ## Web UI
 
@@ -395,5 +397,5 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
   - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
 - **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub; the switchboard (routes, flow control, all delivery kinds, deliveries log, `list_routes`/`list_deliveries`/`list_senses`/`peek_mail`/`inject_event`).
-- **Implemented (v2), continued:** stream relay across nodes; blob store.
-- **In progress (v2):** HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
+- **Implemented (v2), continued:** stream relay across nodes; blob store; active-standby HA with term fencing.
+- **In progress (v2):** web UI, TUI. Each item moves to "implemented" in the commit that finishes it.

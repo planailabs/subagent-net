@@ -35,6 +35,10 @@ struct HubArgs {
     /// runs in open mode: every caller is root (development only).
     #[arg(long, env = "SUBNET_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: Option<String>,
+    /// URL other hubs' standbys point clients to when this hub leads
+    /// (default: http://<listen>).
+    #[arg(long, env = "SUBNET_ADVERTISE")]
+    advertise: Option<String>,
 }
 
 /// Commands that aren't API operations. Every operation is added as a
@@ -81,7 +85,9 @@ enum Cmd {
 }
 
 async fn serve_hub(a: HubArgs) -> anyhow::Result<Arc<Hub>> {
-    let hub = Hub::open(&a.db, a.admin_token).await?;
+    let advertise = a.advertise.clone().unwrap_or_else(|| format!("http://{}", a.listen));
+    // Serves as a standby until elected; several hubs can share the database.
+    let hub = Hub::start(&a.db, a.admin_token, &advertise).await?;
     let l = tokio::net::TcpListener::bind(&a.listen).await?;
     tracing::info!(listen = %a.listen, "hub listening");
     let router = http::router(hub.clone());
@@ -217,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Dev { hub, files, webhooks } => {
             let files = read_files(&files)?;
             let hub = serve_hub(hub).await?;
+            hub.wait_leader().await;
             let applied = hub.apply_cluster(files, false, &subnet_core::addr::Addr::root()).await?;
             tracing::info!(version = ?applied.version, "cluster applied");
             let mut senses = vec![];

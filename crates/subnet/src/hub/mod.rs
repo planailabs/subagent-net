@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod blobs;
 pub mod db;
+pub mod ha;
 pub mod http;
 pub mod relay;
 pub mod switchboard;
@@ -40,6 +41,8 @@ pub enum HubError {
     Forbidden(String),
     #[error("{0}")]
     Unauthorized(String),
+    #[error("this hub is not the leader")]
+    NotLeader,
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -172,6 +175,12 @@ pub struct Hub {
     board_wake: Notify,
     me: std::sync::Weak<Hub>,
     pub(crate) relay: relay::Relay,
+    leader: std::sync::atomic::AtomicBool,
+    leader_url: std::sync::RwLock<Option<String>>,
+    leader_changed: Notify,
+    fenced: std::sync::atomic::AtomicBool,
+    /// Cancelled by `shutdown`: background tasks end, leadership is released.
+    stop: tokio_util::sync::CancellationToken,
 }
 
 /// Events only a node may propose; everything else originates at the hub.
@@ -191,24 +200,22 @@ impl Hub {
     /// `admin_token` is the bootstrap `user:root` token; without one the hub
     /// runs in open mode (everyone is root) for development.
     pub async fn open(db_url: &str, admin_token: Option<String>) -> Result<Arc<Self>, HubError> {
+        let hub = Self::start(db_url, admin_token, "http://127.0.0.1").await?;
+        hub.wait_leader().await;
+        Ok(hub)
+    }
+
+    /// Starts a hub as a standby; it becomes leader once it wins the election
+    /// (immediately, unless another hub on this database leads). `advertise`
+    /// is the URL clients and nodes should use to reach this hub.
+    pub async fn start(db_url: &str, admin_token: Option<String>, advertise: &str) -> Result<Arc<Self>, HubError> {
         let db = Db::connect(db_url).await?;
-        let mut st = State::default();
-        for row in db.agents().await? {
-            let (base, a) = match db.snapshot_before(row.id, u64::MAX).await? {
-                Some((seq, state)) => (seq, state),
-                None => (0, Agent::new(row.id, row.spec)),
-            };
-            let events = db.events(row.id, base).await?;
-            let seq = base + events.len() as u64;
-            st.agents.insert(row.id, AgentRec { a: a.fold(&events), seq, epoch: row.epoch, node: None });
-        }
-        tracing::info!(agents = st.agents.len(), "hub loaded");
         if admin_token.is_none() {
             tracing::warn!("no admin token: open mode, every caller is user:root");
         }
         let hub = Arc::new_cyclic(|me| Self {
             db,
-            st: Mutex::new(st),
+            st: Mutex::new(State::default()),
             admin_token,
             cluster: Default::default(),
             tokens: Default::default(),
@@ -219,11 +226,33 @@ impl Hub {
             board_wake: Notify::new(),
             me: me.clone(),
             relay: Default::default(),
+            leader: Default::default(),
+            leader_url: Default::default(),
+            leader_changed: Notify::new(),
+            fenced: Default::default(),
+            stop: Default::default(),
         });
-        hub.load_auth().await?;
+        tokio::spawn(hub.clone().elect(db_url.to_string(), advertise.to_string()));
         tokio::spawn(hub.clone().board_timers());
         tokio::spawn(hub.clone().blob_gc());
         Ok(hub)
+    }
+
+    /// Loads everything from the database (on becoming leader).
+    pub(crate) async fn load(&self) -> Result<(), HubError> {
+        let mut st = State::default();
+        for row in self.db.agents().await? {
+            let (base, a) = match self.db.snapshot_before(row.id, u64::MAX).await? {
+                Some((seq, state)) => (seq, state),
+                None => (0, Agent::new(row.id, row.spec)),
+            };
+            let events = self.db.events(row.id, base).await?;
+            let seq = base + events.len() as u64;
+            st.agents.insert(row.id, AgentRec { a: a.fold(&events), seq, epoch: row.epoch, node: None });
+        }
+        tracing::info!(agents = st.agents.len(), "hub loaded");
+        *self.st.lock().await = st;
+        self.load_auth().await
     }
 
     fn arc(&self) -> Arc<Hub> {
@@ -522,7 +551,9 @@ impl Hub {
             return Ok(());
         }
         let Some(r) = st.agents.get_mut(&id) else { return bad(format!("no agent {id}")) };
-        self.db.append(id, r.seq + 1, &events).await?;
+        if !self.db.append(id, r.seq + 1, &events).await? {
+            return Err(self.fence());
+        }
         let before = r.seq;
         let ends_with_recovery = events.last() == Some(&Event::Recovered);
         let ancestors = {
@@ -868,7 +899,9 @@ impl Hub {
     async fn restore(&self, st: &mut State, id: AgentId, events: Vec<Event>) -> Result<(), HubError> {
         if !events.is_empty() {
             let r = st.agents.get_mut(&id).unwrap();
-            self.db.append(id, r.seq + 1, &events).await?;
+            if !self.db.append(id, r.seq + 1, &events).await? {
+                return Err(self.fence());
+            }
             r.seq += events.len() as u64;
             r.a = std::mem::replace(&mut r.a, Agent::new(id, Spec::of_type(""))).fold(&events);
         }

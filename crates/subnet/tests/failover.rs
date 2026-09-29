@@ -168,3 +168,54 @@ async fn remote(base: &str, token: Option<&str>, who: &str) -> Result<Client, su
     c.call_raw("list_types", serde_json::Value::Null).await?;
     Ok(c)
 }
+
+fn hub_ha(db: &str, port: u16) -> Child {
+    bin()
+        .args(["hub", "--db", db, "--listen", &format!("127.0.0.1:{port}")])
+        .env("SUBNET_ADMIN_TOKEN", "tok")
+        .spawn()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn killed_leader_hub_hands_over_to_a_standby() {
+    let llm = MockLlm::start().await;
+    llm.set_gap(Duration::from_millis(200));
+    llm.say(SYS, &["uno ", "dos ", "tres ", "cuatro ", "cinco ", "seis"]);
+    let db = db_url().await;
+    let (pa, pb) = (free_port(), free_port());
+    let mut a = hub_ha(&db, pa);
+    let r = connect(pa).await; // a leads
+    let _b = hub_ha(&db, pb); // b waits as a standby
+    apply(&r, &llm.url).await;
+    let hubs = format!("http://127.0.0.1:{pa},http://127.0.0.1:{pb}");
+    let _s = bin().args(["node", "--name", "s"]).env("SUBNET_HUB", &hubs).env("SUBNET_TOKEN", "tok").spawn().unwrap();
+    wait_node(&r).await;
+    let id = r.call_raw("spawn", json!({"type":"worker","prompt":"count"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    for _ in 0..100 {
+        if partial_len(&r, &id).await >= 8 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(partial_len(&r, &id).await >= 8);
+
+    llm.set_gap(Duration::ZERO);
+    llm.say(SYS, &["<after takeover>"]);
+    a.kill().await.unwrap();
+    // One client for both hubs: it finds the new leader by itself.
+    let both = Client::new(&hubs, Some("tok".into()));
+    let mut mail = Value::Null;
+    for _ in 0..100 {
+        match both.call_raw("wait_inbox", json!({"timeout_ms": 1000})).await {
+            Ok(m) if m.as_array().is_some_and(|a| !a.is_empty()) => {
+                mail = m;
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let c = mail[0]["content"].as_str().unwrap_or_else(|| panic!("no answer after takeover: {mail}"));
+    assert!(c.starts_with("uno "), "{c}");
+    assert!(c.ends_with("<after takeover>"), "{c}");
+}

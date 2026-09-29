@@ -454,6 +454,7 @@ async fn hub_restart_reloads_state_and_keeps_fencing() {
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("partial")] }).await.unwrap();
     let before = transcript(&hub, id).await;
+    hub.shutdown();
     drop(hub);
 
     let hub = W { hub: Hub::open(&url, None).await.unwrap(), nodes: Mutex::new(vec![]) };
@@ -608,6 +609,7 @@ async fn snapshots_bound_replay_and_feed_assignments() {
     }
     let mut before = transcript(&hub, id).await;
     assert_eq!(before["seq"], 7);
+    hub.shutdown();
     drop(hub);
 
     let hub = W { hub: Hub::open(&url, None).await.unwrap(), nodes: Mutex::new(vec![]) };

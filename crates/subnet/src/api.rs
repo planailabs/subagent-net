@@ -123,6 +123,7 @@ impl From<HubError> for OpError {
             HubError::NotFound(_) => ErrorKind::NotFound,
             HubError::Forbidden(_) => ErrorKind::Forbidden,
             HubError::Unauthorized(_) => ErrorKind::Unauthorized,
+            HubError::NotLeader => ErrorKind::Unavailable,
             HubError::Db(_) => ErrorKind::Internal,
         };
         OpError::new(kind, e.to_string())

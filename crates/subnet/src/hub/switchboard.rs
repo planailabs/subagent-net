@@ -89,6 +89,7 @@ impl Hub {
             };
             let wait = next.map(|t| Duration::from_millis(t.saturating_sub(now_ms())));
             tokio::select! {
+                _ = self.stop.cancelled() => return,
                 _ = self.board_wake.notified() => continue,
                 _ = async { match wait { Some(w) => tokio::time::sleep(w).await, None => std::future::pending().await } } => {}
             }

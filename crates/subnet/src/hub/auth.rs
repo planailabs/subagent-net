@@ -67,6 +67,8 @@ fn role(r: subnet_cluster::Role) -> Role {
 
 impl Hub {
     pub(crate) async fn load_auth(&self) -> Result<(), HubError> {
+        *self.cluster.write().unwrap() = ClusterState::default();
+        self.tokens.write().unwrap().clear();
         if let Some((v, files)) = self.db.latest_cluster().await? {
             let texts: Vec<(&str, &str)> = files.iter().map(|f| (f.name.as_str(), f.text.as_str())).collect();
             // It validated when applied; a failure now means the parser got stricter.

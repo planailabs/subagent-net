@@ -85,7 +85,13 @@ impl Hub {
     pub(crate) async fn blob_gc(self: std::sync::Arc<Self>) {
         let mut every = tokio::time::interval(Duration::from_secs(3600));
         loop {
-            every.tick().await;
+            tokio::select! {
+                _ = self.stop.cancelled() => return,
+                _ = every.tick() => {}
+            }
+            if !self.is_leader() {
+                continue;
+            }
             match self.db.gc_blobs(KEEP_DAYS).await {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(deleted = n, "old blobs deleted"),

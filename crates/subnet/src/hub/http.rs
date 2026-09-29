@@ -35,6 +35,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/v1/events/ws", get(events_ws))
         .route("/v1/blobs/{hash}/raw", get(blob_raw))
         .layer(middleware::from_fn_with_state(hub.clone(), auth));
+    let guard = middleware::from_fn_with_state(hub.clone(), leader_guard);
     Router::new()
         .route("/node", get(node_ws))
         .route("/streams", get(super::relay::streams_ws))
@@ -42,6 +43,21 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .with_state(hub)
         .merge(subnet_ops::http::router(reg.clone(), auth_fn.clone(), "subagent-net"))
         .nest_service("/mcp", subnet_ops::mcp::service(reg, auth_fn, Some(instructions)))
+        .layer(guard)
+}
+
+/// Standbys serve nothing: they answer 503 and name the leader.
+async fn leader_guard(State(hub): State<Arc<Hub>>, req: Request, next: Next) -> Response {
+    if hub.is_leader() {
+        return next.run(req).await;
+    }
+    let mut r = (StatusCode::SERVICE_UNAVAILABLE, "not the leader").into_response();
+    if let Some(url) = hub.leader_url()
+        && let Ok(v) = axum::http::HeaderValue::from_str(&url)
+    {
+        r.headers_mut().insert(subnet_ops::client::LEADER_HEADER, v);
+    }
+    r
 }
 
 #[derive(Deserialize)]
