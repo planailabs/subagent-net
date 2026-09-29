@@ -220,7 +220,7 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
 
 ### Messaging
 
-- **Addresses:** `user:<name>`, `client:<name>`, `agent:<id>`, `resident:<name>` (resolves to the resident's agent), `mailbox:<name>`.
+- **Addresses:** `user:<name>`, `client:<name>`, `agent:<id>`, `resident:<name>` (resolves to the resident's agent), `mailbox:<name>`, `route:<name>` (a switchboard route as sender; answers to it are kept there).
 - A message is an `Inbox` event in the target's log: durable and ordered.
   - `Idle`: the agent wakes up.
   - `Paused`: the message is queued.
@@ -295,13 +295,16 @@ CEL expressions in routes see `event` (the event data), `sense`, `at` (unix ms) 
    - `batch { window, max }`: collect events and deliver them as one (`batch` in CEL).
    - `throttle`: at most N deliveries per interval; excess is dropped and counted.
    - `max_active`: for spawn deliveries, at most N live agents from this route. Excess waits in the route's queue (bounded at 1000, drop-oldest).
-4. **Deliver** (a route may have several):
-   - `spawn = "<mixture>"`, `prompt = CEL`: a new agent per delivery (per batch).
-   - `send = "<resident or agent id>"`: an `Inbox` message.
+4. **Deliver** (a route may have several). Deliveries are sent as `route:<name>`:
+   - `spawn = "<mixture>"`, `prompt = CEL`: a new agent per delivery (per batch). Without `prompt` the agent gets the event JSON. The agents' answers are kept at the address `route:<name>` (read them with `peek_mail`).
+   - `send = "<resident>"`: an `Inbox` message with the event JSON; the resident's answer also goes to `route:<name>`.
    - `mailbox = "<name>"`: durable queue; agents read it with `mailbox_take`.
-   - `mcp { server, tool, args = CEL }`: a direct tool call.
+   - `mcp { server, tool, args = CEL }`: a direct tool call on any node running the server; idempotent tools are retried (3 attempts). Without `args` the tool gets `{"event", "batch"}`.
+   - `max_active` counts a route's spawned agents until their first answer; slots are reserved atomically, excess spawns wait in the route's queue.
 
-Every delivery is recorded (`deliveries` table: route, event, outcome), so the switchboard view can show what happened to each event. Route state (throttle buckets, debounce timers, open batches) lives in memory on the leader. After a failover, open batches and debounce windows restart empty.
+Every delivery is recorded (`deliveries` table: route, payload, one outcome per action) and streamed as a `delivery` notice. Counters per route (seen, filtered, deduped, debounced, throttled, delivered, errors) come from `list_routes`. Route state (throttle windows, dedupe keys, debounce timers, open batches) lives in memory on the leader; after a failover, open batches and debounce windows restart empty.
+
+`inject_event` feeds an event into the switchboard as if a sense had produced it (testing routes, the web UI).
 
 ## APIs: one registry, four front-ends
 
@@ -315,7 +318,7 @@ Every operation is defined once in the `ops` crate's typed registry: name, summa
   `GET /v1/openapi.json` is the generated OpenAPI 3.1 document; `/v1/docs` renders it.
 - **MCP** (`/mcp`): every op a principal's role allows is a tool.
 - **CLI:** every op is a `subnet` subcommand (`list_agents` → `subnet list-agents`). Path parameters are positional; an op without path parameters takes its required scalar fields positionally (`subnet spawn <type> <prompt>`). Other fields are flags, and `--json` passes a whole argument object. The CLI calls the REST/RPC API.
-- **Events:** `GET /v1/events` (SSE) and `/v1/events/ws` (WebSocket), filtered by `agent` or `tree` (an agent and its descendants), later also `sense` and `route`. Each notice has a `kind`: `agent` notices carry `agent`, `ancestors`, `seq` and the committed `event`. A slow subscriber gets `{"kind":"lagged","missed":n}` instead of blocking the hub.
+- **Events:** `GET /v1/events` (SSE) and `/v1/events/ws` (WebSocket), filtered by `agent`, `tree` (an agent and its descendants), `sense`, `route`, or `agents=true|false`. Each notice has a `kind`: `agent` (`agent`, `ancestors`, `seq`, `event`), `sense` (`sense`, `node`, `id`, `at`, `data`) or `delivery` (`route`, `payload`, `outcomes`). A slow subscriber gets `{"kind":"lagged","missed":n}` instead of blocking the hub.
 
 The web UI and the TUI use the same API.
 
@@ -391,5 +394,5 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - Nodes: pull-based configuration (`Configure`/`Ready`), credential resolution on the node with errors reported in `list_nodes`, `subnet node`, `subnet dev <files>`.
   - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
   - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
-- **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub.
-- **In progress (v2):** snapshots, tree forks, event filters/SSE, senses/streams/blobs/switchboard, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
+- **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub; the switchboard (routes, flow control, all delivery kinds, deliveries log, `list_routes`/`list_deliveries`/`list_senses`/`peek_mail`/`inject_event`).
+- **In progress (v2):** streams across nodes, blobs, snapshots, tree forks, event filters/SSE, senses/streams/blobs/switchboard, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.

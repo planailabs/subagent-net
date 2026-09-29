@@ -63,11 +63,32 @@ fn server_url() -> String {
     .clone()
 }
 
+/// Drops test databases left by earlier test processes (once per process), so
+/// the throwaway cluster doesn't grow without bound. (Cargo runs test binaries
+/// one after another; two concurrent `cargo test`s would sweep each other.)
+async fn sweep(pool: &sqlx::PgPool) {
+    static SWEPT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    SWEPT
+        .get_or_init(|| async {
+            let mine = format!("t_{}_", std::process::id());
+            let rows: Vec<(String,)> = sqlx::query_as("select datname from pg_database where datname like 't\\_%'")
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+            for (name,) in rows.into_iter().filter(|(n,)| !n.starts_with(&mine)) {
+                // Names are ours (t_<pid>_<uuid>), not user input.
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!("drop database if exists {name} with (force)"))).execute(pool).await;
+            }
+        })
+        .await;
+}
+
 /// URL of a new, empty database.
 pub async fn db_url() -> String {
     let base = server_url();
-    let name = format!("t_{}", uuid::Uuid::new_v4().simple());
+    let name = format!("t_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple());
     let pool = sqlx::PgPool::connect(&base).await.expect("connect to test postgres");
+    sweep(&pool).await;
     // `name` is generated above, not user input.
     sqlx::query(sqlx::AssertSqlSafe(format!("create database {name}"))).execute(&pool).await.unwrap();
     pool.close().await;

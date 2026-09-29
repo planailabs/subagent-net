@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod db;
 pub mod http;
+pub mod switchboard;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -57,6 +58,8 @@ pub enum Notice {
     Agent { agent: AgentId, ancestors: Vec<AgentId>, seq: u64, event: Event },
     /// An event from a sense.
     Sense { sense: String, node: String, id: String, at: u64, data: Value },
+    /// A switchboard delivery and how each of its actions went.
+    Delivery { route: String, payload: Value, outcomes: Value },
 }
 
 /// What a subscriber wants to see.
@@ -71,6 +74,9 @@ pub struct NoticeFilter {
     /// Only this sense's events.
     #[serde(default)]
     pub sense: Option<String>,
+    /// Only this route's deliveries.
+    #[serde(default)]
+    pub route: Option<String>,
     /// Only agent notices (true) or only sense notices (false).
     #[serde(default)]
     pub agents: Option<bool>,
@@ -89,7 +95,15 @@ impl NoticeFilter {
                 self.agents != Some(true)
                     && self.agent.is_none()
                     && self.tree.is_none()
+                    && self.route.is_none()
                     && self.sense.as_ref().is_none_or(|s| s == sense)
+            }
+            Notice::Delivery { route, .. } => {
+                self.agents != Some(true)
+                    && self.agent.is_none()
+                    && self.tree.is_none()
+                    && self.sense.is_none()
+                    && self.route.as_ref().is_none_or(|r| r == route)
             }
         }
     }
@@ -121,9 +135,10 @@ struct NodeRec {
     senses: std::collections::BTreeMap<String, Option<String>>,
 }
 
-/// An MCP call forwarded from one node to another.
+/// An MCP call forwarded to the node that runs the server.
 struct McpPending {
-    from: ConnId,
+    /// The node that asked; `None` for the hub's own calls (switchboard).
+    from: Option<ConnId>,
     from_id: u64,
     exec: ConnId,
 }
@@ -135,6 +150,8 @@ struct State {
     next_conn: ConnId,
     mcp_pending: HashMap<u64, McpPending>,
     next_mcp: u64,
+    /// Answers for the hub's own MCP calls.
+    mcp_waiters: HashMap<u64, tokio::sync::oneshot::Sender<Result<String, String>>>,
 }
 
 pub struct Hub {
@@ -149,6 +166,9 @@ pub struct Hub {
     notices: broadcast::Sender<Notice>,
     /// Events between snapshots.
     snapshot_every: std::sync::atomic::AtomicU64,
+    board: std::sync::Mutex<switchboard::Board>,
+    board_wake: Notify,
+    me: std::sync::Weak<Hub>,
 }
 
 /// Events only a node may propose; everything else originates at the hub.
@@ -183,7 +203,7 @@ impl Hub {
         if admin_token.is_none() {
             tracing::warn!("no admin token: open mode, every caller is user:root");
         }
-        let hub = Arc::new(Self {
+        let hub = Arc::new_cyclic(|me| Self {
             db,
             st: Mutex::new(st),
             admin_token,
@@ -192,9 +212,17 @@ impl Hub {
             mail: Notify::new(),
             notices: broadcast::channel(4096).0,
             snapshot_every: std::sync::atomic::AtomicU64::new(200),
+            board: Default::default(),
+            board_wake: Notify::new(),
+            me: me.clone(),
         });
         hub.load_auth().await?;
+        tokio::spawn(hub.clone().board_timers());
         Ok(hub)
+    }
+
+    fn arc(&self) -> Arc<Hub> {
+        self.me.upgrade().expect("hub is alive while its methods run")
     }
 
     /// For in-process nodes, which are trusted.
@@ -281,14 +309,24 @@ impl Hub {
         }
         // MCP calls it was running fail; calls it made are dropped.
         let gone: Vec<u64> =
-            st.mcp_pending.iter().filter(|(_, p)| p.exec == conn || p.from == conn).map(|(h, _)| *h).collect();
+            st.mcp_pending.iter().filter(|(_, p)| p.exec == conn || p.from == Some(conn)).map(|(h, _)| *h).collect();
         for h in gone {
             let p = st.mcp_pending.remove(&h).unwrap();
-            if p.exec == conn
-                && let Some(n) = st.nodes.get(&p.from)
-            {
-                let err = Err("the node running the tool went away".into());
-                let _ = n.tx.send(ToNode::McpReply { id: p.from_id, result: err });
+            if p.exec != conn {
+                continue;
+            }
+            let err = Err("the node running the tool went away".to_string());
+            match p.from {
+                Some(from) => {
+                    if let Some(n) = st.nodes.get(&from) {
+                        let _ = n.tx.send(ToNode::McpReply { id: p.from_id, result: err });
+                    }
+                }
+                None => {
+                    if let Some(w) = st.mcp_waiters.remove(&h) {
+                        let _ = w.send(err);
+                    }
+                }
             }
         }
         if let Err(e) = self.place_pending(&mut st).await {
@@ -339,7 +377,7 @@ impl Hub {
                     (true, Some(exec)) => {
                         let hub_id = st.next_mcp;
                         st.next_mcp += 1;
-                        st.mcp_pending.insert(hub_id, McpPending { from: conn, from_id: id, exec });
+                        st.mcp_pending.insert(hub_id, McpPending { from: Some(conn), from_id: id, exec });
                         let n = st.nodes.get_mut(&exec).unwrap();
                         n.mcp_load += 1;
                         let _ = n.tx.send(ToNode::McpInvoke { id: hub_id, mcp, tool, args });
@@ -349,7 +387,8 @@ impl Hub {
             }
             ToHub::McpCancel { id } => {
                 let mut st = self.st.lock().await;
-                let found = st.mcp_pending.iter().find(|(_, p)| p.from == conn && p.from_id == id).map(|(h, _)| *h);
+                let found =
+                    st.mcp_pending.iter().find(|(_, p)| p.from == Some(conn) && p.from_id == id).map(|(h, _)| *h);
                 if let Some(h) = found {
                     let p = st.mcp_pending.remove(&h).unwrap();
                     if let Some(n) = st.nodes.get_mut(&p.exec) {
@@ -361,7 +400,7 @@ impl Hub {
             }
             ToHub::SenseEvent { sense, id, at, data } => {
                 let node = self.st.lock().await.nodes.get(&conn).map(|n| n.name.clone()).unwrap_or_default();
-                let _ = self.notices.send(Notice::Sense { sense, node, id, at, data });
+                self.arc().sense_event(node, subnet_switchboard::SenseEvent { id, sense, at, data });
                 Ok(())
             }
             ToHub::SenseStatus { sense, error } => {
@@ -380,8 +419,17 @@ impl Hub {
                 if let Some(n) = st.nodes.get_mut(&conn) {
                     n.mcp_load = n.mcp_load.saturating_sub(1);
                 }
-                if let Some(n) = st.nodes.get(&p.from) {
-                    let _ = n.tx.send(ToNode::McpReply { id: p.from_id, result });
+                match p.from {
+                    Some(from) => {
+                        if let Some(n) = st.nodes.get(&from) {
+                            let _ = n.tx.send(ToNode::McpReply { id: p.from_id, result });
+                        }
+                    }
+                    None => {
+                        if let Some(w) = st.mcp_waiters.remove(&id) {
+                            let _ = w.send(result);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -531,6 +579,11 @@ impl Hub {
                         work.push_back(Work::Commit(x, vec![ev]));
                     }
                     Addr::Agent(x) => tracing::warn!(from = %id, to = %x, "report to unknown agent dropped"),
+                    Addr::Route(rt) => {
+                        let mail = Mail { from: Addr::Agent(id), content: content.clone(), status: Some(status) };
+                        self.put_mail(&Addr::Route(rt.clone()), &mail).await?;
+                        self.arc().route_agent_done(&rt, id);
+                    }
                     other => {
                         let mail = Mail { from: Addr::Agent(id), content: content.clone(), status: Some(status) };
                         self.put_mail(&other, &mail).await?;
@@ -593,6 +646,30 @@ impl Hub {
         tracing::info!(%id, node = %s.name, epoch, "assigned");
         let _ = s.tx.send(ToNode::Assign { agent: id, epoch, spec: r.a.spec.clone(), snapshot, events });
         Ok(())
+    }
+
+    /// An MCP call of the hub's own (switchboard `mcp` deliveries).
+    pub(crate) async fn mcp_from_hub(&self, mcp: &str, tool: &str, args: Value) -> Result<String, String> {
+        let rx = {
+            let mut st = self.st.lock().await;
+            let exec = st
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.mcps.contains_key(mcp))
+                .min_by_key(|(c, n)| (n.mcp_load, **c))
+                .map(|(c, _)| *c)
+                .ok_or_else(|| format!("no node runs mcp {mcp} right now"))?;
+            let id = st.next_mcp;
+            st.next_mcp += 1;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            st.mcp_pending.insert(id, McpPending { from: None, from_id: id, exec });
+            st.mcp_waiters.insert(id, tx);
+            let n = st.nodes.get_mut(&exec).unwrap();
+            n.mcp_load += 1;
+            let _ = n.tx.send(ToNode::McpInvoke { id, mcp: mcp.into(), tool: tool.into(), args });
+            rx
+        };
+        rx.await.unwrap_or_else(|_| Err("mcp call dropped".into()))
     }
 
     async fn put_mail(&self, to: &Addr, mail: &Mail) -> Result<(), HubError> {

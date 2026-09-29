@@ -263,3 +263,49 @@ impl Db {
             .transpose()
     }
 }
+
+/// A recorded switchboard delivery.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeliveryRow {
+    pub id: i64,
+    pub route: String,
+    /// Unix milliseconds.
+    pub at: i64,
+    pub payload: serde_json::Value,
+    /// One per action: `{"action": …, "ok": …}` or `{"action": …, "error": …}`.
+    pub outcomes: serde_json::Value,
+}
+
+impl Db {
+    pub async fn add_delivery(&self, route: &str, payload: &serde_json::Value, outcomes: &serde_json::Value) -> Result<(), sqlx::Error> {
+        sqlx::query("insert into deliveries (route, payload, outcomes) values ($1, $2, $3)")
+            .bind(route)
+            .bind(Json(payload))
+            .bind(Json(outcomes))
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn deliveries(&self, route: Option<&str>, limit: u32) -> Result<Vec<DeliveryRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "select id, route, (extract(epoch from at) * 1000)::bigint as at, payload, outcomes from deliveries
+             where $1::text is null or route = $1 order by id desc limit $2",
+        )
+        .bind(route)
+        .bind(limit as i64)
+        .fetch_all(&self.0)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(DeliveryRow {
+                    id: r.try_get("id")?,
+                    route: r.try_get("route")?,
+                    at: r.try_get("at")?,
+                    payload: r.try_get::<Json<serde_json::Value>, _>("payload")?.0,
+                    outcomes: r.try_get::<Json<serde_json::Value>, _>("outcomes")?.0,
+                })
+            })
+            .collect()
+    }
+}

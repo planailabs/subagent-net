@@ -71,7 +71,9 @@ impl Hub {
             let texts: Vec<(&str, &str)> = files.iter().map(|f| (f.name.as_str(), f.text.as_str())).collect();
             // It validated when applied; a failure now means the parser got stricter.
             let spec = Cluster::parse(&texts).map_err(|e| HubError::Bad(format!("stored cluster version {}: {e}", v.version)))?;
+            let routes = subnet_switchboard::compile(&spec).map_err(HubError::Bad)?;
             *self.cluster.write().unwrap() = ClusterState { version: Some(v), files, spec };
+            self.set_routes(routes);
         }
         let rows = self.db.tokens().await?;
         let mut t = self.tokens.write().unwrap();
@@ -147,6 +149,7 @@ impl Hub {
         }
         let texts: Vec<(&str, &str)> = files.iter().map(|f| (f.name.as_str(), f.text.as_str())).collect();
         let spec = Cluster::parse(&texts).map_err(|e| HubError::Bad(e.to_string()))?;
+        let routes = subnet_switchboard::compile(&spec).map_err(HubError::Bad)?;
         let changes = self.cluster.read().unwrap().spec.diff(&spec);
         if dry_run || (changes.is_empty() && self.cluster.read().unwrap().version.is_some()) {
             return Ok(Applied { version: None, changes });
@@ -154,6 +157,7 @@ impl Hub {
         let v = self.db.add_cluster_version(&files, &by.to_string()).await?;
         let version = v.version;
         *self.cluster.write().unwrap() = ClusterState { version: Some(v), files, spec };
+        self.set_routes(routes);
         tracing::info!(version, changes = changes.len(), by = %by, "cluster applied");
         self.reconfigure_nodes().await;
         self.sync_residents().await;

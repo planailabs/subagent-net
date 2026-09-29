@@ -243,6 +243,51 @@ pub struct WhoAmI {
     pub role: Role,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveriesArgs {
+    /// Only this route.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// Newest first; default 100.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MailArgs {
+    /// Any address: `mailbox:<name>`, `route:<name>`, `user:<name>`, …
+    pub addr: Addr,
+    #[serde(default)]
+    pub max: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InjectArgs {
+    /// A sense declared in the cluster.
+    pub sense: String,
+    /// The event data.
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Injected {
+    pub id: String,
+}
+
+/// A sense from the cluster and how it is doing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SenseSummary {
+    pub name: String,
+    pub node: String,
+    /// exec, stream-publisher, stream-subscriber, webhook, timer or file.
+    pub source: String,
+    /// Stages, in order.
+    pub stages: Vec<String>,
+    /// Its node is connected and reported the sense started.
+    pub running: bool,
+    pub error: Option<String>,
+}
+
 macro_rules! op {
     ($t:ident, $name:literal, $role:ident, $http:expr, $args:ty, $out:ty, $summary:literal) => {
         pub struct $t;
@@ -275,6 +320,11 @@ op!(RollbackCluster, "rollback_cluster", Admin, Some((Method::Post, "/v1/cluster
 op!(IssueToken, "issue_token", Admin, Some((Method::Post, "/v1/tokens")), PrincipalArgs, Token, "Create a token for a user, client or node declared in the cluster.");
 op!(RevokeTokens, "revoke_tokens", Admin, Some((Method::Post, "/v1/tokens/revoke")), PrincipalArgs, Revoked, "Revoke all tokens of a principal.");
 op!(WhoAmIOp, "whoami", Viewer, Some((Method::Get, "/v1/whoami")), NoArgs, WhoAmI, "Who the hub thinks you are.");
+op!(ListRoutes, "list_routes", Viewer, Some((Method::Get, "/v1/routes")), NoArgs, Vec<crate::hub::switchboard::RouteSummary>, "Switchboard routes with their counters.");
+op!(ListDeliveries, "list_deliveries", Viewer, Some((Method::Get, "/v1/deliveries")), DeliveriesArgs, Vec<crate::hub::db::DeliveryRow>, "Recent switchboard deliveries and their outcomes.");
+op!(ListSenses, "list_senses", Viewer, Some((Method::Get, "/v1/senses")), NoArgs, Vec<SenseSummary>, "Senses of the cluster and whether they run.");
+op!(PeekMail, "peek_mail", Operator, Some((Method::Get, "/v1/mail")), MailArgs, Vec<Mail>, "Pending messages at any address (not taken).");
+op!(InjectEvent, "inject_event", Operator, Some((Method::Post, "/v1/senses/{sense}/events")), InjectArgs, Injected, "Feed an event into the switchboard as if the sense had produced it.");
 op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events, optionally with its children) into a new agent.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
@@ -299,6 +349,11 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<IssueToken>(),
         OpMeta::of::<RevokeTokens>(),
         OpMeta::of::<WhoAmIOp>(),
+        OpMeta::of::<ListRoutes>(),
+        OpMeta::of::<ListDeliveries>(),
+        OpMeta::of::<ListSenses>(),
+        OpMeta::of::<PeekMail>(),
+        OpMeta::of::<InjectEvent>(),
     ]
 }
 
@@ -392,12 +447,37 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
         let h = h.clone();
         async move { Ok(Token { token: h.issue_token(a.kind, &a.name).await? }) }
     });
-    let h = hub;
+    let h = hub.clone();
     r.add::<RevokeTokens, _, _>(move |_, a| {
         let h = h.clone();
         async move { Ok(Revoked { revoked: h.revoke_tokens(a.kind, &a.name).await? }) }
     });
     r.add::<WhoAmIOp, _, _>(|c, _: NoArgs| async move { Ok(WhoAmI { addr: c.addr, role: c.role }) });
+    let h = hub.clone();
+    r.add::<ListRoutes, _, _>(move |_, _: NoArgs| {
+        let h = h.clone();
+        async move { Ok(h.list_routes().await) }
+    });
+    let h = hub.clone();
+    r.add::<ListDeliveries, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(h.list_deliveries(a.route.as_deref(), a.limit.unwrap_or(100)).await?) }
+    });
+    let h = hub.clone();
+    r.add::<ListSenses, _, _>(move |_, _: NoArgs| {
+        let h = h.clone();
+        async move { Ok(h.list_senses().await) }
+    });
+    let h = hub.clone();
+    r.add::<PeekMail, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(h.peek_mail(&a.addr, a.max.unwrap_or(50)).await?) }
+    });
+    let h = hub;
+    r.add::<InjectEvent, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(Injected { id: h.inject_event(&a.sense, a.data)? }) }
+    });
     r
 }
 

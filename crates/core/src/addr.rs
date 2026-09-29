@@ -18,6 +18,9 @@ pub enum Addr {
     Resident(String),
     /// A durable queue agents read with `mailbox_take`.
     Mailbox(String),
+    /// A switchboard route: the sender of what it delivers, and where answers
+    /// of agents it spawned are collected.
+    Route(String),
 }
 
 impl Addr {
@@ -39,6 +42,7 @@ impl fmt::Display for Addr {
             Addr::Agent(id) => write!(f, "agent:{id}"),
             Addr::Resident(s) => write!(f, "resident:{s}"),
             Addr::Mailbox(s) => write!(f, "mailbox:{s}"),
+            Addr::Route(s) => write!(f, "route:{s}"),
         }
     }
 }
@@ -51,6 +55,7 @@ impl FromStr for Addr {
             Some(("client", n)) if !n.is_empty() => Ok(Addr::Client(n.into())),
             Some(("resident", n)) if !n.is_empty() => Ok(Addr::Resident(n.into())),
             Some(("mailbox", n)) if !n.is_empty() => Ok(Addr::Mailbox(n.into())),
+            Some(("route", n)) if !n.is_empty() => Ok(Addr::Route(n.into())),
             Some(("agent", id)) => id.parse().map(Addr::Agent).map_err(|e| format!("bad agent id {id:?}: {e}")),
             // A bare uuid is an agent: that is what models tend to pass around.
             None => s.parse().map(Addr::Agent).map_err(|_| format!("bad address {s:?}")),
@@ -97,6 +102,7 @@ mod tests {
             Addr::Agent(id),
             Addr::Resident("r".into()),
             Addr::Mailbox("q".into()),
+            Addr::Route("door".into()),
         ] {
             assert_eq!(a.to_string().parse::<Addr>().unwrap(), a);
             let j = serde_json::to_string(&a).unwrap();
