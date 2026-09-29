@@ -198,26 +198,58 @@ async fn reports_go_to_parent_log_and_user_mail() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![boss(), worker()], 8).await;
     let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
-    let (_, boss_epoch, _) = expect_assign(&mut sp).await;
+    expect_assign(&mut sp).await;
     let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
     // Parent gets ChildSpawned, then the child is assigned.
     let (a, _, ev) = expect_commit(&mut sp).await;
     assert_eq!((a, ev), (boss_id, Event::ChildSpawned { id: kid, reserved: 400 }));
     let (_, kid_epoch, _) = expect_assign(&mut sp).await;
 
-    let to = vec![Addr::Agent(boss_id), Addr::User];
-    hub.handle(sp.conn, ToHub::Report { agent: kid, epoch: kid_epoch, to, status: Status::Idle, content: "done".into() })
-        .await
-        .unwrap();
-    let (a, _, ev) = expect_commit(&mut sp).await;
-    assert_eq!((a, ev), (boss_id, Event::ChildReport { id: kid, status: Status::Idle, content: "done".into() }));
-    let mail = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(1000) }).await.unwrap();
-    assert_eq!(mail, json!([{"from": format!("agent:{kid}"), "content": "done", "status": "idle"}]));
-    // A report from a non-owner is dropped.
-    hub.handle(sp.conn, ToHub::Report { agent: boss_id, epoch: boss_epoch + 7, to: vec![Addr::User], status: Status::Idle, content: "x".into() })
-        .await
-        .unwrap();
+    // The user also asks the kid something mid-turn.
+    hub.op(&Addr::User, Op::Send { to: Addr::Agent(kid), content: "and you?".into() }).await.unwrap();
+    expect_commit(&mut sp).await;
+    let answer = |s: &str| ToHub::Propose { agent: kid, epoch: kid_epoch, events: vec![text(s), Event::LlmDone] };
+    hub.handle(sp.conn, answer("done")).await.unwrap();
+    let mut got_report = false;
+    // kid: delta, done; boss: child report
+    for _ in 0..3 {
+        let (a, _, ev) = expect_commit(&mut sp).await;
+        if a == boss_id {
+            assert_eq!(ev, Event::ChildReport { id: kid, status: Status::Idle, content: "done".into() });
+            got_report = true;
+        }
+    }
+    assert!(got_report);
     assert_eq!(hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(50) }).await.unwrap(), json!([]));
+    // Second turn answers the user (and the parent again).
+    hub.handle(sp.conn, answer("me too")).await.unwrap();
+    let mail = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(1000) }).await.unwrap();
+    assert_eq!(mail, json!([{"from": format!("agent:{kid}"), "content": "me too", "status": "idle"}]));
+}
+
+#[tokio::test]
+async fn cancel_reports_to_parent_even_though_spawner_is_revoked() {
+    let hub = hub().await;
+    let mut sp = spawner(&hub, "s", vec![boss(), worker()], 8).await;
+    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    hub.op(&Addr::User, Op::Cancel { id: kid }).await.unwrap();
+    let t = transcript(&hub, boss_id).await;
+    assert_eq!(t["phase"], "thinking", "the report woke the boss");
+    let _ = &mut sp;
+}
+
+#[tokio::test]
+async fn unlimited_child_type_gets_half_of_parent_budget() {
+    let hub = hub().await;
+    let mut w = worker();
+    w.budget.max_tokens = None;
+    let _sp = spawner(&hub, "s", vec![boss(), w], 8).await;
+    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    let rows = hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+    assert!(rows.as_array().unwrap().iter().any(|r| id_of(r) == kid));
+    assert_eq!(transcript(&hub, boss_id).await["reserved"], 500);
 }
 
 #[tokio::test]

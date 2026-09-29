@@ -92,7 +92,8 @@ pub enum Effect {
     RequestApproval { call: ToolCall },
     /// Abort the in-flight LLM stream / tool call (hard pause, cancel).
     AbortInflight,
-    /// The turn ended: deliver the final answer to everyone who asked.
+    /// The turn ended: deliver the final answer to everyone who asked. The hub
+    /// performs this from its own replica.
     Report { to: Vec<Addr>, status: Status, content: String },
 }
 
@@ -469,7 +470,8 @@ impl Agent {
     }
 
     fn report(&mut self, status: Status, content: String, fx: &mut Vec<Effect>) {
-        let mut to = std::mem::take(&mut self.reply_to);
+        // A failed turn can be resumed, so its askers still await the answer.
+        let mut to = if status == Status::Failed { self.reply_to.clone() } else { std::mem::take(&mut self.reply_to) };
         if let Some(p) = self.spec.parent {
             to.insert(Addr::Agent(p));
         }

@@ -65,8 +65,6 @@ pub enum ToHub {
     Hello { name: String, #[serde(default)] token: Option<String>, types: Vec<TypeInfo>, capacity: u32 },
     /// Events the spawner wants committed to an agent's log.
     Propose { agent: AgentId, epoch: u64, events: Vec<Event> },
-    /// `Effect::Report`: a turn ended.
-    Report { agent: AgentId, epoch: u64, to: Vec<Addr>, status: Status, content: String },
     /// A built-in tool call made by an agent.
     Request { id: u64, agent: AgentId, epoch: u64, op: Op },
 }

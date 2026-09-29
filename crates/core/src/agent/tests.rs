@@ -473,8 +473,9 @@ fn llm_failure_then_resume_continues_partial() {
     assert!(h.user("still there?").is_empty());
     assert_eq!(h.resume(), vec![Effect::CallLlm]);
     h.text("tial");
-    let Effect::Report { content, .. } = &h.done()[0] else { panic!() };
+    let Effect::Report { content, to, .. } = &h.done()[0] else { panic!() };
     assert_eq!(content, "partial");
+    assert_eq!(to, &vec![Addr::User], "the answer still reaches whoever asked");
 }
 
 #[test]

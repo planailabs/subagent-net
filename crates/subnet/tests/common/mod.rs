@@ -7,6 +7,8 @@
 // Shelling out is deliberate: there is no Rust binding for running a Postgres server.
 #![allow(dead_code)]
 
+pub mod llm;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;

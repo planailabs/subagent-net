@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use uuid::Uuid;
 
 use subnet_core::addr::{Addr, AgentId};
-use subnet_core::agent::{Agent, Budget, Event, Phase, Spec, Status};
+use subnet_core::agent::{Agent, Budget, Effect, Event, Phase, Spec};
 use subnet_core::proto::{Mail, Op, ToHub, ToSpawner, TypeInfo};
 
 use db::Db;
@@ -152,13 +152,6 @@ impl Hub {
                 }
                 self.commit(&mut st, agent, events).await
             }
-            ToHub::Report { agent, epoch, to, status, content } => {
-                let mut st = self.st.lock().await;
-                if !self.owns(&st, conn, agent, epoch) {
-                    return Ok(());
-                }
-                self.route_report(&mut st, agent, to, status, content).await
-            }
             ToHub::Request { id, agent, epoch, op } => {
                 let owns = self.owns(&*self.st.lock().await, conn, agent, epoch);
                 let result = if owns {
@@ -193,27 +186,57 @@ impl Hub {
 
     // ---------- log ----------
 
+    /// Appends events to an agent's log, updates the replica, forwards them to
+    /// the owning spawner and routes resulting reports. Reports are routed here,
+    /// from the hub's replica, so each is delivered exactly once whatever
+    /// happens to the spawner.
     async fn commit(&self, st: &mut State, id: AgentId, events: Vec<Event>) -> Result<(), HubError> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        let Some(r) = st.agents.get_mut(&id) else { return bad(format!("no agent {id}")) };
-        self.db.append(id, r.seq + 1, &events).await?;
-        for event in events {
-            r.seq += 1;
-            r.a.apply(&event);
-            let seq = r.seq;
-            if let Some(s) = r.spawner.and_then(|c| st.spawners.get(&c)) {
-                let _ = s.tx.send(ToSpawner::Commit { agent: id, seq, event: event.clone() });
+        let mut work = std::collections::VecDeque::from([(id, events)]);
+        while let Some((id, events)) = work.pop_front() {
+            if events.is_empty() {
+                continue;
             }
-            let _ = self.notices.send(Notice { agent: id, seq, event });
-        }
-        if r.a.phase == Phase::Cancelled
-            && let Some(c) = r.spawner.take()
-            && let Some(s) = st.spawners.get_mut(&c)
-        {
-            s.agents.remove(&id);
-            let _ = s.tx.send(ToSpawner::Revoke { agent: id });
+            let Some(r) = st.agents.get_mut(&id) else { return bad(format!("no agent {id}")) };
+            self.db.append(id, r.seq + 1, &events).await?;
+            let mut reports = vec![];
+            for event in events {
+                r.seq += 1;
+                for fx in r.a.apply(&event) {
+                    if let Effect::Report { to, status, content } = fx {
+                        reports.push((to, status, content));
+                    }
+                }
+                let seq = r.seq;
+                if let Some(s) = r.spawner.and_then(|c| st.spawners.get(&c)) {
+                    let _ = s.tx.send(ToSpawner::Commit { agent: id, seq, event: event.clone() });
+                }
+                let _ = self.notices.send(Notice { agent: id, seq, event });
+            }
+            if r.a.phase == Phase::Cancelled
+                && let Some(c) = r.spawner.take()
+                && let Some(s) = st.spawners.get_mut(&c)
+            {
+                s.agents.remove(&id);
+                let _ = s.tx.send(ToSpawner::Revoke { agent: id });
+            }
+            let parent = r.a.spec.parent;
+            for (to, status, content) in reports {
+                for addr in to {
+                    match addr {
+                        Addr::Agent(p) if Some(p) == parent => {
+                            work.push_back((p, vec![Event::ChildReport { id, status, content: content.clone() }]));
+                        }
+                        Addr::Agent(x) if st.agents.contains_key(&x) => {
+                            work.push_back((x, vec![Event::Inbox { from: Addr::Agent(id), content: content.clone() }]));
+                        }
+                        Addr::Agent(x) => tracing::warn!(from = %id, to = %x, "report to unknown agent dropped"),
+                        other => {
+                            let mail = Mail { from: Addr::Agent(id), content: content.clone(), status: Some(status) };
+                            self.put_mail(&other, &mail).await?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -257,37 +280,6 @@ impl Hub {
         s.agents.insert(id);
         tracing::info!(%id, spawner = %s.name, epoch, "assigned");
         let _ = s.tx.send(ToSpawner::Assign { agent: id, epoch, spec: r.a.spec.clone(), events });
-        Ok(())
-    }
-
-    // ---------- routing ----------
-
-    async fn route_report(
-        &self,
-        st: &mut State,
-        from: AgentId,
-        to: Vec<Addr>,
-        status: Status,
-        content: String,
-    ) -> Result<(), HubError> {
-        let parent = st.agents[&from].a.spec.parent;
-        for addr in to {
-            match addr {
-                Addr::Agent(p) if Some(p) == parent => {
-                    let ev = Event::ChildReport { id: from, status, content: content.clone() };
-                    self.commit(st, p, vec![ev]).await?;
-                }
-                Addr::Agent(x) if st.agents.contains_key(&x) => {
-                    let ev = Event::Inbox { from: Addr::Agent(from), content: content.clone() };
-                    self.commit(st, x, vec![ev]).await?;
-                }
-                Addr::Agent(x) => tracing::warn!(%from, to = %x, "report to unknown agent dropped"),
-                other => {
-                    let mail = Mail { from: Addr::Agent(from), content: content.clone(), status: Some(status) };
-                    self.put_mail(&other, &mail).await?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -439,10 +431,12 @@ impl Hub {
                 if r.a.children.len() as u32 >= pb.max_children {
                     return bad(format!("child budget exhausted ({} children)", pb.max_children));
                 }
+                // An unlimited type under a limited parent gets half of what is left,
+                // so the parent is never starved by its first child.
                 let max_tokens = match (info.budget.max_tokens, r.a.remaining_tokens()) {
                     (Some(t), Some(left)) => Some(t.min(left)),
                     (t, None) => t,
-                    (None, left) => left,
+                    (None, Some(left)) => Some(left / 2),
                 };
                 if max_tokens == Some(0) {
                     return bad("token budget exhausted");
@@ -491,6 +485,7 @@ fn summary(st: &State, id: AgentId, r: &AgentRec) -> Value {
         "paused": r.a.is_paused(),
         "spawner": r.spawner.and_then(|c| st.spawners.get(&c)).map(|s| s.name.clone()),
         "usage": r.a.usage,
+        "reserved": r.a.reserved,
         "seq": r.seq,
     })
 }
