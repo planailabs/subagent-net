@@ -326,7 +326,7 @@ impl Runner {
         id: AgentId,
         epoch: u64,
         spec: Spec,
-        snapshot: Option<Snapshot>,
+        snapshot: Option<Box<Snapshot>>,
         events: &[Event],
         rt: Arc<AgentRt>,
         mcps: HashMap<String, Arc<McpHost>>,
@@ -340,7 +340,7 @@ impl Runner {
             tracing::error!(agent = %id, ?last, "assignment does not end with Recovered");
         }
         let (base, start) = match snapshot {
-            Some(s) => (s.seq, s.state),
+            Some(s) => (s.seq, s.state.clone()),
             None => (0, Agent::new(id, spec)),
         };
         let mut a = start.fold(prefix);

@@ -521,7 +521,7 @@ impl Hub {
         let r = st.agents.get_mut(&id).unwrap();
         let epoch = r.epoch + 1;
         self.db.set_epoch(id, epoch).await?;
-        let snapshot = self.db.snapshot_before(id, r.seq).await?.map(|(seq, state)| Snapshot { seq, state });
+        let snapshot = self.db.snapshot_before(id, r.seq).await?.map(|(seq, state)| Box::new(Snapshot { seq, state }));
         let events = self.db.events(id, snapshot.as_ref().map_or(0, |s| s.seq)).await?;
         r.epoch = epoch;
         r.node = Some(conn);

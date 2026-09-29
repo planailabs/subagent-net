@@ -70,7 +70,7 @@ pub enum ToNode {
         epoch: u64,
         spec: Spec,
         #[serde(default)]
-        snapshot: Option<Snapshot>,
+        snapshot: Option<Box<Snapshot>>,
         events: Vec<Event>,
     },
     Commit { agent: AgentId, seq: u64, event: Event },
