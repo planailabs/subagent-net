@@ -25,7 +25,7 @@ use subnet_core::proto::Op;
 use subnet_core::tools::builtin_op;
 use subnet_llm::{Client, ModelConfig};
 
-use crate::wire::{AgentStatus, McpStatus, ToHub, ToNode};
+use crate::wire::{AgentStatus, McpStatus, Snapshot, ToHub, ToNode};
 use mcp::McpHost;
 
 /// How often streamed deltas are flushed to the hub.
@@ -241,7 +241,7 @@ impl Node {
                     let ready = self.configure(&config).await;
                     let _ = out.send(ready);
                 }
-                ToNode::Assign { agent, epoch, spec, events } => {
+                ToNode::Assign { agent, epoch, spec, snapshot, events } => {
                     let Some(rt) = self.rt.read().await.agents.get(&spec.ty).cloned() else {
                         tracing::error!(%agent, ty = %spec.ty, "assigned an agent of a type this node doesn't run");
                         continue;
@@ -252,7 +252,7 @@ impl Node {
                     let (tx, rx) = mpsc::unbounded_channel();
                     let life = root.child_token();
                     let mcps = self.rt.read().await.mcps.clone();
-                    let runner = Runner::new(agent, epoch, spec, &events, rt, mcps, link.clone(), life.clone());
+                    let runner = Runner::new(agent, epoch, spec, snapshot, &events, rt, mcps, link.clone(), life.clone());
                     tokio::spawn(runner.run(rx));
                     agents.insert(agent, (tx, life));
                 }
@@ -326,6 +326,7 @@ impl Runner {
         id: AgentId,
         epoch: u64,
         spec: Spec,
+        snapshot: Option<Snapshot>,
         events: &[Event],
         rt: Arc<AgentRt>,
         mcps: HashMap<String, Arc<McpHost>>,
@@ -338,10 +339,14 @@ impl Runner {
         if *last != Event::Recovered {
             tracing::error!(agent = %id, ?last, "assignment does not end with Recovered");
         }
-        let mut a = Agent::replay(id, spec, prefix);
+        let (base, start) = match snapshot {
+            Some(s) => (s.seq, s.state),
+            None => (0, Agent::new(id, spec)),
+        };
+        let mut a = start.fold(prefix);
         let startup = a.apply(last);
         let inflight = life.child_token();
-        Self { id, epoch, a, seq: events.len() as u64, rt, mcps, link, life, inflight, startup }
+        Self { id, epoch, a, seq: base + events.len() as u64, rt, mcps, link, life, inflight, startup }
     }
 
     async fn run(mut self, mut commits: mpsc::UnboundedReceiver<(u64, Event)>) {

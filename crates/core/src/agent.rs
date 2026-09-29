@@ -260,11 +260,15 @@ impl Agent {
 
     /// Folds a log without performing effects.
     pub fn replay<'a>(id: AgentId, spec: Spec, events: impl IntoIterator<Item = &'a Event>) -> Self {
-        let mut a = Self::new(id, spec);
+        Self::new(id, spec).fold(events)
+    }
+
+    /// Continues folding from this state (e.g. a snapshot).
+    pub fn fold<'a>(mut self, events: impl IntoIterator<Item = &'a Event>) -> Self {
         for e in events {
-            a.apply(e);
+            self.apply(e);
         }
-        a
+        self
     }
 
     /// Whatever was in flight is gone: mark it so and return the effects that

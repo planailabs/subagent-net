@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use subnet_cluster::NodeConfig;
 use subnet_core::addr::AgentId;
-use subnet_core::agent::{Event, Spec};
+use subnet_core::agent::{Agent, Event, Spec};
 use subnet_core::chat::ToolDef;
 use subnet_core::proto::Op;
 
@@ -25,6 +25,13 @@ pub struct McpStatus {
     pub tools: Vec<ToolDef>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// An agent's folded state after `seq` events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub seq: u64,
+    pub state: Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,8 +63,16 @@ pub enum ToNode {
     Rejected { reason: String },
     /// What this node should run. Sent after `Welcome` and on every cluster change.
     Configure { config: NodeConfig },
-    /// Run this agent: replay `events` (the last is `Recovered`), then follow `Commit`s.
-    Assign { agent: AgentId, epoch: u64, spec: Spec, events: Vec<Event> },
+    /// Run this agent: start from `snapshot` (the state after `seq` events) if
+    /// any, fold `events` (the last is `Recovered`), then follow `Commit`s.
+    Assign {
+        agent: AgentId,
+        epoch: u64,
+        spec: Spec,
+        #[serde(default)]
+        snapshot: Option<Snapshot>,
+        events: Vec<Event>,
+    },
     Commit { agent: AgentId, seq: u64, event: Event },
     /// Stop running this agent (moved elsewhere, dormant or stale epoch).
     Revoke { agent: AgentId },

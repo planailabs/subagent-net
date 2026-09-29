@@ -594,3 +594,29 @@ async fn mailbox_and_unknown_resident_addresses() {
     let e = hub.op(&Addr::root(), Op::Send { to: Addr::Resident("nobody".into()), content: "?".into() }).await.unwrap_err();
     assert!(e.contains("no resident"), "{e}");
 }
+
+#[tokio::test]
+async fn snapshots_bound_replay_and_feed_assignments() {
+    let url = db_url().await;
+    let hub = W { hub: Hub::open(&url, None).await.unwrap(), nodes: Mutex::new(vec![]) };
+    hub.set_snapshot_every(3);
+    let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
+    let (_, epoch, _) = expect_assign(&mut sp).await;
+    for w in ["a", "b", "c", "d", "e"] {
+        hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text(w)] }).await.unwrap();
+    }
+    let mut before = transcript(&hub, id).await;
+    assert_eq!(before["seq"], 7);
+    drop(hub);
+
+    let hub = W { hub: Hub::open(&url, None).await.unwrap(), nodes: Mutex::new(vec![]) };
+    before["node"] = Value::Null; // not placed yet after the restart
+    assert_eq!(transcript(&hub, id).await, before, "snapshot + tail == full replay");
+    let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
+    let ToNode::Assign { snapshot, events, .. } = recv(&mut sp.rx).await else { panic!() };
+    let snap = snapshot.expect("assignment starts from a snapshot");
+    assert_eq!(snap.seq, 6);
+    assert_eq!(events, vec![text("e"), Event::Recovered]);
+    assert_eq!(snap.state.acc.content, "abcd");
+}

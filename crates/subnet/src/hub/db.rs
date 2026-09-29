@@ -237,3 +237,29 @@ impl Db {
         rows.into_iter().map(|r| Ok(r.try_get::<Json<Mail>, _>("mail")?.0)).collect()
     }
 }
+
+impl Db {
+    pub async fn put_snapshot(&self, id: uuid::Uuid, seq: u64, state: &subnet_core::agent::Agent) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "insert into agent_snapshots (agent_id, seq, state) values ($1, $2, $3)
+             on conflict (agent_id) do update set seq = $2, state = $3",
+        )
+        .bind(id)
+        .bind(seq as i64)
+        .bind(Json(state))
+        .execute(&self.0)
+        .await?;
+        Ok(())
+    }
+
+    /// The newest snapshot taken before `seq` (exclusive).
+    pub async fn snapshot_before(&self, id: uuid::Uuid, seq: u64) -> Result<Option<(u64, subnet_core::agent::Agent)>, sqlx::Error> {
+        let r = sqlx::query("select seq, state from agent_snapshots where agent_id = $1 and seq < $2")
+            .bind(id)
+            .bind(seq as i64)
+            .fetch_optional(&self.0)
+            .await?;
+        r.map(|r| Ok((r.try_get::<i64, _>("seq")? as u64, r.try_get::<Json<subnet_core::agent::Agent>, _>("state")?.0)))
+            .transpose()
+    }
+}

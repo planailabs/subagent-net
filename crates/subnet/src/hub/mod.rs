@@ -20,7 +20,7 @@ use subnet_core::agent::{Agent, Budget, CallState, Effect, Event, PauseMode, Pha
 use subnet_core::chat::ToolDef;
 use subnet_core::proto::{Mail, Op};
 
-use crate::wire::{ToHub, ToNode};
+use crate::wire::{Snapshot, ToHub, ToNode};
 
 use crate::api::{AgentSummary, Done, NodeSummary, Spawned, Transcript, TypeSummary};
 use db::Db;
@@ -107,6 +107,8 @@ pub struct Hub {
     tokens: std::sync::RwLock<HashMap<String, (auth::PrincipalKind, String)>>,
     mail: Notify,
     notices: broadcast::Sender<Notice>,
+    /// Events between snapshots.
+    snapshot_every: std::sync::atomic::AtomicU64,
 }
 
 /// Events only a node may propose; everything else originates at the hub.
@@ -129,9 +131,13 @@ impl Hub {
         let db = Db::connect(db_url).await?;
         let mut st = State::default();
         for row in db.agents().await? {
-            let events = db.events(row.id, 0).await?;
-            let a = Agent::replay(row.id, row.spec, &events);
-            st.agents.insert(row.id, AgentRec { a, seq: events.len() as u64, epoch: row.epoch, node: None });
+            let (base, a) = match db.snapshot_before(row.id, u64::MAX).await? {
+                Some((seq, state)) => (seq, state),
+                None => (0, Agent::new(row.id, row.spec)),
+            };
+            let events = db.events(row.id, base).await?;
+            let seq = base + events.len() as u64;
+            st.agents.insert(row.id, AgentRec { a: a.fold(&events), seq, epoch: row.epoch, node: None });
         }
         tracing::info!(agents = st.agents.len(), "hub loaded");
         if admin_token.is_none() {
@@ -145,6 +151,7 @@ impl Hub {
             tokens: Default::default(),
             mail: Notify::new(),
             notices: broadcast::channel(4096).0,
+            snapshot_every: std::sync::atomic::AtomicU64::new(200),
         });
         hub.load_auth().await?;
         Ok(hub)
@@ -153,6 +160,11 @@ impl Hub {
     /// For in-process nodes, which are trusted.
     pub(crate) fn token(&self) -> Option<String> {
         self.admin_token.clone()
+    }
+
+    /// How many events between snapshots (default 200).
+    pub fn set_snapshot_every(&self, n: u64) {
+        self.snapshot_every.store(n.max(1), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notice> {
@@ -399,6 +411,8 @@ impl Hub {
         }
         let Some(r) = st.agents.get_mut(&id) else { return bad(format!("no agent {id}")) };
         self.db.append(id, r.seq + 1, &events).await?;
+        let before = r.seq;
+        let ends_with_recovery = events.last() == Some(&Event::Recovered);
         let mut reports = vec![];
         for event in events {
             r.seq += 1;
@@ -412,6 +426,12 @@ impl Hub {
                 let _ = s.tx.send(ToNode::Commit { agent: id, seq, event: event.clone() });
             }
             let _ = self.notices.send(Notice { agent: id, seq, event });
+        }
+        // A snapshot each time the log crosses a multiple of `snapshot_every`.
+        // Never right after `Recovered`: an assignment needs one event after its snapshot.
+        let every = self.snapshot_every.load(std::sync::atomic::Ordering::Relaxed);
+        if before / every != r.seq / every && !ends_with_recovery {
+            self.db.put_snapshot(id, r.seq, &r.a).await?;
         }
         let was_on = r.node;
         if r.a.phase == Phase::Cancelled {
@@ -501,13 +521,14 @@ impl Hub {
         let r = st.agents.get_mut(&id).unwrap();
         let epoch = r.epoch + 1;
         self.db.set_epoch(id, epoch).await?;
-        let events = self.db.events(id, 0).await?;
+        let snapshot = self.db.snapshot_before(id, r.seq).await?.map(|(seq, state)| Snapshot { seq, state });
+        let events = self.db.events(id, snapshot.as_ref().map_or(0, |s| s.seq)).await?;
         r.epoch = epoch;
         r.node = Some(conn);
         let s = st.nodes.get_mut(&conn).unwrap();
         s.agents.insert(id);
         tracing::info!(%id, node = %s.name, epoch, "assigned");
-        let _ = s.tx.send(ToNode::Assign { agent: id, epoch, spec: r.a.spec.clone(), events });
+        let _ = s.tx.send(ToNode::Assign { agent: id, epoch, spec: r.a.spec.clone(), snapshot, events });
         Ok(())
     }
 

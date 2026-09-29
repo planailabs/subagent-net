@@ -365,3 +365,20 @@ async fn mailboxes_are_readable_only_by_listed_mixtures() {
     let left = n.hub.op(&Addr::root(), Op::MailboxPeek { name: "door".into(), max: 10 }).await.unwrap();
     assert_eq!(left[0]["content"], "knock knock");
 }
+
+#[tokio::test]
+async fn nodes_resume_agents_from_snapshots() {
+    let n = net().await;
+    n.hub.set_snapshot_every(2);
+    let a = n.node("a").await;
+    n.llm.say(WORKER, &["first"]);
+    let id = n.spawn("worker", "one").await;
+    assert_eq!(n.mail().await["content"], "first");
+    n.hub.disconnect(a).await;
+    n.node("b").await;
+    n.llm.say(WORKER, &["second"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(id), content: "two".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "second");
+    let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
+    assert_eq!(msgs, 4, "system, one, first, two: the history survived the snapshot");
+}
