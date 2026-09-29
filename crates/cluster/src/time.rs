@@ -35,7 +35,7 @@ impl fmt::Display for Dur {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ms = self.0.as_millis();
         for (unit, per) in [("d", 86_400_000), ("h", 3_600_000), ("m", 60_000), ("s", 1000)] {
-            if ms % per == 0 {
+            if ms.is_multiple_of(per) {
                 return write!(f, "{}{unit}", ms / per);
             }
         }
