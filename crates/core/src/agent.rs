@@ -161,19 +161,30 @@ pub enum Effect {
     Report { to: Vec<Addr>, status: Status, content: String },
 }
 
+/// Where one tool call of the current assistant message stands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum ToolWait {
-    Ready {
+pub enum CallState {
+    /// Not started; `retry` if it was running when its node died.
+    Queued {
         retry: bool,
     },
     Running,
+    /// Waiting for the user to approve or deny it.
     Approval,
-    /// Approved by the user, not started yet (e.g. paused meanwhile).
+    /// Approved, not started yet (e.g. paused meanwhile).
     Approved,
+    /// `wait_for`: waiting for these children to report.
     Children {
         ids: Vec<AgentId>,
     },
+    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingCall {
+    pub call: ToolCall,
+    pub state: CallState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,10 +194,9 @@ pub enum Phase {
     Thinking {
         running: bool,
     },
-    /// Tool calls of the last assistant message; the front one is current.
+    /// Tool calls of the last assistant message, run in parallel.
     Tools {
-        queue: VecDeque<ToolCall>,
-        wait: ToolWait,
+        calls: Vec<PendingCall>,
     },
     Failed {
         error: String,
@@ -262,17 +272,36 @@ impl Agent {
     fn recover(&mut self) -> Vec<Effect> {
         match &mut self.phase {
             Phase::Thinking { running } => *running = false,
-            Phase::Tools { wait: w @ ToolWait::Running, .. } => *w = ToolWait::Ready { retry: true },
+            Phase::Tools { calls } => {
+                for c in calls.iter_mut().filter(|c| c.state == CallState::Running) {
+                    c.state = CallState::Queued { retry: true };
+                }
+            }
             _ => {}
         }
         // Tool-call fragments of a dead stream can't be continued.
         self.acc.tool_calls.clear();
         let mut fx = vec![];
-        if let (Phase::Tools { queue, wait: ToolWait::Approval }, true) = (&self.phase, self.gate()) {
-            fx.push(Effect::RequestApproval { call: queue[0].clone() });
-        }
+        self.rerequest_approvals(&mut fx);
         self.advance(&mut fx);
         fx
+    }
+
+    /// Asks again for approvals still open (after a restart or resume).
+    fn rerequest_approvals(&self, fx: &mut Vec<Effect>) {
+        if let (Phase::Tools { calls }, true) = (&self.phase, self.gate()) {
+            for c in calls.iter().filter(|c| c.state == CallState::Approval) {
+                fx.push(Effect::RequestApproval { call: c.call.clone() });
+            }
+        }
+    }
+
+    /// Tool calls waiting for approval.
+    pub fn awaiting_approval(&self) -> Vec<&ToolCall> {
+        match &self.phase {
+            Phase::Tools { calls } => calls.iter().filter(|c| c.state == CallState::Approval).map(|c| &c.call).collect(),
+            _ => vec![],
+        }
     }
 
     /// Tokens left for this agent and future children; `None` = unlimited.
@@ -282,7 +311,11 @@ impl Agent {
 
     /// True when something is running on the spawner for this agent.
     pub fn inflight(&self) -> bool {
-        matches!(self.phase, Phase::Thinking { running: true } | Phase::Tools { wait: ToolWait::Running, .. })
+        match &self.phase {
+            Phase::Thinking { running } => *running,
+            Phase::Tools { calls } => calls.iter().any(|c| c.state == CallState::Running),
+            _ => false,
+        }
     }
 
     /// Paused and nothing left to finish.
@@ -337,13 +370,17 @@ impl Agent {
                 }
                 let msg = self.acc.finish();
                 self.acc = Accumulator::default();
-                let calls: VecDeque<_> = msg.tool_calls.iter().cloned().collect();
+                let calls: Vec<_> = msg
+                    .tool_calls
+                    .iter()
+                    .map(|call| PendingCall { call: call.clone(), state: CallState::Queued { retry: false } })
+                    .collect();
                 let content = msg.content.clone().unwrap_or_default();
                 self.messages.push(msg);
                 if calls.is_empty() {
                     self.end_turn(Status::Idle, content, &mut fx);
                 } else {
-                    self.phase = Phase::Tools { queue: calls, wait: ToolWait::Ready { retry: false } };
+                    self.phase = Phase::Tools { calls };
                 }
                 self.advance(&mut fx);
             }
@@ -357,14 +394,20 @@ impl Agent {
                 self.acc.tool_calls.clear();
                 self.fail(error.clone(), &mut fx);
             }
-            Event::ToolResult { call_id, content, .. } => self.tool_done(call_id, content.clone(), &mut fx),
-            Event::ToolAborted { call_id } => self.tool_done(call_id, "[aborted before completion]".into(), &mut fx),
+            Event::ToolResult { call_id, content, .. } => {
+                if self.call_in(call_id, &CallState::Running) {
+                    self.tool_done(call_id, content.clone(), &mut fx);
+                }
+            }
+            Event::ToolAborted { call_id } => {
+                if self.call_in(call_id, &CallState::Running) {
+                    self.tool_done(call_id, "[aborted before completion]".into(), &mut fx);
+                }
+            }
             Event::Approval { call_id, approved } => {
-                if let Phase::Tools { queue, wait: w @ ToolWait::Approval } = &mut self.phase
-                    && queue[0].id == *call_id
-                {
+                if self.call_in(call_id, &CallState::Approval) {
                     if *approved {
-                        *w = ToolWait::Approved;
+                        self.set_call(call_id, CallState::Approved);
                         self.advance(&mut fx);
                     } else {
                         self.tool_done(call_id, "[denied by user]".into(), &mut fx);
@@ -377,8 +420,7 @@ impl Agent {
             }
             Event::ChildReport { id, status, content } => {
                 self.children.entry(*id).or_default().push(Report { status: *status, content: content.clone() });
-                self.try_finish_wait(&mut fx);
-                if self.phase == Phase::Idle {
+                if matches!(self.phase, Phase::Idle | Phase::Tools { .. }) {
                     self.advance(&mut fx);
                 }
             }
@@ -397,9 +439,7 @@ impl Agent {
                     // Retry from where it failed: continue the (possibly partial) answer.
                     self.phase = Phase::Thinking { running: false };
                 }
-                if let (Phase::Tools { queue, wait: ToolWait::Approval }, true) = (&self.phase, self.gate()) {
-                    fx.push(Effect::RequestApproval { call: queue[0].clone() });
-                }
+                self.rerequest_approvals(&mut fx);
                 self.advance(&mut fx);
             }
             Event::Recovered => fx = self.recover(),
@@ -420,7 +460,7 @@ impl Agent {
     /// Emits the next effect(s) the current phase needs, if the gate allows.
     fn advance(&mut self, fx: &mut Vec<Effect>) {
         loop {
-            if self.terminal() || self.inflight() || !self.gate() {
+            if self.terminal() || !self.gate() {
                 return;
             }
             match &mut self.phase {
@@ -430,7 +470,8 @@ impl Agent {
                     }
                     self.phase = Phase::Thinking { running: false };
                 }
-                Phase::Thinking { .. } => {
+                Phase::Thinking { running: true } => return,
+                Phase::Thinking { running: false } => {
                     self.inject_pending();
                     if self.remaining_tokens() == Some(0) {
                         let used = self.usage.total() + self.reserved;
@@ -441,44 +482,64 @@ impl Agent {
                     fx.push(Effect::CallLlm);
                     return;
                 }
-                Phase::Tools { queue, .. } if queue.is_empty() => self.phase = Phase::Thinking { running: false },
-                Phase::Tools { queue, wait } => match wait {
-                    ToolWait::Running | ToolWait::Approval | ToolWait::Children { .. } => return,
-                    ToolWait::Approved => {
-                        let call = queue[0].clone();
-                        *wait = ToolWait::Running;
-                        fx.push(Effect::CallTool { call, retry: false });
-                        return;
-                    }
-                    ToolWait::Ready { retry } => {
-                        let call = queue[0].clone();
-                        let retry = *retry;
-                        if call.function.name == WAIT_FOR {
-                            match Self::wait_ids(&self.children, &call) {
-                                Ok(ids) => *wait = ToolWait::Children { ids },
-                                Err(e) => {
-                                    queue.pop_front();
-                                    self.messages.push(Message::tool(&call.id, e));
-                                    continue;
+                Phase::Tools { calls } => {
+                    // Start every call that can start; they run in parallel.
+                    let mut errors = vec![];
+                    for c in calls.iter_mut() {
+                        match c.state.clone() {
+                            CallState::Approved => {
+                                c.state = CallState::Running;
+                                fx.push(Effect::CallTool { call: c.call.clone(), retry: false });
+                            }
+                            CallState::Queued { retry } if c.call.function.name == WAIT_FOR => {
+                                match Self::wait_ids(&self.children, &c.call) {
+                                    Ok(ids) => c.state = CallState::Children { ids },
+                                    Err(e) => errors.push((c.call.id.clone(), e)),
                                 }
+                                let _ = retry;
                             }
-                            if !self.try_finish_wait(fx) {
-                                return;
+                            CallState::Queued { retry: false } if self.spec.approve.contains(&c.call.function.name) => {
+                                c.state = CallState::Approval;
+                                fx.push(Effect::RequestApproval { call: c.call.clone() });
                             }
-                        } else if !retry && self.spec.approve.contains(&call.function.name) {
-                            *wait = ToolWait::Approval;
-                            fx.push(Effect::RequestApproval { call });
-                            return;
-                        } else {
-                            *wait = ToolWait::Running;
-                            fx.push(Effect::CallTool { call, retry });
-                            return;
+                            CallState::Queued { retry } => {
+                                c.state = CallState::Running;
+                                fx.push(Effect::CallTool { call: c.call.clone(), retry });
+                            }
+                            _ => {}
                         }
                     }
-                },
+                    for (id, e) in errors {
+                        self.finish_call(&id, e);
+                    }
+                    self.finish_waits();
+                    let Phase::Tools { calls } = &self.phase else { unreachable!() };
+                    if !calls.iter().all(|c| c.state == CallState::Done) {
+                        return;
+                    }
+                    self.phase = Phase::Thinking { running: false };
+                }
                 Phase::Failed { .. } | Phase::Cancelled => return,
             }
         }
+    }
+
+    fn call_in(&self, call_id: &str, state: &CallState) -> bool {
+        matches!(&self.phase, Phase::Tools { calls } if calls.iter().any(|c| c.call.id == call_id && c.state == *state))
+    }
+
+    fn set_call(&mut self, call_id: &str, state: CallState) {
+        if let Phase::Tools { calls } = &mut self.phase
+            && let Some(c) = calls.iter_mut().find(|c| c.call.id == call_id)
+        {
+            c.state = state;
+        }
+    }
+
+    /// Marks a call done and records its result in the transcript.
+    fn finish_call(&mut self, call_id: &str, content: String) {
+        self.set_call(call_id, CallState::Done);
+        self.messages.push(Message::tool(call_id, content));
     }
 
     fn wait_ids(children: &BTreeMap<AgentId, Vec<Report>>, call: &ToolCall) -> Result<Vec<AgentId>, String> {
@@ -501,31 +562,31 @@ impl Agent {
         Ok(ids)
     }
 
-    /// Completes a `wait_for` once every awaited child has reported. Returns
-    /// true if it did (the caller should keep advancing).
-    fn try_finish_wait(&mut self, fx: &mut Vec<Effect>) -> bool {
-        let Phase::Tools { queue, wait: ToolWait::Children { ids } } = &self.phase else { return false };
-        if !ids.iter().all(|id| self.children.get(id).is_some_and(|r| !r.is_empty())) {
-            return false;
+    /// Completes every `wait_for` whose children have all reported.
+    fn finish_waits(&mut self) {
+        let Phase::Tools { calls } = &self.phase else { return };
+        let ready: Vec<(String, Vec<AgentId>)> = calls
+            .iter()
+            .filter_map(|c| match &c.state {
+                CallState::Children { ids } => Some((c.call.id.clone(), ids.clone())),
+                _ => None,
+            })
+            .collect();
+        for (call_id, ids) in ready {
+            if !ids.iter().all(|id| self.children.get(id).is_some_and(|r| !r.is_empty())) {
+                continue;
+            }
+            let mut out = serde_json::Map::new();
+            for id in ids {
+                let reports = std::mem::take(self.children.get_mut(&id).unwrap());
+                out.insert(id.to_string(), json!(reports));
+            }
+            self.finish_call(&call_id, Value::Object(out).to_string());
         }
-        let call_id = queue[0].id.clone();
-        let mut out = serde_json::Map::new();
-        for id in ids.clone() {
-            let reports = std::mem::take(self.children.get_mut(&id).unwrap());
-            out.insert(id.to_string(), json!(reports));
-        }
-        self.tool_done(&call_id, Value::Object(out).to_string(), fx);
-        true
     }
 
     fn tool_done(&mut self, call_id: &str, content: String, fx: &mut Vec<Effect>) {
-        let Phase::Tools { queue, wait } = &mut self.phase else { return };
-        if queue.front().is_none_or(|c| c.id != call_id) {
-            return;
-        }
-        queue.pop_front();
-        *wait = ToolWait::Ready { retry: false };
-        self.messages.push(Message::tool(call_id, content));
+        self.finish_call(call_id, content);
         self.advance(fx);
     }
 

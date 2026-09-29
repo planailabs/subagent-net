@@ -312,3 +312,34 @@ async fn missing_credentials_are_reported_by_the_node() {
     let e = n.hub.op(&Addr::root(), Op::Spawn { ty: "keyed".into(), prompt: "x".into() }).await.unwrap_err();
     assert!(e.contains("no live node"), "{e}");
 }
+
+#[tokio::test]
+async fn tool_calls_of_one_message_run_in_parallel() {
+    let e = Env::new(&[]).await;
+    e.node("s").await;
+    let slow = json!({"ms": 600});
+    e.llm.push(SYS, move |_| common::llm::tool_calls(&[("a", "t.slow", slow.clone()), ("b", "t.slow", slow.clone())]));
+    e.llm.push(SYS, |body| {
+        let n = body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").count();
+        text(&[&format!("{n} results")])
+    });
+    let started = std::time::Instant::now();
+    e.spawn().await;
+    assert_eq!(e.mail().await["content"], "2 results");
+    assert!(started.elapsed() < Duration::from_millis(1100), "took {:?}", started.elapsed());
+    assert_eq!(e.stats.slow_finished.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn hard_pause_cancels_every_parallel_call() {
+    let e = Env::new(&[]).await;
+    e.node("s").await;
+    let slow = json!({"ms": 10_000});
+    e.llm.push(SYS, move |_| common::llm::tool_calls(&[("a", "t.slow", slow.clone()), ("b", "t.slow", slow.clone())]));
+    let id = e.spawn().await;
+    let stats = e.stats.clone();
+    e.until("both started", || stats.slow_started.load(Ordering::SeqCst) == 2).await;
+    e.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
+    e.until("both cancelled", || stats.slow_dropped.load(Ordering::SeqCst) == 2).await;
+    e.net.until(id, "paused", |t| t["paused"] == true).await;
+}

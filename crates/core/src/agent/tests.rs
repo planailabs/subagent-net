@@ -88,19 +88,77 @@ fn message_starts_turn_and_answer_ends_it() {
     assert!(h.a.acc.is_empty());
 }
 
+fn tool_effects(fx: &[Effect]) -> Vec<(String, bool)> {
+    fx.iter()
+        .map(|e| match e {
+            Effect::CallTool { call, retry } => (call.id.clone(), *retry),
+            other => panic!("expected only CallTool, got {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
-fn tool_calls_run_sequentially() {
+fn tool_calls_run_in_parallel() {
     let mut h = H::new(spec());
     h.user("do it");
     h.call(0, "c1", "a", "{}");
     h.call(1, "c2", "b", "{}");
-    let c = tool_effect(&h.done());
-    assert_eq!((c.id.as_str(), c.function.name.as_str()), ("c1", "a"));
-    let c = tool_effect(&h.result("c1", "r1"));
-    assert_eq!(c.id, "c2");
-    assert_eq!(h.result("c2", "r2"), vec![Effect::CallLlm]);
+    assert_eq!(tool_effects(&h.done()), [("c1".to_string(), false), ("c2".to_string(), false)]);
+    // Results in any order; the next LLM call waits for all of them.
+    assert!(h.result("c2", "r2").is_empty());
+    assert_eq!(h.result("c1", "r1"), vec![Effect::CallLlm]);
     let tool_msgs: Vec<_> = h.a.messages.iter().filter_map(|m| m.tool_call_id.clone()).collect();
-    assert_eq!(tool_msgs, ["c1", "c2"]);
+    assert_eq!(tool_msgs, ["c2", "c1"], "recorded in the order they finished");
+}
+
+#[test]
+fn duplicate_results_are_ignored() {
+    let mut h = H::new(spec());
+    h.user("x");
+    h.call(0, "c1", "a", "{}");
+    h.call(1, "c2", "b", "{}");
+    h.done();
+    h.result("c1", "r");
+    assert!(h.result("c1", "again").is_empty());
+    assert_eq!(h.a.messages.iter().filter(|m| m.tool_call_id.as_deref() == Some("c1")).count(), 1);
+}
+
+#[test]
+fn hard_pause_aborts_all_running_calls() {
+    let mut h = H::new(spec());
+    h.user("x");
+    h.call(0, "c1", "a", "{}");
+    h.call(1, "c2", "b", "{}");
+    h.done();
+    assert_eq!(h.pause(PauseMode::Hard), vec![Effect::AbortInflight]);
+    h.ev(Event::ToolAborted { call_id: "c1".into() });
+    assert!(!h.a.is_paused(), "c2 is still running");
+    h.ev(Event::ToolAborted { call_id: "c2".into() });
+    assert!(h.a.is_paused());
+    assert_eq!(h.resume(), vec![Effect::CallLlm]);
+}
+
+#[test]
+fn crash_restarts_every_running_call() {
+    let mut h = H::new(spec());
+    h.user("x");
+    h.call(0, "c1", "a", "{}");
+    h.call(1, "c2", "b", "{}");
+    h.done();
+    h.result("c1", "ok");
+    assert_eq!(tool_effects(&h.crash()), [("c2".to_string(), true)]);
+}
+
+#[test]
+fn wait_for_runs_alongside_other_tools() {
+    let mut h = H::new(spec());
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
+    h.user("x");
+    h.call(0, "w", WAIT_FOR, &format!(r#"{{"ids":["{}"]}}"#, kid(1)));
+    h.call(1, "c", "a", "{}");
+    assert_eq!(tool_effects(&h.done()), [("c".to_string(), false)]);
+    assert!(h.result("c", "ok").is_empty(), "still waiting for the child");
+    assert_eq!(h.ev(child_report(kid(1), "r")), vec![Effect::CallLlm]);
 }
 
 #[test]
@@ -241,16 +299,19 @@ fn quick_pause_finishes_stream_but_starts_no_tool() {
 }
 
 #[test]
-fn quick_pause_finishes_tool_but_no_next_call() {
-    let mut h = H::new(spec());
+fn quick_pause_finishes_running_calls_but_starts_none() {
+    let mut h = H::new(Spec { approve: vec!["rm".into()], ..spec() });
     h.user("x");
     h.call(0, "c1", "a", "{}");
-    h.call(1, "c2", "b", "{}");
-    h.done();
+    h.call(1, "c2", "rm", "{}");
+    let fx = h.done();
+    assert!(matches!(fx.as_slice(), [Effect::CallTool { .. }, Effect::RequestApproval { .. }]), "{fx:?}");
     h.pause(PauseMode::Quick);
-    assert!(h.result("c1", "r").is_empty(), "c2 must not start");
+    assert!(h.ev(Event::Approval { call_id: "c2".into(), approved: true }).is_empty(), "approved but not started");
+    assert!(h.result("c1", "r").is_empty());
     assert!(h.a.is_paused());
-    assert_eq!(tool_effect(&h.resume()).id, "c2");
+    assert_eq!(tool_effects(&h.resume()), [("c2".to_string(), false)]);
+    assert_eq!(h.result("c2", "done"), vec![Effect::CallLlm]);
 }
 
 #[test]

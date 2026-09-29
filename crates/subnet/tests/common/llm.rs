@@ -100,3 +100,19 @@ pub fn last_tool_result(body: &Value) -> String {
         .unwrap()
         .to_string()
 }
+
+/// Several tool calls in one assistant message.
+pub fn tool_calls(calls: &[(&str, &str, Value)]) -> Vec<String> {
+    let deltas: Vec<Value> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (id, name, args))| {
+            json!({"index":i,"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})
+        })
+        .collect();
+    vec![
+        json!({"choices":[{"delta":{"tool_calls":deltas}}]}).to_string(),
+        json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}).to_string(),
+        "[DONE]".into(),
+    ]
+}

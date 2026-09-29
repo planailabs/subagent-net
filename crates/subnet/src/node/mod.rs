@@ -313,7 +313,8 @@ struct Runner {
     link: Arc<Link>,
     /// Cancelled on revoke: stop everything and write nothing more.
     life: CancellationToken,
-    /// Cancelled by `AbortInflight`: stop and record what was produced.
+    /// Parent of every in-flight call's token; `AbortInflight` cancels it
+    /// (the calls record what they produced) and starts a new one.
     inflight: CancellationToken,
     /// Effects from replay are held until the log is caught up.
     startup: Vec<Effect>,
@@ -376,14 +377,13 @@ impl Runner {
         for e in fx {
             match e {
                 Effect::CallLlm => {
-                    self.inflight = self.life.child_token();
                     let mut msgs = vec![Message::system(self.rt.system.clone())];
                     msgs.extend(self.a.llm_messages());
                     let tools = self.a.spec.tools.clone();
-                    tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, self.proposer(), self.inflight.clone()));
+                    let abort = self.inflight.child_token();
+                    tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, self.proposer(), abort));
                 }
                 Effect::CallTool { call, retry } => {
-                    self.inflight = self.life.child_token();
                     let t = ToolTask {
                         spec: self.a.spec.clone(),
                         mcps: self.mcps.clone(),
@@ -391,11 +391,15 @@ impl Runner {
                         agent: self.id,
                         epoch: self.epoch,
                         p: self.proposer(),
-                        abort: self.inflight.clone(),
+                        abort: self.inflight.child_token(),
                     };
                     tokio::spawn(t.run(call, retry));
                 }
-                Effect::AbortInflight => self.inflight.cancel(),
+                // Aborts every running call of this agent (tools run in parallel).
+                Effect::AbortInflight => {
+                    self.inflight.cancel();
+                    self.inflight = self.life.child_token();
+                }
                 Effect::RequestApproval { call } => {
                     tracing::info!(agent = %self.id, tool = %call.function.name, "waiting for approval");
                 }

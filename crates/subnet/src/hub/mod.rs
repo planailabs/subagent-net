@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use uuid::Uuid;
 
 use subnet_core::addr::{Addr, AgentId};
-use subnet_core::agent::{Agent, Budget, Effect, Event, PauseMode, Phase, Spec, ToolWait};
+use subnet_core::agent::{Agent, Budget, CallState, Effect, Event, PauseMode, Phase, Spec};
 use subnet_core::chat::ToolDef;
 use subnet_core::proto::{Mail, Op};
 
@@ -880,7 +880,9 @@ fn wants_runner(a: &Agent) -> bool {
     open && match &a.phase {
         Phase::Idle => !a.inbox.is_empty() || a.children.values().any(|r| !r.is_empty()),
         Phase::Thinking { .. } => true,
-        Phase::Tools { wait, .. } => matches!(wait, ToolWait::Ready { .. } | ToolWait::Approved),
+        Phase::Tools { calls } => {
+            calls.iter().any(|c| matches!(c.state, CallState::Queued { .. } | CallState::Approved))
+        }
         Phase::Failed { .. } | Phase::Cancelled => false,
     }
 }
@@ -896,10 +898,7 @@ fn is_ancestor(st: &State, anc: AgentId, mut id: AgentId) -> bool {
 }
 
 fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
-    let awaiting_approval = match &r.a.phase {
-        Phase::Tools { queue, wait: ToolWait::Approval } => Some(queue[0].clone()),
-        _ => None,
-    };
+    let awaiting_approval = r.a.awaiting_approval().first().map(|c| (*c).clone());
     let phase = serde_json::to_value(&r.a.phase).unwrap()["phase"].as_str().unwrap_or_default().to_string();
     AgentSummary {
         id,
