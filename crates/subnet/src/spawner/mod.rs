@@ -3,6 +3,7 @@
 //! the hub and performs the resulting effects (LLM calls, tool calls).
 
 pub mod config;
+pub mod mcp;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -31,21 +32,24 @@ pub const FLUSH_EVERY: Duration = Duration::from_millis(250);
 pub struct TypeRt {
     pub cfg: TypeConfig,
     pub llm: Client,
+    pub mcp: mcp::McpTools,
 }
 
 impl TypeRt {
-    pub fn new(cfg: TypeConfig) -> anyhow::Result<Self> {
+    pub async fn new(cfg: TypeConfig) -> anyhow::Result<Self> {
         let llm = Client::from_env(cfg.model.clone())
             .map_err(|e| anyhow::anyhow!("type {}: api key env {:?}: {e}", cfg.name, cfg.model.api_key_env))?;
-        Ok(Self { cfg, llm })
+        let builtins: Vec<_> = builtin_tools().into_iter().map(|t| t.name).collect();
+        let mcp = mcp::McpTools::connect(&cfg.mcp, &builtins)
+            .await
+            .map_err(|e| anyhow::anyhow!("type {}: {e}", cfg.name))?;
+        Ok(Self { cfg, llm, mcp })
     }
 
     fn tool_defs(&self) -> Vec<ToolDef> {
-        builtin_tools()
-    }
-
-    async fn call_tool(&self, call: &ToolCall) -> Result<String, String> {
-        Err(format!("unknown tool {:?}", call.function.name))
+        let mut t = builtin_tools();
+        t.extend(self.mcp.defs());
+        t
     }
 
     fn idempotent(&self, name: &str) -> bool {
@@ -83,11 +87,11 @@ pub struct Spawner {
 }
 
 impl Spawner {
-    pub fn new(cfg: &Config) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &Config) -> anyhow::Result<Self> {
         let token = cfg.token_env.as_deref().map(std::env::var).transpose()?;
         let mut types = HashMap::new();
         for t in &cfg.types {
-            let rt = TypeRt::new(t.clone())?;
+            let rt = TypeRt::new(t.clone()).await?;
             types.insert(t.info().id(), Arc::new(rt));
         }
         Ok(Self { name: cfg.name.clone(), capacity: cfg.capacity, token, types })
@@ -323,20 +327,19 @@ impl ToolTask {
             Ok(content) => Event::ToolResult { call_id: call.id.clone(), content, is_error: false },
             Err(e) => Event::ToolResult { call_id: call.id.clone(), content: format!("error: {e}"), is_error: true },
         };
-        let fut = async {
-            match builtin_op(&call) {
-                Some(Err(e)) => Some(Err(e)),
-                // Read-only ops are safe to repeat; the rest may have happened already.
-                Some(Ok(op)) if retry && !matches!(op, Op::ListAgents | Op::ListTypes) => None,
-                Some(Ok(op)) => Some(self.link.request(self.agent, self.epoch, op).await.map(|v| v.to_string())),
-                None if retry && !self.rt.idempotent(&call.function.name) => None,
-                None => Some(self.rt.call_tool(&call).await),
-            }
+        let name = call.function.name.as_str();
+        let r = match builtin_op(&call) {
+            Some(Err(e)) => Some(Err(e)),
+            // Read-only ops are safe to repeat; the rest may have happened already.
+            Some(Ok(op)) if retry && !matches!(op, Op::ListAgents | Op::ListTypes) => None,
+            Some(Ok(op)) => tokio::select! {
+                r = self.link.request(self.agent, self.epoch, op) => Some(r.map(|v| v.to_string())),
+                _ = self.abort.cancelled() => None,
+            },
+            None if retry && self.rt.mcp.has(name) && !self.rt.idempotent(name) => None,
+            None => self.rt.mcp.call(name, &call.function.arguments, &self.abort).await,
         };
-        let ev = tokio::select! {
-            r = fut => r.map_or_else(aborted, done),
-            _ = self.abort.cancelled() => aborted(),
-        };
+        let ev = r.map_or_else(aborted, done);
         self.p.propose(vec![ev]);
     }
 }

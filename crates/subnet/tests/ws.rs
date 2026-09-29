@@ -118,7 +118,7 @@ async fn real_spawner_over_websocket_answers() {
     llm.say("sys", &["over the wire"]);
     let hub = Hub::open(&db_url().await, None).await.unwrap();
     let url = serve(hub.clone()).await;
-    let sp = Arc::new(subnet::spawner::Spawner::new(&spawner_cfg(&llm.url, None)).unwrap());
+    let sp = Arc::new(subnet::spawner::Spawner::new(&spawner_cfg(&llm.url, None)).await.unwrap());
     let task = tokio::spawn(async move { subnet::spawner::ws::run(sp, &url).await });
     // Wait for the type to show up.
     for _ in 0..100 {
@@ -137,7 +137,7 @@ async fn real_spawner_over_websocket_answers() {
 async fn rejected_spawner_stops() {
     let hub = Hub::open(&db_url().await, Some("tok".into())).await.unwrap();
     let url = serve(hub).await;
-    let sp = Arc::new(subnet::spawner::Spawner::new(&spawner_cfg("http://unused", None)).unwrap());
+    let sp = Arc::new(subnet::spawner::Spawner::new(&spawner_cfg("http://unused", None)).await.unwrap());
     let r = tokio::time::timeout(std::time::Duration::from_secs(5), subnet::spawner::ws::run(sp, &url)).await.unwrap();
     assert!(r.unwrap_err().to_string().contains("bad token"));
 }

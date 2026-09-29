@@ -67,13 +67,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Spawner { config } => {
             let cfg = Config::load(&config)?;
-            let spawner = Arc::new(Spawner::new(&cfg)?);
+            let spawner = Arc::new(Spawner::new(&cfg).await?);
             subnet::spawner::ws::run(spawner, &cfg.hub).await?;
         }
         Cmd::Dev { hub, config } => {
             let cfg = Config::load(&config)?;
             let hub = serve_hub(hub).await?;
-            attach(hub, Arc::new(Spawner::new(&cfg)?)).await?;
+            attach(hub, Arc::new(Spawner::new(&cfg).await?)).await?;
             std::future::pending::<()>().await;
         }
     }

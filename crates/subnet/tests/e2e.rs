@@ -57,7 +57,7 @@ impl Net {
     }
 
     async fn spawner(&self, name: &str, types: Vec<TypeConfig>) -> u64 {
-        attach(self.hub.clone(), Arc::new(Spawner::new(&config(name, types)).unwrap())).await.unwrap()
+        attach(self.hub.clone(), Arc::new(Spawner::new(&config(name, types)).await.unwrap())).await.unwrap()
     }
 
     async fn spawn(&self, ty: &str, prompt: &str) -> AgentId {
