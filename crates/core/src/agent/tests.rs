@@ -373,8 +373,8 @@ fn child_report(id: AgentId, s: &str) -> Event {
 #[test]
 fn wait_for_blocks_until_all_children_report() {
     let mut h = H::new(spec());
-    h.ev(Event::ChildSpawned { id: kid(1) });
-    h.ev(Event::ChildSpawned { id: kid(2) });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
+    h.ev(Event::ChildSpawned { id: kid(2), reserved: 0 });
     h.user("x");
     h.call(0, "w", WAIT_FOR, &format!(r#"{{"ids":["{}","agent:{}"]}}"#, kid(1), kid(2)));
     assert!(h.done().is_empty());
@@ -389,7 +389,7 @@ fn wait_for_blocks_until_all_children_report() {
 #[test]
 fn wait_for_already_reported_child_returns_immediately() {
     let mut h = H::new(spec());
-    h.ev(Event::ChildSpawned { id: kid(1) });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
     h.user("x");
     h.ev(child_report(kid(1), "early"));
     h.call(0, "w", WAIT_FOR, &format!(r#"{{"ids":["{}"]}}"#, kid(1)));
@@ -417,7 +417,7 @@ fn wait_for_bad_args_is_a_tool_error() {
 #[test]
 fn child_report_wakes_idle_parent() {
     let mut h = H::new(spec());
-    h.ev(Event::ChildSpawned { id: kid(1) });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
     assert_eq!(h.ev(child_report(kid(1), "done!")), vec![Effect::CallLlm]);
     assert!(h.contents()[0].1.starts_with(&format!("[report from agent:{} (idle)]", kid(1))));
 }
@@ -425,7 +425,7 @@ fn child_report_wakes_idle_parent() {
 #[test]
 fn child_report_while_busy_waits_for_next_call() {
     let mut h = H::new(spec());
-    h.ev(Event::ChildSpawned { id: kid(1) });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
     h.user("x");
     h.call(0, "c1", "a", "{}");
     h.done();
@@ -437,7 +437,7 @@ fn child_report_while_busy_waits_for_next_call() {
 #[test]
 fn crash_while_waiting_for_children_keeps_waiting() {
     let mut h = H::new(spec());
-    h.ev(Event::ChildSpawned { id: kid(1) });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
     h.user("x");
     h.call(0, "w", WAIT_FOR, &format!(r#"{{"ids":["{}"]}}"#, kid(1)));
     h.done();
@@ -490,6 +490,19 @@ fn token_budget_fails_the_agent() {
 }
 
 #[test]
+fn tokens_reserved_for_children_count_against_budget() {
+    let mut h = H::new(Spec { budget: Budget { max_tokens: Some(100), ..Default::default() }, ..spec() });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 100 });
+    assert_eq!(h.a.remaining_tokens(), Some(0));
+    assert!(matches!(h.user("x").as_slice(), [Effect::Report { status: Status::Failed, .. }]));
+}
+
+#[test]
+fn unlimited_budget_has_no_remaining() {
+    assert_eq!(H::new(spec()).a.remaining_tokens(), None);
+}
+
+#[test]
 fn events_roundtrip_through_json() {
     let evs = vec![
         Event::Inbox { from: Addr::Client("c".into()), content: "x".into() },
@@ -510,7 +523,7 @@ fn events_roundtrip_through_json() {
 #[test]
 fn replay_of_long_session_matches_live_state() {
     let mut h = H::new(Spec { approve: vec!["rm".into()], ..spec() });
-    h.ev(Event::ChildSpawned { id: kid(1) });
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
     h.user("a");
     h.call(0, "c1", "rm", "{}");
     h.done();

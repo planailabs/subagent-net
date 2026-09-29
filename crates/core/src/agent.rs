@@ -70,7 +70,8 @@ pub enum Event {
     ToolResult { call_id: String, content: String, #[serde(default)] is_error: bool },
     ToolAborted { call_id: String },
     Approval { call_id: String, approved: bool },
-    ChildSpawned { id: AgentId },
+    /// `reserved` tokens are carved out of this agent's budget for the child.
+    ChildSpawned { id: AgentId, #[serde(default)] reserved: u64 },
     ChildReport { id: AgentId, status: Status, content: String },
     PauseRequested { mode: PauseMode },
     Resumed,
@@ -139,6 +140,8 @@ pub struct Agent {
     /// Children and their reports not yet shown to the model.
     pub children: BTreeMap<AgentId, Vec<Report>>,
     pub usage: Usage,
+    /// Tokens handed to children.
+    pub reserved: u64,
 }
 
 impl Agent {
@@ -154,6 +157,7 @@ impl Agent {
             reply_to: BTreeSet::new(),
             children: BTreeMap::new(),
             usage: Usage::default(),
+            reserved: 0,
         }
     }
 
@@ -182,6 +186,11 @@ impl Agent {
         }
         self.advance(&mut fx);
         fx
+    }
+
+    /// Tokens left for this agent and future children; `None` = unlimited.
+    pub fn remaining_tokens(&self) -> Option<u64> {
+        self.spec.budget.max_tokens.map(|m| m.saturating_sub(self.usage.total() + self.reserved))
     }
 
     /// True when something is running on the spawner for this agent.
@@ -275,8 +284,9 @@ impl Agent {
                     }
                 }
             }
-            Event::ChildSpawned { id } => {
+            Event::ChildSpawned { id, reserved } => {
                 self.children.entry(*id).or_default();
+                self.reserved += reserved;
             }
             Event::ChildReport { id, status, content } => {
                 self.children.entry(*id).or_default().push(Report { status: *status, content: content.clone() });
@@ -334,10 +344,9 @@ impl Agent {
                 }
                 Phase::Thinking { .. } => {
                     self.inject_pending();
-                    if let Some(max) = self.spec.budget.max_tokens
-                        && self.usage.total() >= max
-                    {
-                        self.fail(format!("token budget exhausted ({} >= {max})", self.usage.total()), fx);
+                    if self.remaining_tokens() == Some(0) {
+                        let used = self.usage.total() + self.reserved;
+                        self.fail(format!("token budget exhausted ({used} used or reserved for children)"), fx);
                         return;
                     }
                     self.phase = Phase::Thinking { running: true };
