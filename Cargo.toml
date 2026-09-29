@@ -11,10 +11,12 @@ subnet-core = { path = "crates/core" }
 subnet-llm = { path = "crates/llm" }
 subnet-ops = { path = "crates/ops" }
 subnet-cluster = { path = "crates/cluster" }
+subnet-switchboard = { path = "crates/switchboard" }
 anyhow = "1"
 hcl-rs = "0.19"
 indexmap = { version = "2", features = ["serde"] }
 croner = "4"
+cel-interpreter = { version = "0.10", features = ["json"] }
 clap = { version = "4", features = ["derive", "env", "string"] }
 axum = { version = "0.8", features = ["ws"] }
 eventsource-stream = "0.2"

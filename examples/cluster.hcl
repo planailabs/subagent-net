@@ -56,7 +56,7 @@ resident "concierge" {
 sense "door" {
   node = "pi-hall"
   source { exec = ["python3", "door_i2c.py"] }             # JSON lines on stdout
-  stage "debounce-bounces" { filter = "event.state != prev.state" }
+  stage "debounce-bounces" { filter = "prev == null || event.state != prev.state" }
 }
 sense "hall-mic" {
   node = "pi-hall"
@@ -84,7 +84,7 @@ sense "github" {
 route "door-open" {
   from     = "door"
   when     = "event.state == 'open'"
-  map      = "{'at': event.at, 'who': event.card}"
+  map      = "{'at': at, 'who': event.card}"
   throttle = "1/10s"
   deliver { mailbox = "door-events" }
   deliver { send = "concierge" }

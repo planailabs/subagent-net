@@ -93,7 +93,7 @@ resident "concierge" {
 sense "door" {
   node = "pi-hall"
   source { exec = ["python3", "door_i2c.py"] }             # JSON lines on stdout
-  stage "debounce-bounces" { filter = "event.state != prev.state" }
+  stage "debounce-bounces" { filter = "prev == null || event.state != prev.state" }
 }
 sense "hall-mic" {
   node = "pi-hall"
@@ -121,7 +121,7 @@ sense "github" {
 route "door-open" {
   from     = "door"
   when     = "event.state == 'open'"
-  map      = "{'at': event.at, 'who': event.card}"
+  map      = "{'at': at, 'who': event.card}"
   throttle = "1/10s"
   deliver { mailbox = "door-events" }
   deliver { send = "concierge" }
@@ -278,11 +278,13 @@ A sense whose source declares `stream = "<format>"` publishes a **binary stream*
   - `file { path, glob }`: file created/changed events.
 - **Stages** run in order on the sense's node:
   - `exec`: a long-running process; input on stdin (events as JSON lines, or stream bytes), output events as JSON lines. This is where STT, VAD, image models and other pre-processing live.
-  - `filter` (CEL → bool) and `map` (CEL → value). CEL sees `event`, and `prev` (the previous event the stage let through).
+  - `filter` (CEL → bool) and `map` (CEL → value). CEL sees `event`, and `prev` (the previous event the stage let through; `null` at first).
 
 ### Switchboard
 
 The switchboard runs in the hub. For every event it evaluates each `route` whose `from` matches:
+
+CEL expressions in routes see `event` (the event data), `sense`, `at` (unix ms) and `id`; `prompt` and mcp `args` see `event` and `batch` (a list; one element unless batched). JSON integers are CEL `int` and other numbers `double`, so `event.n * 2` works. An expression that fails at runtime drops that event and counts an error; invalid expressions are rejected at apply time.
 
 1. `when` (CEL): drop the event if false.
 2. `map` (CEL): reshape the event data.
