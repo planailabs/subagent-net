@@ -61,6 +61,10 @@ fn node_config_selects_what_a_node_runs() {
     assert_eq!(gpu.agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["deepseek-flash"]);
     assert_eq!(gpu.mcps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["memory"]);
     assert_eq!(gpu.senses.keys().collect::<Vec<_>>(), ["hall-speech", "hourly"]);
+    assert_eq!(gpu.relay_in, ["hall-mic"], "hall-mic is published on pi-hall");
+    let pi = c.node_config("pi-hall").unwrap();
+    assert_eq!(pi.relay_out, ["hall-mic"]);
+    assert!(pi.relay_in.is_empty() && gpu.relay_out.is_empty());
     let laptop = c.node_config("laptop").unwrap();
     assert_eq!(laptop.capacity, 4);
     assert_eq!(laptop.agents[0].id, gpu.agents[0].id, "same type, same identity on every node");

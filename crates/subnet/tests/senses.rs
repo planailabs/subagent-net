@@ -138,3 +138,37 @@ async fn broken_senses_are_reported() {
     }
     panic!("sense error never reported");
 }
+
+fn two_node_stream_cluster() -> String {
+    format!(
+        "node \"pub\" {{}}\nnode \"sub\" {{}}\nsense \"mic\" {{\n  node = \"pub\"\n  source {{\n    exec = [{k:?}, \"stream\", \"far\", \"50\"]\n    stream = \"text\"\n  }}\n}}\nsense \"heard\" {{\n  node = \"sub\"\n  source {{ stream = \"mic\" }}\n  stage \"stt\" {{ exec = [{k:?}, \"words\"] }}\n}}\n",
+        k = kit()
+    )
+}
+
+#[tokio::test]
+async fn streams_cross_nodes_in_process() {
+    let n = Net::new(&two_node_stream_cluster()).await;
+    let mut rx = n.hub.subscribe();
+    n.node("pub").await;
+    n.node("sub").await;
+    let got = events(&mut rx, "heard", 2).await;
+    assert!(got.iter().all(|e| e["text"].as_str().unwrap().contains("far")), "{got:?}");
+}
+
+#[tokio::test]
+async fn streams_cross_nodes_over_websockets() {
+    let n = Net::new(&two_node_stream_cluster()).await;
+    let mut rx = n.hub.subscribe();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    let app = subnet::hub::http::router(n.hub.clone());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    for name in ["pub", "sub"] {
+        let node = std::sync::Arc::new(subnet::node::Node::new(name, None));
+        let b = base.clone();
+        tokio::spawn(async move { subnet::node::ws::run(node, &b).await });
+    }
+    let got = events(&mut rx, "heard", 2).await;
+    assert!(got.iter().all(|e| e["text"].as_str().unwrap().contains("far")), "{got:?}");
+}

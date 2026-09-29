@@ -28,6 +28,8 @@ pub async fn run(node: Arc<Node>, hubs: &str) -> anyhow::Result<()> {
         let url = &urls[i % urls.len()];
         match tokio_tungstenite::connect_async(url.as_str()).await {
             Ok((ws, _)) => {
+                let base = url.trim_end_matches("/node").to_string();
+                node.set_relay_link(super::relay::RelayLink::Ws { hub: base, name: node.name.clone(), token: node.token.clone() });
                 backoff = Duration::from_secs(1);
                 match session(&node, ws).await {
                     Some(reason) if reason.starts_with("not the leader") => tracing::info!(%url, "{reason}"),

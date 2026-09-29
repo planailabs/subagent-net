@@ -613,8 +613,27 @@ impl Cluster {
             .filter(|(_, m)| m.nodes.iter().any(|n| n == node))
             .map(|(n, m)| NodeMcp { id: self.mcp_id(n).unwrap(), name: n.clone(), def: m.clone() })
             .collect();
-        let senses = self.senses.iter().filter(|(_, s)| s.node == node).map(|(n, s)| (n.clone(), s.clone())).collect();
-        Some(NodeConfig { node: node.to_string(), capacity: def.capacity, agents, mcps, senses })
+        let senses: IndexMap<String, SenseDef> =
+            self.senses.iter().filter(|(_, s)| s.node == node).map(|(n, s)| (n.clone(), s.clone())).collect();
+        // Streams crossing nodes go through the hub's relay.
+        let subscribe_to = |s: &SenseDef| match s.source.kind() {
+            Ok(SourceKind::Subscribe(from)) => Some(from.to_string()),
+            _ => None,
+        };
+        let mut relay_out: Vec<String> = senses
+            .keys()
+            .filter(|n| self.senses.values().any(|o| o.node != node && subscribe_to(o).as_deref() == Some(n.as_str())))
+            .cloned()
+            .collect();
+        let mut relay_in: Vec<String> = senses
+            .values()
+            .filter_map(subscribe_to)
+            .filter(|from| self.senses.get(from).is_some_and(|p| p.node != node))
+            .collect();
+        relay_out.sort();
+        relay_in.sort();
+        relay_in.dedup();
+        Some(NodeConfig { node: node.to_string(), capacity: def.capacity, agents, mcps, senses, relay_out, relay_in })
     }
 
     /// Changes from `self` to `new`, per block.
@@ -670,6 +689,12 @@ pub struct NodeConfig {
     pub agents: Vec<NodeAgent>,
     pub mcps: Vec<NodeMcp>,
     pub senses: IndexMap<String, SenseDef>,
+    /// Streams published here that senses on other nodes subscribe to.
+    #[serde(default)]
+    pub relay_out: Vec<String>,
+    /// Streams subscribed here that other nodes publish.
+    #[serde(default)]
+    pub relay_in: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

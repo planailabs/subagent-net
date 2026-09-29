@@ -5,6 +5,7 @@
 
 pub mod external;
 pub mod mcp;
+pub mod relay;
 pub mod senses;
 pub mod ws;
 
@@ -102,6 +103,10 @@ pub struct Node {
     pub senses: Arc<senses::Senses>,
     /// Sense output, forwarded to whichever hub connection is up.
     sense_rx: tokio::sync::Mutex<mpsc::Receiver<senses::SenseOut>>,
+    /// How to reach the hub's stream relay (set by whoever connects us).
+    relay_link: std::sync::Mutex<Option<relay::RelayLink>>,
+    /// The running relay: its link, its streams and its stop token.
+    relay: std::sync::Mutex<Option<(String, Vec<String>, Vec<String>, CancellationToken)>>,
 }
 
 type Pending<T> = std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<T, String>>>>;
@@ -169,7 +174,36 @@ impl Node {
             rt: RwLock::new(Rt::default()),
             senses: senses::Senses::new(tx),
             sense_rx: tokio::sync::Mutex::new(rx),
+            relay_link: Default::default(),
+            relay: Default::default(),
         }
+    }
+
+    pub fn set_relay_link(&self, link: relay::RelayLink) {
+        *self.relay_link.lock().unwrap() = Some(link);
+    }
+
+    /// (Re)starts the stream relay if its streams or its hub changed.
+    fn configure_relay(&self, out: &[String], inn: &[String]) {
+        let link = self.relay_link.lock().unwrap().clone();
+        let key = link.as_ref().map(relay::RelayLink::key).unwrap_or_default();
+        let mut cur = self.relay.lock().unwrap();
+        if cur.as_ref().is_some_and(|(k, o, i, _)| *k == key && o == out && i == inn) {
+            return;
+        }
+        if let Some((_, _, _, stop)) = cur.take() {
+            stop.cancel();
+        }
+        if out.is_empty() && inn.is_empty() {
+            return;
+        }
+        let Some(link) = link else {
+            tracing::warn!("streams need relaying but this node has no relay link");
+            return;
+        };
+        let stop = CancellationToken::new();
+        tokio::spawn(relay::run(link, self.senses.clone(), out.to_vec(), inn.to_vec(), stop.clone()));
+        *cur = Some((key, out.to_vec(), inn.to_vec(), stop));
     }
 
     pub fn hello(&self) -> ToHub {
@@ -180,6 +214,7 @@ impl Node {
     /// what is available. Runtimes of unchanged types are kept.
     pub async fn configure(&self, cfg: &NodeConfig) -> ToHub {
         self.senses.configure(&cfg.senses);
+        self.configure_relay(&cfg.relay_out, &cfg.relay_in);
         let mut rt = self.rt.write().await;
         rt.agents.retain(|id, _| cfg.agents.iter().any(|a| &a.id == id));
         rt.mcps.retain(|id, _| cfg.mcps.iter().any(|m| &m.id == id));
@@ -581,6 +616,7 @@ impl ToolTask {
 
 /// Runs a node against an in-process hub (single-process mode and tests).
 pub async fn attach(hub: Arc<crate::hub::Hub>, node: Arc<Node>) -> anyhow::Result<crate::hub::ConnId> {
+    node.set_relay_link(relay::RelayLink::Local(hub.clone()));
     let mut hello = node.hello();
     if let ToHub::Hello { token, .. } = &mut hello {
         *token = hub.token();

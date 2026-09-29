@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod db;
 pub mod http;
+pub mod relay;
 pub mod switchboard;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -169,6 +170,7 @@ pub struct Hub {
     board: std::sync::Mutex<switchboard::Board>,
     board_wake: Notify,
     me: std::sync::Weak<Hub>,
+    pub(crate) relay: relay::Relay,
 }
 
 /// Events only a node may propose; everything else originates at the hub.
@@ -215,6 +217,7 @@ impl Hub {
             board: Default::default(),
             board_wake: Notify::new(),
             me: me.clone(),
+            relay: Default::default(),
         });
         hub.load_auth().await?;
         tokio::spawn(hub.clone().board_timers());
@@ -250,6 +253,8 @@ impl Hub {
             agents: vec![],
             mcps: vec![],
             senses: Default::default(),
+            relay_out: vec![],
+            relay_in: vec![],
         })
     }
 

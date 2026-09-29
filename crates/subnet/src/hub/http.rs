@@ -36,6 +36,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .layer(middleware::from_fn_with_state(hub.clone(), auth));
     Router::new()
         .route("/node", get(node_ws))
+        .route("/streams", get(super::relay::streams_ws))
         .merge(events)
         .with_state(hub)
         .merge(subnet_ops::http::router(reg.clone(), auth_fn.clone(), "subagent-net"))

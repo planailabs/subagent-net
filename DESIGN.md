@@ -265,7 +265,7 @@ A sense emits **events**: `{ id, sense, at, data }`. `data` is JSON. Large paylo
 A sense whose source declares `stream = "<format>"` publishes a **binary stream** named after the sense instead of events.
 
 - A sense with `source { stream = "<name>" }` subscribes to it.
-- On the same node, streams are in-process pipes. Across nodes, the hub relays them over a dedicated WebSocket (`/streams`), so audio frames never delay control traffic.
+- On the same node, streams are in-process pipes. Across nodes, the hub relays them over a dedicated WebSocket per node (`/streams?node=…&token=…&subscribe=a,b`), so audio frames never delay control traffic. Frames are multiplexed as `[name length: u8][name][bytes]`. The cluster view tells each node which streams to send (`relay_out`: published here, subscribed elsewhere) and which to receive (`relay_in`). In-process nodes (`subnet dev`) use the hub's relay directly.
 - Streams are bounded (1 MiB buffer per subscriber, drop-oldest) and never logged. Agents never see streams, only events derived from them.
 
 ### Sources and stages
@@ -395,4 +395,5 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
   - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
 - **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub; the switchboard (routes, flow control, all delivery kinds, deliveries log, `list_routes`/`list_deliveries`/`list_senses`/`peek_mail`/`inject_event`).
-- **In progress (v2):** streams across nodes, blobs, snapshots, tree forks, event filters/SSE, senses/streams/blobs/switchboard, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
+- **Implemented (v2), continued:** stream relay across nodes.
+- **In progress (v2):** blobs, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
