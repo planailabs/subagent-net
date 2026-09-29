@@ -107,7 +107,7 @@ impl Hub {
 
     /// True if no token is configured or `given` matches it.
     pub fn token_ok(&self, given: Option<&str>) -> bool {
-        self.token.as_deref().is_none_or(|t| given == Some(t))
+        self.token.as_deref().is_none_or(|t| given.is_some_and(|g| ct_eq(g.as_bytes(), t.as_bytes())))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notice> {
@@ -120,7 +120,7 @@ impl Hub {
         let ToHub::Hello { name, token, types, capacity } = hello else {
             return Err("expected hello".into());
         };
-        if self.token.is_some() && token != self.token {
+        if !self.token_ok(token.as_deref()) {
             return Err("bad token".into());
         }
         let (tx, rx) = mpsc::unbounded_channel();
@@ -525,6 +525,20 @@ impl Hub {
         self.commit(st, id, vec![Event::Inbox { from: caller.clone(), content: prompt, reply: false }]).await?;
         Ok(json!({"id": id, "type": info.id()}))
     }
+}
+
+/// Constant-time comparison, so response timing doesn't leak the token.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+#[test]
+fn ct_eq_works() {
+    assert!(ct_eq(b"abc", b"abc"));
+    assert!(!ct_eq(b"abc", b"abd"));
+    assert!(!ct_eq(b"abc", b"ab"));
+    assert!(ct_eq(b"", b""));
 }
 
 enum Work {
