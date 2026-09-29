@@ -252,12 +252,15 @@ async fn approval_gates_tool() {
     n.llm.push(WORKER, |_| tool_call("c1", "list_agents", json!({})));
     n.llm.push(WORKER, |_| text(&["listed"]));
     let id = n.spawn("worker", "list").await;
-    let t = n.until(id, "approval", |t| t["phase"] == "tools").await;
+    let t = n.until(id, "approval", |t| t["awaiting_approval"].is_object()).await;
+    assert_eq!(t["awaiting_approval"]["function"]["name"], "list_agents");
+    assert_eq!(t["awaiting_approval"]["id"], "c1");
     assert_eq!(t["paused"], false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(n.llm.requests().len(), 1, "tool must not run before approval");
     n.hub.op(&Addr::User, Op::Approve { id, call_id: "c1".into(), approved: true }).await.unwrap();
     assert_eq!(n.mail().await["content"], "listed");
+    assert_eq!(n.t(id).await["awaiting_approval"], Value::Null);
 }
 
 #[tokio::test]

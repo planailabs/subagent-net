@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use uuid::Uuid;
 
 use subnet_core::addr::{Addr, AgentId};
-use subnet_core::agent::{Agent, Budget, Effect, Event, Phase, Spec};
+use subnet_core::agent::{Agent, Budget, Effect, Event, Phase, Spec, ToolWait};
 use subnet_core::proto::{Mail, Op, ToHub, ToSpawner, TypeInfo};
 
 use db::Db;
@@ -487,7 +487,12 @@ fn is_ancestor(st: &State, anc: AgentId, mut id: AgentId) -> bool {
 }
 
 fn summary(st: &State, id: AgentId, r: &AgentRec) -> Value {
+    let awaiting_approval = match &r.a.phase {
+        Phase::Tools { queue, wait: ToolWait::Approval } => json!(queue[0]),
+        _ => Value::Null,
+    };
     json!({
+        "awaiting_approval": awaiting_approval,
         "id": id,
         "type": r.a.spec.ty,
         "parent": r.a.spec.parent,
