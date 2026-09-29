@@ -155,6 +155,8 @@ impl Hub {
         let version = v.version;
         *self.cluster.write().unwrap() = ClusterState { version: Some(v), files, spec };
         tracing::info!(version, changes = changes.len(), by = %by, "cluster applied");
+        self.reconfigure_nodes().await;
+        self.sync_residents().await;
         Ok(Applied { version: Some(version), changes })
     }
 

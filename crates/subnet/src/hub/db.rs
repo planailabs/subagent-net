@@ -210,3 +210,30 @@ impl Db {
         Ok(())
     }
 }
+
+impl Db {
+    /// Takes up to `max` pending messages for `to`, oldest first.
+    pub async fn take_mail_n(&self, to: &Addr, max: u32) -> Result<Vec<Mail>, sqlx::Error> {
+        let rows = sqlx::query(
+            "with t as (
+                 update mail set taken = true
+                 where id in (select id from mail where addr = $1 and not taken order by id limit $2 for update skip locked)
+                 returning id, mail)
+             select mail from t order by id",
+        )
+        .bind(to.to_string())
+        .bind(max as i64)
+        .fetch_all(&self.0)
+        .await?;
+        rows.into_iter().map(|r| Ok(r.try_get::<Json<Mail>, _>("mail")?.0)).collect()
+    }
+
+    pub async fn peek_mail(&self, to: &Addr, max: u32) -> Result<Vec<Mail>, sqlx::Error> {
+        let rows = sqlx::query("select mail from mail where addr = $1 and not taken order by id limit $2")
+            .bind(to.to_string())
+            .bind(max as i64)
+            .fetch_all(&self.0)
+            .await?;
+        rows.into_iter().map(|r| Ok(r.try_get::<Json<Mail>, _>("mail")?.0)).collect()
+    }
+}

@@ -144,7 +144,8 @@ route "log-everything" {
 }
 ```
 
-- Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets. An agent is only ever resumed on a node offering the same hash.
+- Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets and `nodes`. An agent is only ever resumed on a node offering the same hash: changing an agent type in the cluster leaves existing agents of the old version pending (roll back, or fork them).
+- A `resident` is created when its type is available, answers to whoever applied the cluster, and is cancelled when removed from the file. Changing a resident's mixture doesn't replace the running agent.
 - `$VAR` in values and `env = "..."` in credentials are resolved on the node. A missing variable makes that type unavailable on that node, reported back to the hub and shown in `cluster status`.
 - Durations are `250ms`, `10s`, `5m`, `2h`, `1d`. Rates are `N/duration`.
 - HCL allows one attribute per line inside a block, so multi-field values on one line use object syntax: `budget = { max_tokens = 1000, max_depth = 2 }`.
@@ -330,6 +331,7 @@ The web UI and the TUI use the same API.
 
 - Hubs share one Postgres. Each hub tries `pg_try_advisory_lock(<cluster lock>)` on a dedicated connection; the holder is the **leader**.
 - Standbys answer `503` with `x-subnet-leader: <url>` on every endpoint, and retry the lock every second.
+- Nodes connect to `<hub>/node`.
 - If the leader's database session dies, the lock is released and a standby takes over. It loads state from Postgres, bumps every agent's epoch on placement as usual, and nodes reconnect to it.
 - Nodes and clients take a comma-separated list of hub URLs and rotate through it, following `x-subnet-leader` hints.
 - **Sharding later:** all hub state access goes through `Hub::agent(id)`-style lookups and the work queue, so a future shard router can own a subset of agents per hub.
@@ -374,11 +376,14 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 
 ## Status
 
-- **Implemented (v1):** core state machine, `llm` client, hub sequencer/placement/fencing/dormancy, spawner (to become node) with internal executor and per-type MCP, kill -9 failover tests.
+- **Implemented (v1):** core state machine, `llm` client, hub sequencer/placement/fencing/dormancy, internal executor, kill -9 failover tests.
 - **Implemented (v2):**
   - `ops` registry with REST/RPC + OpenAPI + docs, MCP and CLI front-ends and an HA-aware client; the hub's operations run on it.
   - `cluster` crate: HCL parsing, validation, identities, node views, diff.
   - Cluster versions (`apply_cluster`, `get_cluster`, `cluster_history`, `rollback_cluster`; `subnet apply` reads files).
   - Principals, roles and tokens (`issue_token`, `revoke_tokens`, `whoami`); `SUBNET_ADMIN_TOKEN` bootstrap; open mode without it.
   - Addresses `user:<name>`, `client:<name>`, `resident:<name>`, `mailbox:<name>`.
-- **In progress (v2):** everything else in this document. Each item moves to "implemented" in the commit that finishes it.
+  - Nodes: pull-based configuration (`Configure`/`Ready`), credential resolution on the node with errors reported in `list_nodes`, `subnet node`, `subnet dev <files>`.
+  - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
+  - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
+- **In progress (v2):** external executors, parallel tools, snapshots, tree forks, event filters/SSE, senses/streams/blobs/switchboard, HA, web UI, TUI. Each item moves to "implemented" in the commit that finishes it.

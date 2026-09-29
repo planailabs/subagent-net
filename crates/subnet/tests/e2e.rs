@@ -1,105 +1,45 @@
-//! Hub + spawners + scripted LLM, all in-process.
+//! Hub + nodes + scripted LLM, all in-process.
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use common::llm::{MockLlm, last_tool_result, text, tool_call};
-use common::{db_url, id_of};
+use common::llm::{last_tool_result, text, tool_call};
+use common::net::{Net, agent, nodes};
 use serde_json::{Value, json};
-use subnet::hub::Hub;
-use subnet::spawner::config::{Config, TypeConfig};
-use subnet::spawner::{Spawner, attach};
-use subnet_core::addr::{Addr, AgentId};
-use subnet_core::agent::{Budget, PauseMode};
+use subnet_core::addr::Addr;
+use subnet_core::agent::PauseMode;
 use subnet_core::proto::Op;
-use subnet_llm::ModelConfig;
 
 const BOSS: &str = "You are the boss.";
 const WORKER: &str = "You are a worker.";
 
-fn ty(name: &str, system: &str, url: &str) -> TypeConfig {
-    TypeConfig {
-        name: name.into(),
-        description: String::new(),
-        system: system.into(),
-        model: ModelConfig {
-            base_url: url.into(),
-            model: "mock".into(),
-            api_key_env: None,
-            prefill: false,
-            params: Default::default(),
-        },
-        mcp: vec![],
-        spawns: vec![],
-        budget: Budget { max_tokens: None, max_depth: 0, max_children: 0 },
-        approve: vec![],
-        idempotent: vec![],
-    }
+/// boss (may spawn workers) and worker on nodes a, b and s; `worker_extra`
+/// adds attributes to the worker type.
+fn cluster(worker_extra: &str) -> String {
+    let all = ["a", "b", "s"];
+    format!(
+        "{}{}{}",
+        nodes(&all),
+        agent(
+            "boss",
+            BOSS,
+            "{llm}",
+            &all,
+            "  spawns = [\"worker\"]\n  budget = { max_tokens = 100000, max_depth = 1, max_children = 4 }"
+        ),
+        agent("worker", WORKER, "{llm}", &all, worker_extra),
+    )
 }
 
-fn config(name: &str, types: Vec<TypeConfig>) -> Config {
-    Config { hub: String::new(), name: name.into(), capacity: 8, token_env: None, types }
-}
-
-fn std_types(llm: &MockLlm) -> Vec<TypeConfig> {
-    let mut boss = ty("boss", BOSS, &llm.url);
-    boss.spawns = vec!["worker".into()];
-    boss.budget = Budget { max_tokens: Some(100_000), max_depth: 1, max_children: 4 };
-    vec![boss, ty("worker", WORKER, &llm.url)]
-}
-
-struct Net {
-    hub: Arc<Hub>,
-    llm: MockLlm,
-}
-
-impl Net {
-    async fn new() -> Self {
-        let llm = MockLlm::start().await;
-        let hub = Hub::open(&db_url().await, None).await.unwrap();
-        Self { hub, llm }
-    }
-
-    async fn spawner(&self, name: &str, types: Vec<TypeConfig>) -> u64 {
-        attach(self.hub.clone(), Arc::new(Spawner::new(&config(name, types)).await.unwrap())).await.unwrap()
-    }
-
-    async fn spawn(&self, ty: &str, prompt: &str) -> AgentId {
-        id_of(&self.hub.op(&Addr::root(), Op::Spawn { ty: ty.into(), prompt: prompt.into() }).await.unwrap())
-    }
-
-    async fn mail(&self) -> Value {
-        let m = self.hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
-        if m.as_array().unwrap().is_empty() {
-            let agents = self.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
-            panic!("no mail within timeout; agents: {agents}");
-        }
-        m[0].clone()
-    }
-
-    async fn t(&self, id: AgentId) -> Value {
-        self.hub.op(&Addr::root(), Op::Transcript { id }).await.unwrap()
-    }
-
-    /// Polls the transcript until `f` holds.
-    async fn until(&self, id: AgentId, what: &str, f: impl Fn(&Value) -> bool) -> Value {
-        for _ in 0..200 {
-            let t = self.t(id).await;
-            if f(&t) {
-                return t;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("timed out waiting for {what}: {}", self.t(id).await);
-    }
+async fn net() -> Net {
+    Net::new(&cluster("")).await
 }
 
 #[tokio::test]
 async fn user_gets_the_answer() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.say(WORKER, &["Hello", " there"]);
     let id = n.spawn("worker", "hi").await;
     let m = n.mail().await;
@@ -116,8 +56,8 @@ async fn user_gets_the_answer() {
 
 #[tokio::test]
 async fn conversation_continues_with_follow_ups() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.say(WORKER, &["one"]);
     n.llm.say(WORKER, &["two"]);
     let id = n.spawn("worker", "count").await;
@@ -130,8 +70,8 @@ async fn conversation_continues_with_follow_ups() {
 
 #[tokio::test]
 async fn builtin_tool_round_trip() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.push(WORKER, |_| tool_call("c1", "list_types", json!({})));
     n.llm.push(WORKER, |body| {
         let types: Value = serde_json::from_str(&last_tool_result(body)).unwrap();
@@ -144,8 +84,8 @@ async fn builtin_tool_round_trip() {
 
 #[tokio::test]
 async fn unknown_tool_is_reported_to_the_model() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.push(WORKER, |_| tool_call("c1", "teleport", json!({})));
     n.llm.push(WORKER, |body| text(&[&last_tool_result(body)]));
     n.spawn("worker", "go").await;
@@ -155,8 +95,8 @@ async fn unknown_tool_is_reported_to_the_model() {
 
 #[tokio::test]
 async fn boss_spawns_worker_and_waits_for_it() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.push(BOSS, |_| tool_call("s1", "spawn_agent", json!({"type":"worker","prompt":"compute 6*7"})));
     n.llm.push(BOSS, |body| {
         let id = serde_json::from_str::<Value>(&last_tool_result(body)).unwrap()["id"].as_str().unwrap().to_string();
@@ -182,8 +122,8 @@ async fn boss_spawns_worker_and_waits_for_it() {
 
 #[tokio::test]
 async fn hard_pause_keeps_partial_and_resume_continues_it() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.set_gap(Duration::from_millis(150));
     n.llm.say(WORKER, &["The ", "quick ", "brown ", "fox ", "jumps ", "over"]);
     let id = n.spawn("worker", "write").await;
@@ -207,10 +147,8 @@ async fn hard_pause_keeps_partial_and_resume_continues_it() {
 
 #[tokio::test]
 async fn prefill_models_continue_the_partial_directly() {
-    let n = Net::new().await;
-    let mut types = std_types(&n.llm);
-    types[1].model.prefill = true;
-    n.spawner("s", types).await;
+    let n = Net::new(&cluster("  prefill = true")).await;
+    n.node("s").await;
     n.llm.set_gap(Duration::from_millis(150));
     n.llm.say(WORKER, &["a", "b", "c", "d", "e", "f"]);
     let id = n.spawn("worker", "x").await;
@@ -228,33 +166,31 @@ async fn prefill_models_continue_the_partial_directly() {
 }
 
 #[tokio::test]
-async fn spawner_crash_moves_agent_and_keeps_partial() {
-    let n = Net::new().await;
-    let a = n.spawner("a", std_types(&n.llm)).await;
+async fn node_crash_moves_agent_and_keeps_partial() {
+    let n = net().await;
+    let a = n.node("a").await;
     n.llm.set_gap(Duration::from_millis(150));
     n.llm.say(WORKER, &["alpha ", "beta ", "gamma ", "delta ", "epsilon"]);
     let id = n.spawn("worker", "greek").await;
-    n.until(id, "on spawner a", |t| t["spawner"] == "a").await;
+    n.until(id, "on node a", |t| t["node"] == "a").await;
     let t = n.until(id, "partial", |t| t["partial"]["content"].as_str().is_some_and(|c| c.len() >= 6)).await;
     assert!(t["partial"].is_object());
 
     n.llm.set_gap(Duration::ZERO);
     n.llm.say(WORKER, &["<continued>"]);
-    n.hub.disconnect(a).await; // spawner a dies
-    n.spawner("b", std_types(&n.llm)).await;
+    n.hub.disconnect(a).await; // node a dies
+    n.node("b").await;
     let m = n.mail().await;
     let c = m["content"].as_str().unwrap();
     assert!(c.starts_with("alpha "), "{c}");
     assert!(c.ends_with("<continued>"), "{c}");
-    assert_eq!(n.t(id).await["spawner"], "b");
+    assert_eq!(n.t(id).await["node"], "b");
 }
 
 #[tokio::test]
 async fn approval_gates_tool() {
-    let n = Net::new().await;
-    let mut types = std_types(&n.llm);
-    types[1].approve = vec!["list_agents".into()];
-    n.spawner("s", types).await;
+    let n = Net::new(&cluster("  approve = [\"list_agents\"]")).await;
+    n.node("s").await;
     n.llm.push(WORKER, |_| tool_call("c1", "list_agents", json!({})));
     n.llm.push(WORKER, |_| text(&["listed"]));
     let id = n.spawn("worker", "list").await;
@@ -271,8 +207,8 @@ async fn approval_gates_tool() {
 
 #[tokio::test]
 async fn llm_error_fails_agent_and_resume_retries() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     // No scripted reply → mock answers 500 → retried, then fails.
     let id = n.spawn("worker", "x").await;
     let m = n.mail().await;
@@ -285,8 +221,8 @@ async fn llm_error_fails_agent_and_resume_retries() {
 
 #[tokio::test]
 async fn cancel_stops_streaming_agent() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.set_gap(Duration::from_millis(200));
     n.llm.say(WORKER, &["a", "b", "c", "d", "e"]);
     let id = n.spawn("worker", "x").await;
@@ -296,13 +232,13 @@ async fn cancel_stops_streaming_agent() {
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let t = n.t(id).await;
     assert_eq!(t["phase"], "cancelled");
-    assert_eq!(t["spawner"], Value::Null);
+    assert_eq!(t["node"], Value::Null);
 }
 
 #[tokio::test]
 async fn agents_message_each_other_and_replies_come_back() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     // B (a boss, for its own reply queue) answers; A messages B, then reports what B said.
     n.llm.say(BOSS, &["B idle"]);
     let b = n.spawn("boss", "wait").await;
@@ -327,8 +263,8 @@ async fn agents_message_each_other_and_replies_come_back() {
 
 #[tokio::test]
 async fn boss_pauses_and_cancels_its_worker() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.set_gap(Duration::from_millis(100));
     n.llm.say(WORKER, &["w1 ", "w2 ", "w3 ", "w4 ", "w5 ", "w6 ", "w7 ", "w8"]);
     n.llm.push(BOSS, |_| tool_call("s1", "spawn_agent", json!({"type":"worker","prompt":"long job"})));
@@ -357,8 +293,8 @@ async fn boss_pauses_and_cancels_its_worker() {
 
 #[tokio::test]
 async fn agents_cannot_touch_strangers() {
-    let n = Net::new().await;
-    n.spawner("s", std_types(&n.llm)).await;
+    let n = net().await;
+    n.node("s").await;
     n.llm.say(WORKER, &["x"]);
     let stranger = n.spawn("worker", "hi").await;
     n.mail().await;
@@ -368,4 +304,64 @@ async fn agents_cannot_touch_strangers() {
     let c = n.mail().await["content"].as_str().unwrap().to_string();
     assert!(c.contains("not a descendant"), "{c}");
     assert_eq!(n.t(stranger).await["phase"], "idle");
+}
+
+const CONCIERGE: &str = "You are the concierge.";
+
+fn resident_cluster() -> String {
+    format!(
+        "{}{}mixture \"desk\" {{\n  agent = \"clerk\"\n  mailboxes = [\"door\"]\n}}\nresident \"concierge\" {{\n  mixture = \"desk\"\n  prompt = \"start your shift\"\n}}\n",
+        nodes(&["s"]),
+        agent("clerk", CONCIERGE, "{llm}", &["s"], ""),
+    )
+}
+
+#[tokio::test]
+async fn residents_are_created_addressable_and_removed() {
+    let n = Net::new(&resident_cluster()).await;
+    n.llm.say(CONCIERGE, &["on duty"]);
+    n.node("s").await;
+    // Created once its node is ready; its first answer goes to whoever applied.
+    assert_eq!(n.mail().await["content"], "on duty");
+    n.llm.say(CONCIERGE, &["hello yourself"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Resident("concierge".into()), content: "hello".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "hello yourself");
+    let agents = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
+    assert_eq!(agents.as_array().unwrap().len(), 1, "created exactly once");
+    let id: uuid::Uuid = agents[0]["id"].as_str().unwrap().parse().unwrap();
+    // Dropping it from the cluster cancels it.
+    n.apply(&format!("{}{}", nodes(&["s"]), agent("clerk", CONCIERGE, "{llm}", &["s"], ""))).await;
+    n.until(id, "cancelled", |t| t["phase"] == "cancelled").await;
+    let e = n.hub.op(&Addr::root(), Op::Send { to: Addr::Resident("concierge".into()), content: "?".into() }).await;
+    assert!(e.unwrap_err().contains("no resident"));
+}
+
+#[tokio::test]
+async fn mailboxes_are_readable_only_by_listed_mixtures() {
+    let n = Net::new(&resident_cluster()).await;
+    n.llm.say(CONCIERGE, &["on duty"]);
+    n.node("s").await;
+    n.mail().await;
+    let door = Addr::Mailbox("door".into());
+    for k in ["knock", "knock knock"] {
+        n.hub.op(&Addr::root(), Op::Send { to: door.clone(), content: k.into() }).await.unwrap();
+    }
+    n.llm.push(CONCIERGE, |_| tool_call("p", "mailbox_peek", json!({"name":"door"})));
+    n.llm.push(CONCIERGE, |_| tool_call("t", "mailbox_take", json!({"name":"door","max":1})));
+    n.llm.push(CONCIERGE, |_| tool_call("x", "mailbox_take", json!({"name":"secret"})));
+    n.llm.push(CONCIERGE, |body| {
+        let tools: Vec<_> = body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect();
+        text(&[&tools.join("\n")])
+    });
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Resident("concierge".into()), content: "check the door".into() }).await.unwrap();
+    let c = n.mail().await["content"].as_str().unwrap().to_string();
+    let lines: Vec<_> = c.lines().collect();
+    let peeked: Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(peeked.as_array().unwrap().len(), 2, "peek leaves both");
+    let taken: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(taken[0]["content"], "knock");
+    assert!(lines[2].contains("not listed"), "{c}");
+    // One message is left.
+    let left = n.hub.op(&Addr::root(), Op::MailboxPeek { name: "door".into(), max: 10 }).await.unwrap();
+    assert_eq!(left[0]["content"], "knock knock");
 }

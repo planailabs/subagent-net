@@ -49,6 +49,16 @@ pub fn builtin_tools() -> Vec<ToolDef> {
             obj(json!({"id":id,"tree":{"type":"boolean"}}), &["id"]),
         ),
         def("cancel_agent", "Cancel a descendant agent and its subtree.", obj(json!({"id":id}), &["id"])),
+        def(
+            "mailbox_take",
+            "Take (and remove) up to `max` messages from a mailbox your mixture may read.",
+            obj(json!({"name":{"type":"string"},"max":{"type":"integer","minimum":1}}), &["name"]),
+        ),
+        def(
+            "mailbox_peek",
+            "Look at up to `max` messages in a mailbox without removing them.",
+            obj(json!({"name":{"type":"string"},"max":{"type":"integer","minimum":1}}), &["name"]),
+        ),
     ]
 }
 
@@ -87,6 +97,15 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
     struct Id {
         id: AgentId,
     }
+    #[derive(Deserialize)]
+    struct Mailbox {
+        name: String,
+        #[serde(default = "ten")]
+        max: u32,
+    }
+    fn ten() -> u32 {
+        10
+    }
     let a = &call.function.arguments;
     Some(match call.function.name.as_str() {
         "spawn_agent" => parse::<Spawn>(a).map(|s| Op::Spawn { ty: s.ty, prompt: s.prompt }),
@@ -96,6 +115,8 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
         "pause_agent" => parse::<Pause>(a).map(|p| Op::Pause { id: p.id, mode: p.mode, tree: p.tree }),
         "resume_agent" => parse::<Resume>(a).map(|r| Op::Resume { id: r.id, tree: r.tree }),
         "cancel_agent" => parse::<Id>(a).map(|i| Op::Cancel { id: i.id }),
+        "mailbox_take" => parse::<Mailbox>(a).map(|m| Op::MailboxTake { name: m.name, max: m.max.max(1) }),
+        "mailbox_peek" => parse::<Mailbox>(a).map(|m| Op::MailboxPeek { name: m.name, max: m.max.max(1) }),
         _ => return None,
     })
 }
@@ -112,7 +133,7 @@ mod tests {
     #[test]
     fn every_builtin_except_wait_maps_to_op() {
         let id = Uuid::new_v4();
-        let args = json!({"type":"t","prompt":"p","to":"user:u","content":"c","id":id,"mode":"hard"}).to_string();
+        let args = json!({"type":"t","prompt":"p","to":"user:u","content":"c","id":id,"mode":"hard","name":"box"}).to_string();
         for t in builtin_tools() {
             let r = builtin_op(&call(&t.name, &args));
             if t.name == WAIT_FOR {
@@ -129,6 +150,12 @@ mod tests {
             builtin_op(&call("spawn_agent", r#"{"type":"coder","prompt":"go"}"#)).unwrap().unwrap(),
             Op::Spawn { ty: "coder".into(), prompt: "go".into() }
         );
+    }
+
+    #[test]
+    fn mailbox_max_defaults_and_clamps() {
+        assert_eq!(builtin_op(&call("mailbox_take", r#"{"name":"b"}"#)).unwrap().unwrap(), Op::MailboxTake { name: "b".into(), max: 10 });
+        assert_eq!(builtin_op(&call("mailbox_peek", r#"{"name":"b","max":0}"#)).unwrap().unwrap(), Op::MailboxPeek { name: "b".into(), max: 1 });
     }
 
     #[test]

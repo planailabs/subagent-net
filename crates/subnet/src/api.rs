@@ -29,7 +29,7 @@ pub struct AgentSummary {
     /// Paused and nothing left to finish.
     pub paused: bool,
     /// Node the agent currently runs on; none when dormant or pending.
-    pub spawner: Option<String>,
+    pub node: Option<String>,
     pub usage: Usage,
     /// Tokens handed to children.
     pub reserved: u64,
@@ -50,16 +50,38 @@ pub struct Transcript {
     pub inbox: Vec<Queued>,
 }
 
+/// Something that can be spawned: a mixture or a bare agent type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TypeSummary {
     pub name: String,
-    /// `name@hash`
+    /// `mixture` or `agent`.
+    pub kind: String,
+    /// `name@hash` of the agent type it runs.
     pub id: String,
     pub description: String,
-    /// Live nodes offering it.
-    pub spawners: u32,
+    /// MCP types a mixture binds.
+    pub mcp: Vec<String>,
+    /// Live nodes offering the agent type.
+    pub nodes: u32,
     /// Free agent slots on those nodes.
     pub free: u32,
+}
+
+/// A connected node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeSummary {
+    pub name: String,
+    pub capacity: u32,
+    /// Agents it runs now.
+    pub running: u32,
+    /// Has reported what it can run for the current cluster version.
+    pub configured: bool,
+    /// Agent types (ids) it can run.
+    pub agents: Vec<String>,
+    /// MCP types (ids) it runs.
+    pub mcps: Vec<String>,
+    /// What it couldn't start (id → error), e.g. a missing credential.
+    pub errors: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -231,6 +253,7 @@ macro_rules! op {
 }
 
 op!(ListTypes, "list_types", Viewer, Some((Method::Get, "/v1/types")), NoArgs, Vec<TypeSummary>, "List agent types that live nodes offer.");
+op!(ListNodes, "list_nodes", Viewer, Some((Method::Get, "/v1/nodes")), NoArgs, Vec<NodeSummary>, "List connected nodes and what they run.");
 op!(ListAgents, "list_agents", Viewer, Some((Method::Get, "/v1/agents")), NoArgs, Vec<AgentSummary>, "List all agents with phase, pause state, node and usage.");
 op!(GetAgent, "transcript", Viewer, Some((Method::Get, "/v1/agents/{id}")), IdArgs, Transcript, "An agent's transcript, partial output, queued inbox and state.");
 op!(Spawn, "spawn", Operator, Some((Method::Post, "/v1/agents")), SpawnArgs, Spawned, "Spawn an agent with a task. Its answer arrives in your inbox.");
@@ -253,6 +276,7 @@ op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkAr
 pub fn metas() -> Vec<OpMeta> {
     vec![
         OpMeta::of::<ListTypes>(),
+        OpMeta::of::<ListNodes>(),
         OpMeta::of::<ListAgents>(),
         OpMeta::of::<GetAgent>(),
         OpMeta::of::<Spawn>(),
@@ -279,6 +303,11 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<ListTypes, _, _>(move |_, _: NoArgs| {
         let h = h.clone();
         async move { Ok(h.list_types().await) }
+    });
+    let h = hub.clone();
+    r.add::<ListNodes, _, _>(move |_, _: NoArgs| {
+        let h = h.clone();
+        async move { Ok(h.list_nodes().await) }
     });
     let h = hub.clone();
     r.add::<ListAgents, _, _>(move |_, _: NoArgs| {

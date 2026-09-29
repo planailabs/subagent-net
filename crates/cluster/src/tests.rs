@@ -163,3 +163,18 @@ fn diff_reports_changes_per_block() {
     assert_eq!(d.len(), 3);
     assert!(new.diff(&new).is_empty());
 }
+
+#[test]
+fn every_example_file_is_valid() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
+    let mut n = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "hcl") {
+            let text = std::fs::read_to_string(&p).unwrap();
+            Cluster::parse(&[(p.to_str().unwrap(), &text)]).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            n += 1;
+        }
+    }
+    assert!(n >= 2);
+}

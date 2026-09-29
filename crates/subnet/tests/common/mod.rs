@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod llm;
+pub mod net;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,7 +16,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::Value;
-use subnet_core::proto::ToSpawner;
+use subnet::wire::ToNode;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 fn server_url() -> String {
@@ -74,7 +75,7 @@ pub async fn db_url() -> String {
     format!("{prefix}/{name}")
 }
 
-pub async fn recv(rx: &mut UnboundedReceiver<ToSpawner>) -> ToSpawner {
+pub async fn recv(rx: &mut UnboundedReceiver<ToNode>) -> ToNode {
     tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for hub")
@@ -82,7 +83,7 @@ pub async fn recv(rx: &mut UnboundedReceiver<ToSpawner>) -> ToSpawner {
 }
 
 /// Asserts nothing arrives for a short while.
-pub async fn quiet(rx: &mut UnboundedReceiver<ToSpawner>) {
+pub async fn quiet(rx: &mut UnboundedReceiver<ToNode>) {
     if let Ok(Some(m)) = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
         panic!("unexpected message {m:?}");
     }

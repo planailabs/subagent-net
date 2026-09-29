@@ -1,53 +1,120 @@
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{db_url, id_of, quiet, recv};
+use common::{db_url, id_of};
 use serde_json::{Value, json};
+use subnet::hub::db::ClusterFile;
 use subnet::hub::{ConnId, Hub};
+use subnet::wire::{AgentStatus, ToHub, ToNode};
 use subnet_core::addr::{Addr, AgentId};
-use subnet_core::agent::{Budget, Event, PauseMode, Status};
+use subnet_core::agent::{Event, PauseMode, Status};
 use subnet_core::chat::Delta;
-use subnet_core::proto::{Op, ToHub, ToSpawner, TypeInfo};
+use subnet_core::proto::Op;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-fn ty(name: &str, hash: &str) -> TypeInfo {
-    TypeInfo {
-        name: name.into(),
-        hash: hash.into(),
-        description: format!("{name} agent"),
-        spawns: vec![],
-        budget: Budget { max_tokens: None, max_depth: 0, max_children: 0 },
-        approve: vec![],
+/// An agent type for the test cluster.
+#[derive(Clone)]
+struct Ty {
+    name: &'static str,
+    spawns: Vec<&'static str>,
+    /// max_tokens, max_depth, max_children
+    budget: (Option<u64>, u32, u32),
+    /// The fake node reports a type id that doesn't match the cluster.
+    stale: bool,
+}
+
+fn boss() -> Ty {
+    Ty { name: "boss", spawns: vec!["worker"], budget: (Some(1000), 2, 2), stale: false }
+}
+
+fn worker() -> Ty {
+    Ty { name: "worker", spawns: vec![], budget: (Some(400), 5, 0), stale: false }
+}
+
+/// A hub plus the nodes declared so far; each new node re-applies the cluster.
+struct W {
+    hub: Arc<Hub>,
+    nodes: Mutex<Vec<(String, u32, Vec<Ty>)>>,
+}
+
+impl std::ops::Deref for W {
+    type Target = Hub;
+    fn deref(&self) -> &Hub {
+        &self.hub
     }
 }
 
-fn boss() -> TypeInfo {
-    TypeInfo {
-        spawns: vec!["worker".into()],
-        budget: Budget { max_tokens: Some(1000), max_depth: 2, max_children: 2 },
-        ..ty("boss", "b1")
+impl W {
+    fn cluster(&self) -> String {
+        let nodes = self.nodes.lock().unwrap();
+        let mut out = String::new();
+        let mut types: Vec<(Ty, Vec<String>)> = vec![];
+        for (n, cap, tys) in nodes.iter() {
+            out.push_str(&format!("node {n:?} {{ capacity = {cap} }}\n"));
+            for t in tys {
+                match types.iter_mut().find(|(x, _)| x.name == t.name) {
+                    Some((_, ns)) => ns.push(n.clone()),
+                    None => types.push((t.clone(), vec![n.clone()])),
+                }
+            }
+        }
+        for (t, ns) in types {
+            let (mt, md, mc) = t.budget;
+            let mt = mt.map(|x| format!("max_tokens = {x}, ")).unwrap_or_default();
+            out.push_str(&format!(
+                "agent {:?} {{\n  credential {{\n    base_url = \"http://unused\"\n  }}\n  model = \"m\"\n  nodes = {:?}\n  spawns = {:?}\n  budget = {{ {mt}max_depth = {md}, max_children = {mc} }}\n}}\n",
+                t.name, ns, t.spawns
+            ));
+        }
+        out
     }
-}
-
-fn worker() -> TypeInfo {
-    TypeInfo { budget: Budget { max_tokens: Some(400), max_depth: 5, max_children: 0 }, ..ty("worker", "w1") }
 }
 
 struct Sp {
     conn: ConnId,
-    rx: UnboundedReceiver<ToSpawner>,
+    rx: UnboundedReceiver<ToNode>,
 }
 
-async fn spawner(hub: &Hub, name: &str, types: Vec<TypeInfo>, capacity: u32) -> Sp {
-    let (conn, mut rx) = hub.connect(ToHub::Hello { name: name.into(), token: None, types, capacity }).await.unwrap();
-    assert_eq!(recv(&mut rx).await, ToSpawner::Welcome);
+async fn hub() -> W {
+    W { hub: Hub::open(&db_url().await, None).await.unwrap(), nodes: Mutex::new(vec![]) }
+}
+
+/// Declares node `name` running `types`, connects it and reports it ready.
+async fn spawner(w: &W, name: &str, types: Vec<Ty>, capacity: u32) -> Sp {
+    w.nodes.lock().unwrap().push((name.into(), capacity, types.clone()));
+    let files = vec![ClusterFile { name: "t.hcl".into(), text: w.cluster() }];
+    w.hub.apply_cluster(files, false, &Addr::root()).await.unwrap();
+    let (conn, mut rx) = w.hub.connect(ToHub::Hello { name: name.into(), token: None }).await.unwrap();
+    assert_eq!(common::recv(&mut rx).await, ToNode::Welcome);
+    let ToNode::Configure { config } = common::recv(&mut rx).await else { panic!("expected configure") };
+    let agents = config
+        .agents
+        .iter()
+        .map(|a| {
+            let stale = types.iter().any(|t| t.name == a.name && t.stale);
+            AgentStatus { id: if stale { format!("{}@stale", a.name) } else { a.id.clone() }, error: None }
+        })
+        .collect();
+    w.hub.handle(conn, ToHub::Ready { agents, mcps: vec![] }).await.unwrap();
     Sp { conn, rx }
 }
 
-async fn hub() -> Arc<Hub> {
-    Hub::open(&db_url().await, None).await.unwrap()
+/// Next message that isn't a (re)configuration.
+async fn recv(rx: &mut UnboundedReceiver<ToNode>) -> ToNode {
+    loop {
+        match common::recv(rx).await {
+            ToNode::Configure { .. } => continue,
+            m => return m,
+        }
+    }
+}
+
+async fn quiet(rx: &mut UnboundedReceiver<ToNode>) {
+    while let Ok(Some(m)) = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+        assert!(matches!(m, ToNode::Configure { .. }), "unexpected message {m:?}");
+    }
 }
 
 async fn spawn(hub: &Hub, caller: &Addr, ty: &str) -> Result<AgentId, String> {
@@ -56,14 +123,14 @@ async fn spawn(hub: &Hub, caller: &Addr, ty: &str) -> Result<AgentId, String> {
 
 async fn expect_assign(sp: &mut Sp) -> (AgentId, u64, Vec<Event>) {
     match recv(&mut sp.rx).await {
-        ToSpawner::Assign { agent, epoch, events, .. } => (agent, epoch, events),
+        ToNode::Assign { agent, epoch, events, .. } => (agent, epoch, events),
         m => panic!("expected assign, got {m:?}"),
     }
 }
 
 async fn expect_commit(sp: &mut Sp) -> (AgentId, u64, Event) {
     match recv(&mut sp.rx).await {
-        ToSpawner::Commit { agent, seq, event } => (agent, seq, event),
+        ToNode::Commit { agent, seq, event } => (agent, seq, event),
         m => panic!("expected commit, got {m:?}"),
     }
 }
@@ -77,9 +144,8 @@ async fn transcript(hub: &Hub, id: AgentId) -> Value {
 }
 
 #[tokio::test]
-async fn spawned_agent_waits_for_a_spawner_then_is_assigned() {
+async fn spawned_agent_waits_for_a_node_then_is_assigned() {
     let hub = hub().await;
-    assert!(spawn(&hub, &Addr::root(), "worker").await.unwrap_err().contains("no live spawner"));
     let mut sp = spawner(&hub, "s1", vec![worker()], 4).await;
     let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (agent, epoch, events) = expect_assign(&mut sp).await;
@@ -128,7 +194,7 @@ async fn stale_epoch_writes_are_fenced() {
     // a's late write, carrying epoch 1, is ignored.
     hub.handle(a.conn, ToHub::Propose { agent: id, epoch: 1, events: vec![text("stale")] }).await.unwrap();
     hub.handle(b.conn, ToHub::Propose { agent: id, epoch: 1, events: vec![text("stale")] }).await.unwrap();
-    assert_eq!(recv(&mut b.rx).await, ToSpawner::Revoke { agent: id });
+    assert_eq!(recv(&mut b.rx).await, ToNode::Revoke { agent: id });
     assert_eq!(transcript(&hub, id).await["seq"], 3, "inbox + two recoveries, nothing stale");
 }
 
@@ -146,11 +212,11 @@ async fn spawner_may_only_propose_its_own_events() {
 #[tokio::test]
 async fn placement_respects_type_hash_and_capacity() {
     let hub = hub().await;
-    let mut old = spawner(&hub, "old", vec![ty("worker", "OLD")], 4).await;
+    let mut old = spawner(&hub, "old", vec![Ty { stale: true, ..worker() }], 4).await;
     let mut sp = spawner(&hub, "new", vec![worker()], 1).await;
-    let a = spawn(&hub, &Addr::root(), "worker@w1").await.unwrap();
+    let a = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     assert_eq!(expect_assign(&mut sp).await.0, a);
-    let b = spawn(&hub, &Addr::root(), "worker@w1").await.unwrap();
+    let b = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     quiet(&mut sp.rx).await;
     quiet(&mut old.rx).await;
     let v = hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
@@ -172,8 +238,7 @@ async fn least_loaded_spawner_wins() {
 #[tokio::test]
 async fn bad_token_is_rejected() {
     let hub = Hub::open(&db_url().await, Some("secret".into())).await.unwrap();
-    let hello =
-        |t: Option<&str>| ToHub::Hello { name: "s".into(), token: t.map(Into::into), types: vec![], capacity: 1 };
+    let hello = |t: Option<&str>| ToHub::Hello { name: "s".into(), token: t.map(Into::into) };
     assert!(hub.connect(hello(None)).await.is_err());
     assert!(hub.connect(hello(Some("wrong"))).await.is_err());
     assert!(hub.connect(hello(Some("secret"))).await.is_ok());
@@ -242,7 +307,7 @@ async fn cancel_reports_to_parent_even_though_spawner_is_revoked() {
 async fn unlimited_child_type_gets_half_of_parent_budget() {
     let hub = hub().await;
     let mut w = worker();
-    w.budget.max_tokens = None;
+    w.budget.0 = None;
     let _sp = spawner(&hub, "s", vec![boss(), w], 8).await;
     let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
@@ -255,7 +320,7 @@ async fn unlimited_child_type_gets_half_of_parent_budget() {
 async fn wait_inbox_wakes_on_new_mail() {
     let hub = hub().await;
     let c = Addr::Client("sess".into());
-    let h2 = hub.clone();
+    let h2 = hub.hub.clone();
     let c2 = c.clone();
     let waiter = tokio::spawn(async move { h2.op(&c2, Op::WaitInbox { timeout_ms: Some(5000) }).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -289,7 +354,7 @@ async fn spawn_permissions_and_budgets() {
     // The child is placed like any other agent.
     let mut assigned = vec![];
     while assigned.len() < 4 {
-        if let ToSpawner::Assign { agent, .. } = recv(&mut sp.rx).await {
+        if let ToNode::Assign { agent, .. } = recv(&mut sp.rx).await {
             assigned.push(agent);
         }
     }
@@ -300,8 +365,8 @@ async fn spawn_permissions_and_budgets() {
 async fn token_reservation_limits_children() {
     let hub = hub().await;
     let mut b = boss();
-    b.budget.max_tokens = Some(500);
-    b.budget.max_children = 5;
+    b.budget.0 = Some(500);
+    b.budget.2 = 5;
     let _sp = spawner(&hub, "s", vec![b, worker()], 16).await;
     let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap(); // reserves 400
@@ -313,8 +378,8 @@ async fn token_reservation_limits_children() {
 async fn depth_budget_stops_grandchildren() {
     let hub = hub().await;
     let mut b = boss();
-    b.spawns = vec!["boss".into()];
-    b.budget.max_depth = 1;
+    b.spawns = vec!["boss"];
+    b.budget.1 = 1;
     let _sp = spawner(&hub, "s", vec![b], 16).await;
     let root = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let child = spawn(&hub, &Addr::Agent(root), "boss").await.unwrap();
@@ -352,7 +417,7 @@ async fn cancel_revokes_subtree_and_frees_capacity() {
     hub.op(&Addr::root(), Op::Cancel { id: root }).await.unwrap();
     let mut revoked = vec![];
     while revoked.len() < 2 {
-        if let ToSpawner::Revoke { agent } = recv(&mut sp.rx).await {
+        if let ToNode::Revoke { agent } = recv(&mut sp.rx).await {
             revoked.push(agent);
         }
     }
@@ -363,7 +428,7 @@ async fn cancel_revokes_subtree_and_frees_capacity() {
     // Capacity is free again.
     let n = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     loop {
-        if let ToSpawner::Assign { agent, .. } = recv(&mut sp.rx).await {
+        if let ToNode::Assign { agent, .. } = recv(&mut sp.rx).await {
             assert_eq!(agent, n);
             break;
         }
@@ -383,7 +448,7 @@ async fn approve_commits_approval() {
 #[tokio::test]
 async fn hub_restart_reloads_state_and_keeps_fencing() {
     let url = db_url().await;
-    let hub = Hub::open(&url, None).await.unwrap();
+    let hub = W { hub: Hub::open(&url, None).await.unwrap(), nodes: Mutex::new(vec![]) };
     let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
     let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
@@ -391,10 +456,11 @@ async fn hub_restart_reloads_state_and_keeps_fencing() {
     let before = transcript(&hub, id).await;
     drop(hub);
 
-    let hub = Hub::open(&url, None).await.unwrap();
+    let hub = W { hub: Hub::open(&url, None).await.unwrap(), nodes: Mutex::new(vec![]) };
     let after = transcript(&hub, id).await;
     assert_eq!(after["partial"], before["partial"]);
     assert_eq!(after["seq"], 3);
+    // Same cluster as before (applying it again changes nothing).
     let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
     let (_, epoch2, events) = expect_assign(&mut sp).await;
     assert_eq!(epoch2, epoch + 1, "epoch survives restarts");
@@ -419,13 +485,14 @@ async fn fork_copies_a_prefix() {
 }
 
 #[tokio::test]
-async fn list_types_aggregates_spawners() {
+async fn list_types_aggregates_nodes() {
     let hub = hub().await;
     let _a = spawner(&hub, "a", vec![worker(), boss()], 3).await;
     let _b = spawner(&hub, "b", vec![worker()], 2).await;
     let v = hub.op(&Addr::root(), Op::ListTypes).await.unwrap();
     let w = v.as_array().unwrap().iter().find(|t| t["name"] == "worker").unwrap();
-    assert_eq!((w["spawners"].as_u64(), w["free"].as_u64()), (Some(2), Some(5)));
+    assert_eq!((w["nodes"].as_u64(), w["free"].as_u64()), (Some(2), Some(5)));
+    assert_eq!(w["kind"], "agent");
 }
 
 async fn finish_turn(hub: &Hub, sp: &mut Sp, id: AgentId, epoch: u64, s: &str) {
@@ -437,8 +504,8 @@ async fn next_assign(sp: &mut Sp) -> ((AgentId, u64), Vec<AgentId>) {
     let mut revoked = vec![];
     loop {
         match recv(&mut sp.rx).await {
-            ToSpawner::Assign { agent, epoch, .. } => return ((agent, epoch), revoked),
-            ToSpawner::Revoke { agent } => revoked.push(agent),
+            ToNode::Assign { agent, epoch, .. } => return ((agent, epoch), revoked),
+            ToNode::Revoke { agent } => revoked.push(agent),
             _ => {}
         }
     }
@@ -492,7 +559,7 @@ async fn paused_agents_give_up_their_slot_and_come_back_on_resume() {
 async fn agents_waiting_on_children_do_not_hold_a_slot() {
     let hub = hub().await;
     let mut b = boss();
-    b.budget.max_tokens = None;
+    b.budget.0 = None;
     let mut sp = spawner(&hub, "s", vec![b, worker()], 1).await;
     let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let ((_, eb), _) = next_assign(&mut sp).await;
@@ -515,7 +582,7 @@ async fn agents_waiting_on_children_do_not_hold_a_slot() {
 
 async fn quiet_except_commits(sp: &mut Sp) {
     while let Ok(Some(m)) = tokio::time::timeout(Duration::from_millis(100), sp.rx.recv()).await {
-        assert!(matches!(m, ToSpawner::Commit { .. }), "unexpected {m:?}");
+        assert!(matches!(m, ToNode::Commit { .. }), "unexpected {m:?}");
     }
 }
 

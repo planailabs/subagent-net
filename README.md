@@ -11,8 +11,8 @@ nix develop                      # rust, postgres, sqlx-cli
 initdb -D .pg && pg_ctl -D .pg -l .pg/log start
 createdb subnet
 
-# hub + one spawner in one process
-DATABASE_URL=postgres:///subnet OPENAI_API_KEY=… subnet dev -c examples/spawner.toml
+# hub + every node of the cluster file in one process
+DATABASE_URL=postgres:///subnet OPENAI_API_KEY=… subnet dev examples/dev.hcl
 
 subnet list-types
 subnet spawn lead "Plan a CLI todo app and have workers draft each module" --wait
@@ -22,7 +22,12 @@ subnet pause <id> --mode hard    # or safe / quick; --tree for descendants
 subnet resume <id>
 ```
 
-For a real deployment, start the hub with `SUBNET_ADMIN_TOKEN` set, declare users/clients/nodes in a cluster file (`subnet apply cluster.hcl`), and issue each a token (`subnet issue-token client claude`). Clients use theirs as `SUBNET_TOKEN`.
+A real deployment:
+
+1. Run `subnet hub` (with `DATABASE_URL` and `SUBNET_ADMIN_TOKEN`); several hubs can share the database.
+2. Describe the cluster in HCL (principals, nodes, agent types, MCP servers, mixtures, residents, senses, routes; see [examples/cluster.hcl](examples/cluster.hcl)) and `subnet apply` it.
+3. Issue tokens: `subnet issue-token node gpu-1`, `subnet issue-token client claude`, …
+4. On every machine: `subnet node --name gpu-1` with `SUBNET_HUB` and `SUBNET_TOKEN`. The node pulls its part of the cluster; secrets (API keys) are read from its own environment.
 
 ## Driving it from another agent
 

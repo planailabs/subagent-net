@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use subnet::api::metas;
 use subnet::client::{Client, tail};
 use subnet::hub::{Hub, http};
-use subnet::spawner::{Spawner, attach, config::Config};
+use subnet::hub::db::ClusterFile;
+use subnet::node::{Node, attach};
 use subnet_core::addr::AgentId;
 use subnet_ops::cli::{args_from, command_name, commands};
 
@@ -42,17 +43,19 @@ struct HubArgs {
 enum Cmd {
     /// Run the hub.
     Hub(HubArgs),
-    /// Run a spawner that connects to the hub named in its config.
-    Spawner {
-        #[arg(long, short)]
-        config: PathBuf,
+    /// Run a node: connects to the hub(s) and runs its part of the cluster.
+    Node {
+        /// This node's name as declared in the cluster file.
+        #[arg(long, env = "SUBNET_NODE")]
+        name: String,
     },
-    /// Run a hub and a spawner in one process.
+    /// Run a hub, apply cluster files, and run every node they declare, all in
+    /// one process.
     Dev {
         #[command(flatten)]
         hub: HubArgs,
-        #[arg(long, short)]
-        config: PathBuf,
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
     },
     /// Stream events live (all agents, or one).
     Tail { id: Option<AgentId> },
@@ -78,6 +81,16 @@ async fn serve_hub(a: HubArgs) -> anyhow::Result<Arc<Hub>> {
         }
     });
     Ok(hub)
+}
+
+fn read_files(paths: &[PathBuf]) -> anyhow::Result<Vec<ClusterFile>> {
+    paths
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            Ok(ClusterFile { name: p.display().to_string(), text })
+        })
+        .collect()
 }
 
 fn print(v: &Value) {
@@ -153,9 +166,9 @@ async fn run_op(name: &str, sub: &ArgMatches, c: &Client) -> anyhow::Result<()> 
 async fn main() -> anyhow::Result<()> {
     let m = cli().get_matches();
     let (name, sub) = m.subcommand().expect("subcommand required");
-    let builtin = matches!(name, "hub" | "spawner" | "dev" | "tail" | "apply");
+    let builtin = matches!(name, "hub" | "node" | "dev" | "tail" | "apply");
     // Servers log their work; client commands only problems.
-    let default = if matches!(name, "hub" | "spawner" | "dev") { "info,rmcp=warn" } else { "warn" };
+    let default = if matches!(name, "hub" | "node" | "dev") { "info,rmcp=warn" } else { "warn" };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into()))
@@ -171,26 +184,25 @@ async fn main() -> anyhow::Result<()> {
             serve_hub(a).await?;
             std::future::pending::<()>().await;
         }
-        Cmd::Spawner { config } => {
-            let cfg = Config::load(&config)?;
-            let spawner = Arc::new(Spawner::new(&cfg).await?);
-            subnet::spawner::ws::run(spawner, &cfg.hub).await?;
+        Cmd::Node { name } => {
+            let node = Arc::new(Node::new(&name, cli.token));
+            subnet::node::ws::run(node, &cli.hub).await?;
         }
-        Cmd::Dev { hub, config } => {
-            let cfg = Config::load(&config)?;
+        Cmd::Dev { hub, files } => {
+            let files = read_files(&files)?;
             let hub = serve_hub(hub).await?;
-            attach(hub, Arc::new(Spawner::new(&cfg).await?)).await?;
+            let applied = hub.apply_cluster(files, false, &subnet_core::addr::Addr::root()).await?;
+            tracing::info!(version = ?applied.version, "cluster applied");
+            for name in hub.cluster().spec.nodes.keys() {
+                attach(hub.clone(), Arc::new(Node::new(name, None))).await?;
+            }
             std::future::pending::<()>().await;
         }
         Cmd::Tail { id } => tail(&cli.hub, cli.token.as_deref(), id, show_event).await?,
         Cmd::Apply { files, dry_run } => {
-            let mut fs = vec![];
-            for p in &files {
-                let text = std::fs::read_to_string(p).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
-                fs.push(json!({"name": p.display().to_string(), "text": text}));
-            }
+            let files = read_files(&files)?;
             let c = Client::new(&cli.hub, cli.token);
-            print(&c.call_raw("apply_cluster", json!({"files": fs, "dry_run": dry_run})).await?);
+            print(&c.call_raw("apply_cluster", json!({"files": files, "dry_run": dry_run})).await?);
         }
     }
     Ok(())

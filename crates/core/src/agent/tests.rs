@@ -3,7 +3,7 @@ use crate::chat::{Role, ToolCallDelta};
 use uuid::Uuid;
 
 fn spec() -> Spec {
-    Spec { ty: "t@h".into(), parent: None, budget: Budget::default(), approve: vec![] }
+    Spec::of_type("t@h")
 }
 
 /// Applies events in order and records them so replay can be checked.

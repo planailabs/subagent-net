@@ -1,4 +1,4 @@
-//! HTTP surface of the hub: the spawner WebSocket, the MCP endpoint for users
+//! HTTP surface of the hub: the node WebSocket, the MCP endpoint for users
 //! and clients, and the live event stream.
 
 use std::sync::Arc;
@@ -13,17 +13,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::Deserialize;
 use subnet_core::addr::AgentId;
-use subnet_core::proto::{ToHub, ToSpawner};
+use crate::wire::{ToHub, ToNode};
 use tokio::sync::broadcast::error::RecvError;
 
 use super::Hub;
 
 const PING_EVERY: Duration = Duration::from_secs(10);
-/// A spawner silent for this long is considered dead and its agents move.
+/// A node silent for this long is considered dead and its agents move.
 const DEAD_AFTER: Duration = Duration::from_secs(30);
 
 pub fn router(hub: Arc<Hub>) -> Router {
-    // Spawners authenticate in their hello; users and clients per request.
+    // Nodes authenticate in their hello; users and clients per request.
     let reg = Arc::new(crate::api::registry(hub.clone()));
     let auth_fn = crate::api::auth(hub.clone());
     let instructions = "subagent-net hub: spawn agents, message them (answers arrive via wait_inbox), \
@@ -31,7 +31,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .to_string();
     let events = Router::new().route("/events", get(events_ws)).layer(middleware::from_fn_with_state(hub.clone(), auth));
     Router::new()
-        .route("/spawner", get(spawner_ws))
+        .route("/node", get(node_ws))
         .merge(events)
         .with_state(hub)
         .merge(subnet_ops::http::router(reg.clone(), auth_fn.clone(), "subagent-net"))
@@ -82,15 +82,15 @@ async fn events_ws(State(hub): State<Arc<Hub>>, Query(q): Query<EventsQuery>, ws
     })
 }
 
-async fn spawner_ws(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| serve_spawner(hub, socket))
+async fn node_ws(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| serve_node(hub, socket))
 }
 
-fn encode(m: &ToSpawner) -> Message {
+fn encode(m: &ToNode) -> Message {
     Message::Text(serde_json::to_string(m).unwrap().into())
 }
 
-async fn serve_spawner(hub: Arc<Hub>, mut ws: WebSocket) {
+async fn serve_node(hub: Arc<Hub>, mut ws: WebSocket) {
     let hello = match tokio::time::timeout(DEAD_AFTER, ws.recv()).await {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<ToHub>(&t),
         _ => return,
@@ -98,15 +98,15 @@ async fn serve_spawner(hub: Arc<Hub>, mut ws: WebSocket) {
     let hello = match hello {
         Ok(h) => h,
         Err(e) => {
-            let _ = ws.send(encode(&ToSpawner::Rejected { reason: format!("bad hello: {e}") })).await;
+            let _ = ws.send(encode(&ToNode::Rejected { reason: format!("bad hello: {e}") })).await;
             return;
         }
     };
     let (conn, mut rx) = match hub.connect(hello).await {
         Ok(x) => x,
         Err(reason) => {
-            tracing::warn!(%reason, "spawner rejected");
-            let _ = ws.send(encode(&ToSpawner::Rejected { reason })).await;
+            tracing::warn!(%reason, "node rejected");
+            let _ = ws.send(encode(&ToNode::Rejected { reason })).await;
             return;
         }
     };
@@ -123,16 +123,16 @@ async fn serve_spawner(hub: Arc<Hub>, mut ws: WebSocket) {
                 match inc {
                     Some(Ok(Message::Text(t))) => match serde_json::from_str::<ToHub>(&t) {
                         Ok(m) => if let Err(e) = hub.handle(conn, m).await {
-                            tracing::warn!(conn, error = %e, "spawner message failed");
+                            tracing::warn!(conn, error = %e, "node message failed");
                         },
-                        Err(e) => tracing::warn!(conn, error = %e, "unparseable spawner message"),
+                        Err(e) => tracing::warn!(conn, error = %e, "unparseable node message"),
                     },
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                     Some(Ok(_)) => {}
                 }
             }
             _ = ping.tick() => {
-                if last_seen.elapsed() > DEAD_AFTER { tracing::warn!(conn, "spawner timed out"); break }
+                if last_seen.elapsed() > DEAD_AFTER { tracing::warn!(conn, "node timed out"); break }
                 if ws.send(Message::Ping(Default::default())).await.is_err() { break }
             }
         }

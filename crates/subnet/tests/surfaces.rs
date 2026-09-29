@@ -10,16 +10,13 @@ use common::llm::MockLlm;
 use serde_json::{Value, json};
 use subnet::client::{Client, tail};
 use subnet::hub::{Hub, http};
-use subnet::spawner::config::{Config, TypeConfig};
-use subnet::spawner::{Spawner, attach};
-use subnet_core::agent::Budget;
-use subnet_llm::ModelConfig;
 
 const SYS: &str = "helper";
 
 const PRINCIPALS: &str = r#"
 client "claude" { role = "operator" }
 user "watcher" { role = "viewer" }
+node "s" {}
 "#;
 
 /// Hub with principals `client:claude` (operator) and `user:watcher` (viewer).
@@ -31,27 +28,10 @@ async fn setup(token: Option<&str>) -> (String, MockLlm) {
 async fn setup_hub(token: Option<&str>) -> (String, MockLlm, Arc<Hub>) {
     let llm = MockLlm::start().await;
     let hub = Hub::open(&db_url().await, token.map(Into::into)).await.unwrap();
-    let files = vec![subnet::hub::db::ClusterFile { name: "p.hcl".into(), text: PRINCIPALS.into() }];
+    let text = format!("{PRINCIPALS}{}", common::net::agent("helper", SYS, &llm.url, &["s"], "  description = \"helps\""));
+    let files = vec![subnet::hub::db::ClusterFile { name: "p.hcl".into(), text }];
     hub.apply_cluster(files, false, &subnet_core::addr::Addr::root()).await.unwrap();
-    let t = TypeConfig {
-        name: "helper".into(),
-        description: "helps".into(),
-        system: SYS.into(),
-        model: ModelConfig {
-            base_url: llm.url.clone(),
-            model: "m".into(),
-            api_key_env: None,
-            prefill: false,
-            params: Default::default(),
-        },
-        mcp: vec![],
-        spawns: vec![],
-        budget: Budget::default(),
-        approve: vec![],
-        idempotent: vec![],
-    };
-    let cfg = Config { hub: String::new(), name: "s".into(), capacity: 4, token_env: None, types: vec![t] };
-    attach(hub.clone(), Arc::new(Spawner::new(&cfg).await.unwrap())).await.unwrap();
+    common::net::node_ready(&hub, "s").await;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     let h = hub.clone();
@@ -101,7 +81,7 @@ async fn control_tools_work_and_errors_surface() {
     assert!(f["id"].is_string());
     u.call_raw("cancel", json!({"id": id})).await.unwrap();
     let e = u.call_raw("spawn", json!({"type":"nope","prompt":"x"})).await.unwrap_err();
-    assert!(e.to_string().contains("no live spawner"), "{e}");
+    assert_eq!(e.kind, subnet_ops::ErrorKind::NotFound, "{e}");
     let e = u.call_raw("pause", json!({"id": "not-a-uuid", "mode": "hard"})).await.unwrap_err();
     assert_eq!(e.kind, subnet_ops::ErrorKind::BadRequest, "{e}");
 }

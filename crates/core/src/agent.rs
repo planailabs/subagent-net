@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::addr::{Addr, AgentId};
-use crate::chat::{Accumulator, Delta, Message, ToolCall, Usage};
+use crate::chat::{Accumulator, Delta, Message, ToolCall, ToolDef, Usage};
 
 /// Name of the one built-in tool the state machine handles itself.
 pub const WAIT_FOR: &str = "wait_for";
@@ -27,10 +27,14 @@ pub struct Budget {
     pub max_children: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// What an agent is, fixed when it is created (stored beside the log).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Spec {
     /// `name@hash` of the agent type.
     pub ty: String,
+    /// The mixture it was spawned as, if any.
+    #[serde(default)]
+    pub mixture: Option<String>,
     #[serde(default)]
     pub parent: Option<AgentId>,
     #[serde(default)]
@@ -38,6 +42,31 @@ pub struct Spec {
     /// Tool names that need user approval before running.
     #[serde(default)]
     pub approve: Vec<String>,
+    /// MCP types it may use: name → `name@hash`.
+    #[serde(default)]
+    pub mcp: BTreeMap<String, String>,
+    /// Tools offered to the model: built-ins and `<mcp>.<tool>`.
+    #[serde(default)]
+    pub tools: Vec<ToolDef>,
+    /// Tools safe to re-run after a crash (`<mcp>.<tool>`).
+    #[serde(default)]
+    pub idempotent: Vec<String>,
+}
+
+impl Spec {
+    /// A spec with only a type (tests and bare agents).
+    pub fn of_type(ty: impl Into<String>) -> Self {
+        Self {
+            ty: ty.into(),
+            mixture: None,
+            parent: None,
+            budget: Budget::default(),
+            approve: vec![],
+            mcp: BTreeMap::new(),
+            tools: vec![],
+            idempotent: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]

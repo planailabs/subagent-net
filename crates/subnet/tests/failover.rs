@@ -4,7 +4,6 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -29,32 +28,40 @@ fn bin() -> Command {
 fn hub(db: &str, port: u16) -> Child {
     bin()
         .args(["hub", "--db", db, "--listen", &format!("127.0.0.1:{port}")])
+        .env("SUBNET_ADMIN_TOKEN", "tok")
+        .spawn()
+        .unwrap()
+}
+
+fn node(name: &str, port: u16) -> Child {
+    bin()
+        .args(["node", "--name", name])
+        .env("SUBNET_HUB", format!("http://127.0.0.1:{port}"))
         .env("SUBNET_TOKEN", "tok")
         .spawn()
         .unwrap()
 }
 
-fn spawner(name: &str, port: u16, llm: &str) -> Child {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("failover-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("spawner.toml");
-    std::fs::write(
-        &path,
-        format!(
-            r#"hub = "ws://127.0.0.1:{port}/spawner"
-name = "{name}"
-capacity = 1
-token_env = "SUBNET_TOKEN"
+/// Worker type on nodes a, b and s (capacity 1 each).
+/// Until some node reports it can run the worker type.
+async fn wait_node(r: &Client) {
+    for _ in 0..200 {
+        let nodes = r.call_raw("list_nodes", Value::Null).await.unwrap();
+        if nodes.as_array().unwrap().iter().any(|n| n["agents"].as_array().is_some_and(|a| !a.is_empty())) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no node became ready");
+}
 
-[[type]]
-name = "worker"
-system = "{SYS}"
-model = {{ base_url = "{llm}", model = "m" }}
-"#
-        ),
-    )
-    .unwrap();
-    bin().arg("spawner").arg("-c").arg(&path).env("SUBNET_TOKEN", "tok").spawn().unwrap()
+async fn apply(r: &Client, llm: &str) {
+    let mut text = String::new();
+    for n in ["a", "b", "s"] {
+        text.push_str(&format!("node {n:?} {{ capacity = 1 }}\n"));
+    }
+    text.push_str(&common::net::agent("worker", SYS, llm, &["a", "b", "s"], ""));
+    r.call_raw("apply_cluster", json!({"files": [{"name": "c.hcl", "text": text}]})).await.unwrap();
 }
 
 async fn connect(port: u16) -> Client {
@@ -85,20 +92,16 @@ async fn partial_len(r: &Client, id: &str) -> usize {
 }
 
 #[tokio::test]
-async fn killed_spawner_hands_agent_over_with_partial() {
+async fn killed_node_hands_agent_over_with_partial() {
     let llm = MockLlm::start().await;
     llm.set_gap(Duration::from_millis(200));
     llm.say(SYS, &["one ", "two ", "three ", "four ", "five ", "six ", "seven ", "eight"]);
     let port = free_port();
     let _hub = hub(&db_url().await, port);
     let r = connect(port).await;
-    let mut a = spawner("a", port, &llm.url);
-    for _ in 0..100 {
-        if r.call_raw("list_types", Value::Null).await.unwrap().as_array().is_some_and(|t| !t.is_empty()) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    apply(&r, &llm.url).await;
+    let mut a = node("a", port);
+    wait_node(&r).await;
     let id =
         r.call_raw("spawn", json!({"type":"worker","prompt":"count"})).await.unwrap()["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
@@ -113,18 +116,18 @@ async fn killed_spawner_hands_agent_over_with_partial() {
     llm.set_gap(Duration::ZERO);
     llm.say(SYS, &["<continued>"]);
     a.kill().await.unwrap(); // SIGKILL / TerminateProcess
-    let _b = spawner("b", port, &llm.url);
+    let _b = node("b", port);
     let mail = r.call_raw("wait_inbox", json!({"timeout_ms": 20_000})).await.unwrap();
     let c = mail[0]["content"].as_str().unwrap();
     assert!(c.starts_with("one two"), "{c}");
     assert!(c.ends_with("<continued>"), "{c}");
     assert!(c.len() >= before + "<continued>".len());
-    let agents = until(&r, "agent on b", |v| v[0]["spawner"] == "b").await;
+    let agents = until(&r, "agent on b", |v| v[0]["node"] == "b").await;
     assert_eq!(agents[0]["phase"], "idle");
 }
 
 #[tokio::test]
-async fn killed_hub_restarts_and_spawner_reconnects() {
+async fn killed_hub_restarts_and_node_reconnects() {
     let llm = MockLlm::start().await;
     llm.set_gap(Duration::from_millis(200));
     llm.say(SYS, &["alpha ", "beta ", "gamma ", "delta ", "epsilon ", "zeta"]);
@@ -132,13 +135,9 @@ async fn killed_hub_restarts_and_spawner_reconnects() {
     let port = free_port();
     let mut h = hub(&db, port);
     let r = connect(port).await;
-    let _s = spawner("s", port, &llm.url);
-    for _ in 0..100 {
-        if r.call_raw("list_types", Value::Null).await.unwrap().as_array().is_some_and(|t| !t.is_empty()) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    apply(&r, &llm.url).await;
+    let _s = node("s", port);
+    wait_node(&r).await;
     let id =
         r.call_raw("spawn", json!({"type":"worker","prompt":"greek"})).await.unwrap()["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
