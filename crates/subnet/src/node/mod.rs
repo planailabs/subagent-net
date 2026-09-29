@@ -96,6 +96,9 @@ struct Rt {
     errors: HashMap<String, String>,
 }
 
+/// The running stream relay: its link (key), streams out and in, and stop token.
+type RunningRelay = (String, Vec<String>, Vec<String>, CancellationToken);
+
 pub struct Node {
     pub name: String,
     pub token: Option<String>,
@@ -105,8 +108,7 @@ pub struct Node {
     sense_rx: tokio::sync::Mutex<mpsc::Receiver<senses::SenseOut>>,
     /// How to reach the hub's stream relay (set by whoever connects us).
     relay_link: std::sync::Mutex<Option<relay::RelayLink>>,
-    /// The running relay: its link, its streams and its stop token.
-    relay: std::sync::Mutex<Option<(String, Vec<String>, Vec<String>, CancellationToken)>>,
+    relay: std::sync::Mutex<Option<RunningRelay>>,
 }
 
 type Pending<T> = std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<T, String>>>>;
