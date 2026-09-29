@@ -1,10 +1,11 @@
 //! OpenAI-compatible chat types. Unknown fields are kept in `extra` so provider
 //! extensions (reasoning content, cache info, …) survive a round trip.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -13,7 +14,7 @@ pub enum Role {
     Tool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Message {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,7 +45,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolCall {
     pub id: String,
     #[serde(rename = "type", default = "function_type")]
@@ -66,14 +67,14 @@ impl ToolCall {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FunctionCall {
     pub name: String,
     /// JSON-encoded arguments, exactly as the model produced them.
     pub arguments: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolDef {
     pub name: String,
     #[serde(default)]
@@ -83,7 +84,7 @@ pub struct ToolDef {
 }
 
 /// One streamed chunk, already reduced to the first choice.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Delta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -95,7 +96,7 @@ pub struct Delta {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Usage {
     #[serde(default)]
     pub prompt_tokens: u64,
@@ -109,7 +110,7 @@ impl Usage {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolCallDelta {
     pub index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,7 +123,7 @@ pub struct ToolCallDelta {
 
 /// Folds deltas into an assistant message. Whatever has arrived so far is a
 /// valid partial: that is what gets kept on pause/abort.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Accumulator {
     pub content: String,
     pub tool_calls: Vec<ToolCallDelta>,

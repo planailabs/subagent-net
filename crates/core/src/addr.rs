@@ -45,6 +45,19 @@ impl Serialize for Addr {
     }
 }
 
+impl schemars::JsonSchema for Addr {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Addr".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "user, client:<name>, agent:<id> (or a bare agent id)",
+            "examples": ["user", "client:claude", "agent:6f1c0f7e-6b0a-4c55-9c3e-2f1f7b6d8a10"]
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for Addr {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         String::deserialize(d)?.parse().map_err(serde::de::Error::custom)

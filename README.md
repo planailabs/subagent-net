@@ -14,9 +14,9 @@ createdb subnet
 # hub + one spawner in one process
 DATABASE_URL=postgres:///subnet OPENAI_API_KEY=… subnet dev -c examples/spawner.toml
 
-subnet types
+subnet list-types
 subnet spawn lead "Plan a CLI todo app and have workers draft each module" --wait
-subnet agents
+subnet list-agents
 subnet tail                      # live tokens and events
 subnet pause <id> --mode hard    # or safe / quick; --tree for descendants
 subnet resume <id>
@@ -33,7 +33,7 @@ claude mcp add --transport http subnet http://127.0.0.1:7700/mcp \
   --header "Authorization: Bearer $SUBNET_TOKEN" --header "x-subnet-as: claude"
 ```
 
-The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`, `fork`, `transcript`, `list_agents` and `list_types`.
+The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`, `fork`, `transcript`, `list_agents` and `list_types`. The same operations are a REST/RPC API (`/v1/…`, OpenAPI at `/v1/openapi.json`, docs at `/v1/docs`) and `subnet` subcommands.
 
 ## Tests
 

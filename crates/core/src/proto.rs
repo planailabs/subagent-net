@@ -1,5 +1,6 @@
 //! Hub operations and the hub ↔ spawner wire protocol (JSON over WebSocket).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -8,7 +9,7 @@ use crate::agent::{Budget, Event, PauseMode, Spec, Status};
 
 /// An agent type as a spawner offers it. Secrets never leave the spawner, so
 /// this is only what the hub needs for placement and child specs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TypeInfo {
     pub name: String,
     /// Hash of the full type config minus secrets.
@@ -81,7 +82,7 @@ pub enum Op {
 }
 
 /// A delivered message in a user/client mailbox.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Mail {
     pub from: Addr,
     pub content: String,

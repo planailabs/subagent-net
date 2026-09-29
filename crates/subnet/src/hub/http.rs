@@ -24,11 +24,18 @@ const DEAD_AFTER: Duration = Duration::from_secs(30);
 
 pub fn router(hub: Arc<Hub>) -> Router {
     // Spawners authenticate in their hello; users and clients per request.
-    let user = Router::new()
-        .nest_service("/mcp", super::mcp::service(hub.clone()))
-        .route("/events", get(events_ws))
-        .layer(middleware::from_fn_with_state(hub.clone(), auth));
-    Router::new().route("/spawner", get(spawner_ws)).merge(user).with_state(hub)
+    let reg = Arc::new(crate::api::registry(hub.clone()));
+    let auth_fn = crate::api::auth(hub.clone());
+    let instructions = "subagent-net hub: spawn agents, message them (answers arrive via wait_inbox), \
+                        pause/resume/cancel/approve/fork them."
+        .to_string();
+    let events = Router::new().route("/events", get(events_ws)).layer(middleware::from_fn_with_state(hub.clone(), auth));
+    Router::new()
+        .route("/spawner", get(spawner_ws))
+        .merge(events)
+        .with_state(hub)
+        .merge(subnet_ops::http::router(reg.clone(), auth_fn.clone(), "subagent-net"))
+        .nest_service("/mcp", subnet_ops::mcp::service(reg, auth_fn, Some(instructions)))
 }
 
 #[derive(Deserialize)]

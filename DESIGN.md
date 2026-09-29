@@ -302,7 +302,7 @@ Every operation is defined once in the `ops` crate's typed registry: name, summa
 
   `GET /v1/openapi.json` is the generated OpenAPI 3.1 document; `/v1/docs` renders it.
 - **MCP** (`/mcp`): every op a principal's role allows is a tool.
-- **CLI:** every op is a `subnet` subcommand. Flags come from the argument schema; path parameters are positional. The CLI calls the REST/RPC API.
+- **CLI:** every op is a `subnet` subcommand (`list_agents` → `subnet list-agents`). Path parameters are positional; an op without path parameters takes its required scalar fields positionally (`subnet spawn <type> <prompt>`). Other fields are flags, and `--json` passes a whole argument object. The CLI calls the REST/RPC API.
 - **Events:** `GET /v1/events` (SSE) and `/v1/events/ws` (WebSocket), filtered by `agent`, `tree`, `sense` or `route`.
 
 The web UI and the TUI use the same API.
@@ -367,5 +367,6 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 
 ## Status
 
-- **Implemented (v1):** core state machine, `llm` client, hub sequencer/placement/fencing/dormancy, spawner (to become node) with internal executor and per-type MCP, hub MCP server, CLI, kill -9 failover tests.
+- **Implemented (v1):** core state machine, `llm` client, hub sequencer/placement/fencing/dormancy, spawner (to become node) with internal executor and per-type MCP, kill -9 failover tests.
+- **Implemented (v2):** `ops` registry with REST/RPC + OpenAPI + docs, MCP and CLI front-ends and an HA-aware client; the hub's operations run on it. (Auth is still the single hub token plus `x-subnet-as` until named principals land.)
 - **In progress (v2):** everything else in this document. Each item moves to "implemented" in the commit that finishes it.

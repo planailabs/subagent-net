@@ -1,6 +1,8 @@
 //! CLI front-end: a clap subcommand per operation, built from its argument
-//! schema. Path parameters are positional, other fields are `--flags`, and
-//! `--json` passes a whole argument object.
+//! schema. Path parameters are positional; an operation without path
+//! parameters takes its required scalar fields positionally, in declaration
+//! order. Other fields are `--flags`, and `--json` passes a whole argument
+//! object.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Map, Value};
@@ -39,9 +41,28 @@ pub fn commands<'a>(metas: impl IntoIterator<Item = &'a OpMeta>) -> Vec<Command>
     metas.into_iter().map(command).collect()
 }
 
+/// Fields taken positionally, in order.
+fn positionals(meta: &OpMeta) -> Vec<String> {
+    let path = meta.path_params();
+    if !path.is_empty() {
+        return path.into_iter().map(String::from).collect();
+    }
+    let empty = Map::new();
+    let props = meta.args["properties"].as_object().unwrap_or(&empty);
+    props
+        .iter()
+        .filter(|(k, s)| {
+            let ts = types(&meta.args, s);
+            is_required(meta, k) && !ts.is_empty() && ts.iter().all(|t| matches!(t.as_str(), "string" | "integer" | "number"))
+        })
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 pub fn command(meta: &OpMeta) -> Command {
     let mut cmd = Command::new(command_name(meta.name)).about(meta.summary);
-    let path = meta.path_params();
+    let path = positionals(meta);
+    let path: Vec<&str> = path.iter().map(String::as_str).collect();
     let empty = Map::new();
     let props = meta.args["properties"].as_object().unwrap_or(&empty);
     // Positional path parameters first, in path order.
@@ -104,7 +125,7 @@ pub fn args_from(meta: &OpMeta, m: &ArgMatches) -> Result<Value, String> {
     let props = meta.args["properties"].as_object().unwrap_or(&empty);
     for (k, s) in props {
         let ts = types(&meta.args, s);
-        if ts.iter().any(|t| t == "boolean") && !is_required(meta, k) && !meta.path_params().contains(&k.as_str()) {
+        if ts.iter().any(|t| t == "boolean") && !is_required(meta, k) && !positionals(meta).contains(k) {
             if m.get_flag(k) {
                 out.insert(k.clone(), Value::Bool(true));
             }
@@ -154,15 +175,15 @@ mod tests {
         assert!(parse(kick, &["t", "kick-thing", "t9", "--mode", "medium"]).unwrap_err().contains("medium"));
         assert!(parse(kick, &["t", "kick-thing", "--mode", "soft"]).is_err(), "id is required");
         let add = r.meta("add").unwrap();
-        assert!(parse(add, &["t", "add", "--a", "1"]).is_err(), "b is required");
-        assert_eq!(parse(add, &["t", "add", "--a", "1", "--b", "2"]).unwrap(), json!({"a":1,"b":2}));
+        assert!(parse(add, &["t", "add", "1"]).is_err(), "b is required");
+        assert_eq!(parse(add, &["t", "add", "1", "2"]).unwrap(), json!({"a":1,"b":2}), "required scalars are positional");
     }
 
     #[test]
     fn json_flag_merges_under_flags() {
         let r = registry();
         let add = r.meta("add").unwrap();
-        let v = parse(add, &["t", "add", "--json", r#"{"a":5,"b":6}"#, "--a", "1"]).unwrap();
+        let v = parse(add, &["t", "add", "--json", r#"{"a":5,"b":6}"#, "1"]).unwrap();
         assert_eq!(v, json!({"a":1,"b":6}));
     }
 

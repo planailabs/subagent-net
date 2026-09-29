@@ -2,20 +2,22 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Arg, ArgAction, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{Value, json};
-use subnet::client::{Remote, tail};
+use subnet::api::{AS_HEADER, metas};
+use subnet::client::{Client, tail};
 use subnet::hub::{Hub, http};
 use subnet::spawner::{Spawner, attach, config::Config};
 use subnet_core::addr::AgentId;
+use subnet_ops::cli::{args_from, command_name, commands};
 
 #[derive(Parser)]
 #[command(version, about = "Distributed network of resumable LLM agents")]
 struct Cli {
-    /// Hub HTTP address (for client commands).
+    /// Hub HTTP address(es), comma-separated (for client commands).
     #[arg(long, global = true, env = "SUBNET_HUB", default_value = "http://127.0.0.1:7700")]
     hub: String,
-    /// Shared secret of the hub.
+    /// Your token for the hub.
     #[arg(long, global = true, env = "SUBNET_TOKEN", hide_env_values = true)]
     token: Option<String>,
     /// Who you are to the network: `user` or a client name.
@@ -33,13 +35,8 @@ struct HubArgs {
     listen: String,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum Mode {
-    Safe,
-    Quick,
-    Hard,
-}
-
+/// Commands that aren't API operations. Every operation is added as a
+/// subcommand generated from its definition.
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the hub.
@@ -56,64 +53,6 @@ enum Cmd {
         #[arg(long, short)]
         config: PathBuf,
     },
-    /// List agent types on offer.
-    Types,
-    /// List agents.
-    Agents,
-    /// Spawn an agent.
-    Spawn {
-        #[arg(value_name = "TYPE")]
-        ty: String,
-        prompt: String,
-        /// Wait for its answer and print it.
-        #[arg(long, short)]
-        wait: bool,
-    },
-    /// Send a message to an agent (id), `user` or `client:<name>`.
-    Send {
-        to: String,
-        content: String,
-        /// Wait for the answer and print it.
-        #[arg(long, short)]
-        wait: bool,
-    },
-    /// Show (and wait for) messages addressed to you.
-    Inbox {
-        #[arg(long, default_value_t = 0)]
-        timeout_ms: u64,
-    },
-    /// Pause an agent: safe (finish turn), quick (finish in-flight call), hard (abort now).
-    Pause {
-        id: AgentId,
-        #[arg(long, value_enum, default_value = "quick")]
-        mode: Mode,
-        /// Also pause descendants.
-        #[arg(long)]
-        tree: bool,
-    },
-    /// Resume a paused or failed agent.
-    Resume {
-        id: AgentId,
-        #[arg(long)]
-        tree: bool,
-    },
-    /// Cancel an agent and its subtree.
-    Cancel { id: AgentId },
-    /// Approve (or --deny) a tool call an agent waits on.
-    Approve {
-        id: AgentId,
-        call_id: String,
-        #[arg(long)]
-        deny: bool,
-    },
-    /// Copy an agent's history into a new agent.
-    Fork {
-        id: AgentId,
-        #[arg(long)]
-        at: Option<u64>,
-    },
-    /// Show an agent's transcript and state.
-    Transcript { id: AgentId },
     /// Stream events live (all agents, or one).
     Tail { id: Option<AgentId> },
 }
@@ -137,9 +76,9 @@ fn print(v: &Value) {
 }
 
 /// Waits for the next message from `from` and prints its content.
-async fn await_answer(r: &Remote, from: &str) -> anyhow::Result<()> {
+async fn await_answer(c: &Client, from: &str) -> anyhow::Result<()> {
     loop {
-        let mail = r.call("wait_inbox", json!({"timeout_ms": 300_000})).await?;
+        let mail = c.call_raw("wait_inbox", json!({"timeout_ms": 300_000})).await?;
         for m in mail.as_array().into_iter().flatten() {
             if m["from"] == from {
                 println!("{}", m["content"].as_str().unwrap_or_default());
@@ -174,36 +113,55 @@ fn show_event(v: Value) {
     let _ = out.flush();
 }
 
+fn cli() -> clap::Command {
+    let wait = Arg::new("wait").long("wait").short('w').action(ArgAction::SetTrue).help("Wait for the answer and print it");
+    Cli::command().subcommands(commands(&metas()).into_iter().map(|c| match c.get_name() {
+        "spawn" | "send" => c.arg(wait.clone()),
+        _ => c,
+    }))
+}
+
+async fn run_op(name: &str, sub: &ArgMatches, c: &Client) -> anyhow::Result<()> {
+    let meta = metas().into_iter().find(|m| command_name(m.name) == name).expect("generated command");
+    let args = args_from(&meta, sub).map_err(anyhow::Error::msg)?;
+    let wait = sub.try_get_one::<bool>("wait").ok().flatten().copied().unwrap_or(false);
+    let out = c.call_raw(meta.name, args.clone()).await?;
+    match (meta.name, wait) {
+        ("spawn", true) => await_answer(c, &format!("agent:{}", out["id"].as_str().unwrap_or_default())).await,
+        ("send", true) => {
+            let to = args["to"].as_str().unwrap_or_default();
+            let from = if to.contains(':') || to == "user" { to.to_string() } else { format!("agent:{to}") };
+            await_answer(c, &from).await
+        }
+        _ => {
+            print(&out);
+            Ok(())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let m = cli().get_matches();
+    let (name, sub) = m.subcommand().expect("subcommand required");
+    let builtin = matches!(name, "hub" | "spawner" | "dev" | "tail");
     // Servers log their work; client commands only problems.
-    let default = match cli.cmd {
-        Cmd::Hub(_) | Cmd::Spawner { .. } | Cmd::Dev { .. } => "info,rmcp=warn",
-        _ => "warn",
-    };
+    let default = if builtin && name != "tail" { "info,rmcp=warn" } else { "warn" };
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| default.into()))
         .init();
-    let token = cli.token.clone();
-    let remote = || Remote::connect(&cli.hub, cli.token.as_deref(), &cli.who);
-    // One call, printed, then a clean close.
-    let one = async |tool: &str, args: Value| -> anyhow::Result<()> {
-        let r = remote().await?;
-        let v = r.call(tool, args).await;
-        r.close().await?;
-        print(&v?);
-        Ok(())
-    };
-    let mode = |m: Mode| match m {
-        Mode::Safe => "safe",
-        Mode::Quick => "quick",
-        Mode::Hard => "hard",
-    };
+    let hub_url = m.get_one::<String>("hub").cloned().unwrap_or_default();
+    let token = m.get_one::<String>("token").cloned();
+    let who = m.get_one::<String>("who").cloned().unwrap_or_else(|| "user".into());
+    if !builtin {
+        let c = Client::new(&hub_url, token).with_header(AS_HEADER, &who);
+        return run_op(name, sub, &c).await;
+    }
+    let cli = Cli::from_arg_matches(&m)?;
     match cli.cmd {
         Cmd::Hub(a) => {
-            serve_hub(a, token).await?;
+            serve_hub(a, cli.token).await?;
             std::future::pending::<()>().await;
         }
         Cmd::Spawner { config } => {
@@ -213,42 +171,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Dev { hub, config } => {
             let cfg = Config::load(&config)?;
-            let hub = serve_hub(hub, token).await?;
+            let hub = serve_hub(hub, cli.token).await?;
             attach(hub, Arc::new(Spawner::new(&cfg).await?)).await?;
             std::future::pending::<()>().await;
         }
-        Cmd::Types => one("list_types", Value::Null).await?,
-        Cmd::Agents => one("list_agents", Value::Null).await?,
-        Cmd::Spawn { ty, prompt, wait } => {
-            let r = remote().await?;
-            let v = r.call("spawn", json!({"type": ty, "prompt": prompt})).await?;
-            if wait {
-                await_answer(&r, &format!("agent:{}", v["id"].as_str().unwrap_or_default())).await?;
-            } else {
-                print(&v);
-            }
-            r.close().await?;
-        }
-        Cmd::Send { to, content, wait } => {
-            let r = remote().await?;
-            let v = r.call("send", json!({"to": to, "content": content})).await?;
-            if wait {
-                let from = if to.contains(':') || to == "user" { to } else { format!("agent:{to}") };
-                await_answer(&r, &from).await?;
-            } else {
-                print(&v);
-            }
-            r.close().await?;
-        }
-        Cmd::Inbox { timeout_ms } => one("wait_inbox", json!({"timeout_ms": timeout_ms})).await?,
-        Cmd::Pause { id, mode: m, tree } => one("pause", json!({"id": id, "mode": mode(m), "tree": tree})).await?,
-        Cmd::Resume { id, tree } => one("resume", json!({"id": id, "tree": tree})).await?,
-        Cmd::Cancel { id } => one("cancel", json!({"id": id})).await?,
-        Cmd::Approve { id, call_id, deny } => {
-            one("approve", json!({"id": id, "call_id": call_id, "approved": !deny})).await?
-        }
-        Cmd::Fork { id, at } => one("fork", json!({"id": id, "at": at})).await?,
-        Cmd::Transcript { id } => one("transcript", json!({"id": id})).await?,
         Cmd::Tail { id } => tail(&cli.hub, cli.token.as_deref(), id, show_event).await?,
     }
     Ok(())

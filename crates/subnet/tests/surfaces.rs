@@ -8,7 +8,8 @@ use std::time::Duration;
 use common::db_url;
 use common::llm::MockLlm;
 use serde_json::{Value, json};
-use subnet::client::{Remote, tail};
+use subnet::api::AS_HEADER;
+use subnet::client::{Client, tail};
 use subnet::hub::{Hub, http};
 use subnet::spawner::config::{Config, TypeConfig};
 use subnet::spawner::{Spawner, attach};
@@ -49,49 +50,49 @@ async fn setup(token: Option<&str>) -> (String, MockLlm) {
 async fn mcp_client_spawns_and_gets_the_answer_in_its_own_inbox() {
     let (base, llm) = setup(None).await;
     llm.say(SYS, &["at your service"]);
-    let c = Remote::connect(&base, None, "claude").await.unwrap();
-    let types = c.call("list_types", Value::Null).await.unwrap();
+    let c = remote(&base, None, "claude").await.unwrap();
+    let types = c.call_raw("list_types", Value::Null).await.unwrap();
     assert_eq!(types[0]["name"], "helper");
-    let spawned = c.call("spawn", json!({"type":"helper","prompt":"hello"})).await.unwrap();
+    let spawned = c.call_raw("spawn", json!({"type":"helper","prompt":"hello"})).await.unwrap();
     let id = spawned["id"].as_str().unwrap().to_string();
-    let mail = c.call("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+    let mail = c.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
     assert_eq!(mail[0]["content"], "at your service");
     assert_eq!(mail[0]["from"], format!("agent:{id}"));
     // The agent saw who asked.
-    let t = c.call("transcript", json!({"id": id})).await.unwrap();
+    let t = c.call_raw("transcript", json!({"id": id})).await.unwrap();
     assert!(t["messages"][0]["content"].as_str().unwrap().starts_with("[message from client:claude]"));
     // The user's inbox stays empty: the answer went to the client that asked.
-    let u = Remote::connect(&base, None, "user").await.unwrap();
-    assert_eq!(u.call("wait_inbox", json!({"timeout_ms": 50})).await.unwrap(), json!([]));
+    let u = remote(&base, None, "user").await.unwrap();
+    assert_eq!(u.call_raw("wait_inbox", json!({"timeout_ms": 50})).await.unwrap(), json!([]));
 }
 
 #[tokio::test]
 async fn control_tools_work_and_errors_surface() {
     let (base, llm) = setup(None).await;
     llm.say(SYS, &["ok"]);
-    let u = Remote::connect(&base, None, "user").await.unwrap();
-    let id = u.call("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap()["id"].as_str().unwrap().to_string();
-    u.call("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
-    u.call("pause", json!({"id": id, "mode": "safe"})).await.unwrap();
-    let agents = u.call("list_agents", Value::Null).await.unwrap();
+    let u = remote(&base, None, "user").await.unwrap();
+    let id = u.call_raw("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+    u.call_raw("pause", json!({"id": id, "mode": "safe"})).await.unwrap();
+    let agents = u.call_raw("list_agents", Value::Null).await.unwrap();
     assert_eq!(agents[0]["pause"], "safe");
-    u.call("resume", json!({"id": id})).await.unwrap();
-    let f = u.call("fork", json!({"id": id, "at": 1})).await.unwrap();
+    u.call_raw("resume", json!({"id": id})).await.unwrap();
+    let f = u.call_raw("fork", json!({"id": id, "at": 1})).await.unwrap();
     assert!(f["id"].is_string());
-    u.call("cancel", json!({"id": id})).await.unwrap();
-    let e = u.call("spawn", json!({"type":"nope","prompt":"x"})).await.unwrap_err();
+    u.call_raw("cancel", json!({"id": id})).await.unwrap();
+    let e = u.call_raw("spawn", json!({"type":"nope","prompt":"x"})).await.unwrap_err();
     assert!(e.to_string().contains("no live spawner"), "{e}");
-    let e = u.call("pause", json!({"id": "not-a-uuid", "mode": "hard"})).await.unwrap_err();
-    assert!(e.to_string().contains("bad agent id"), "{e}");
+    let e = u.call_raw("pause", json!({"id": "not-a-uuid", "mode": "hard"})).await.unwrap_err();
+    assert_eq!(e.kind, subnet_ops::ErrorKind::BadRequest, "{e}");
 }
 
 #[tokio::test]
 async fn token_is_required_when_configured() {
     let (base, _llm) = setup(Some("sekrit")).await;
-    assert!(Remote::connect(&base, None, "user").await.is_err());
-    assert!(Remote::connect(&base, Some("wrong"), "user").await.is_err());
-    let ok = Remote::connect(&base, Some("sekrit"), "user").await.unwrap();
-    ok.call("list_types", Value::Null).await.unwrap();
+    assert!(remote(&base, None, "user").await.is_err());
+    assert!(remote(&base, Some("wrong"), "user").await.is_err());
+    let ok = remote(&base, Some("sekrit"), "user").await.unwrap();
+    ok.call_raw("list_types", Value::Null).await.unwrap();
     assert!(tail(&base, Some("wrong"), None, |_| {}).await.is_err());
 }
 
@@ -104,9 +105,9 @@ async fn tail_streams_committed_events() {
     let b2 = base.clone();
     tokio::spawn(async move { tail(&b2, None, None, move |v| s2.lock().unwrap().push(v)).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let u = Remote::connect(&base, None, "user").await.unwrap();
-    u.call("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap();
-    u.call("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+    let u = remote(&base, None, "user").await.unwrap();
+    u.call_raw("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap();
+    u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     let kinds: Vec<String> =
         seen.lock().unwrap().iter().map(|v| v["event"]["type"].as_str().unwrap_or_default().to_string()).collect();
@@ -120,18 +121,72 @@ async fn tail_filters_by_agent() {
     let (base, llm) = setup(None).await;
     llm.say(SYS, &["a"]);
     llm.say(SYS, &["b"]);
-    let u = Remote::connect(&base, None, "user").await.unwrap();
+    let u = remote(&base, None, "user").await.unwrap();
     let first =
-        u.call("spawn", json!({"type":"helper","prompt":"1"})).await.unwrap()["id"].as_str().unwrap().to_string();
-    u.call("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+        u.call_raw("spawn", json!({"type":"helper","prompt":"1"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
     let seen = Arc::new(Mutex::new(vec![]));
     let s2 = seen.clone();
     let b2 = base.clone();
     let agent = first.parse().unwrap();
     tokio::spawn(async move { tail(&b2, None, Some(agent), move |v| s2.lock().unwrap().push(v)).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    u.call("spawn", json!({"type":"helper","prompt":"2"})).await.unwrap();
-    u.call("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+    u.call_raw("spawn", json!({"type":"helper","prompt":"2"})).await.unwrap();
+    u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(seen.lock().unwrap().is_empty(), "events of other agents leaked: {:?}", seen.lock().unwrap());
+}
+
+async fn remote(base: &str, token: Option<&str>, who: &str) -> Result<Client, subnet_ops::OpError> {
+    let c = Client::new(base, token.map(String::from)).with_header(AS_HEADER, who);
+    // Fail early like a session handshake would.
+    c.call_raw("list_types", serde_json::Value::Null).await?;
+    Ok(c)
+}
+
+#[tokio::test]
+async fn hub_mcp_endpoint_serves_the_same_operations() {
+    use rmcp::ServiceExt;
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let (base, llm) = setup(None).await;
+    llm.say(SYS, &["via mcp"]);
+    let mut h = std::collections::HashMap::new();
+    h.insert(
+        axum::http::HeaderName::from_static(AS_HEADER),
+        axum::http::HeaderValue::from_static("claude"),
+    );
+    let cfg = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).custom_headers(h);
+    let mcp = ().serve(StreamableHttpClientTransport::from_config(cfg)).await.unwrap();
+    let tools: Vec<String> = mcp.list_all_tools().await.unwrap().into_iter().map(|t| t.name.to_string()).collect();
+    for t in ["spawn", "send", "wait_inbox", "pause", "resume", "cancel", "approve", "fork", "transcript", "list_agents", "list_types"] {
+        assert!(tools.contains(&t.to_string()), "missing {t}: {tools:?}");
+    }
+    let mut p = CallToolRequestParams::new("spawn");
+    p.arguments = json!({"type":"helper","prompt":"hi"}).as_object().cloned();
+    let r = mcp.call_tool(p).await.unwrap();
+    assert_eq!(r.is_error, Some(false));
+    let mut p = CallToolRequestParams::new("wait_inbox");
+    p.arguments = json!({"timeout_ms": 5000}).as_object().cloned();
+    let r = mcp.call_tool(p).await.unwrap();
+    let mail: Value = serde_json::from_str(&r.content[0].as_text().unwrap().text).unwrap();
+    assert_eq!(mail[0]["content"], "via mcp");
+}
+
+#[tokio::test]
+async fn rest_routes_and_openapi_are_served() {
+    let (base, _llm) = setup(None).await;
+    let doc: Value = reqwest::get(format!("{base}/v1/openapi.json")).await.unwrap().json().await.unwrap();
+    assert!(doc["paths"]["/v1/agents/{id}/pause"]["post"].is_object());
+    let agents: Value = reqwest::get(format!("{base}/v1/agents")).await.unwrap().json().await.unwrap();
+    assert_eq!(agents, json!([]));
+    let r = reqwest::Client::new()
+        .post(format!("{base}/v1/agents/{}/pause", uuid::Uuid::nil()))
+        .json(&json!({"mode":"hard"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
 }

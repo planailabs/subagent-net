@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 subnet-core.workspace = true
 subnet-llm.workspace = true
+subnet-ops.workspace = true
+schemars.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 axum.workspace = true
@@ -24,3 +26,6 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json", "migrate", "macros"] }
+
+[dev-dependencies]
+reqwest.workspace = true

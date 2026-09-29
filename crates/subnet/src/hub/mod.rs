@@ -4,14 +4,13 @@
 
 pub mod db;
 pub mod http;
-pub mod mcp;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 use uuid::Uuid;
 
@@ -19,6 +18,7 @@ use subnet_core::addr::{Addr, AgentId};
 use subnet_core::agent::{Agent, Budget, Effect, Event, PauseMode, Phase, Spec, ToolWait};
 use subnet_core::proto::{Mail, Op, ToHub, ToSpawner, TypeInfo};
 
+use crate::api::{AgentSummary, Done, Spawned, Transcript, TypeSummary};
 use db::Db;
 
 pub type ConnId = u64;
@@ -27,12 +27,20 @@ pub type ConnId = u64;
 pub enum HubError {
     #[error("{0}")]
     Bad(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Forbidden(String),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
 }
 
 fn bad<T>(s: impl Into<String>) -> Result<T, HubError> {
     Err(HubError::Bad(s.into()))
+}
+
+fn no_agent<T>(id: AgentId) -> Result<T, HubError> {
+    Err(HubError::NotFound(format!("no agent {id}")))
 }
 
 /// A committed event, as broadcast to subscribers.
@@ -166,7 +174,7 @@ impl Hub {
             ToHub::Request { id, agent, epoch, op } => {
                 let owns = self.owns(&*self.st.lock().await, conn, agent, epoch);
                 let result = if owns { self.op(&Addr::Agent(agent), op).await } else { Err("stale epoch".into()) };
-                self.send(conn, ToSpawner::Reply { id, result }).await;
+                self.to_spawner(conn, ToSpawner::Reply { id, result }).await;
                 Ok(())
             }
         }
@@ -185,7 +193,7 @@ impl Hub {
         ok
     }
 
-    async fn send(&self, conn: ConnId, msg: ToSpawner) {
+    async fn to_spawner(&self, conn: ConnId, msg: ToSpawner) {
         if let Some(s) = self.st.lock().await.spawners.get(&conn) {
             let _ = s.tx.send(msg);
         }
@@ -352,86 +360,105 @@ impl Hub {
         Ok(())
     }
 
-    // ---------- ops ----------
+    // ---------- operations ----------
 
+    /// Built-in tool calls of agents (and tests): dispatches to the typed
+    /// operations and returns their result as JSON.
     pub async fn op(&self, caller: &Addr, op: Op) -> Result<Value, String> {
-        self.op_inner(caller, op).await.map_err(|e| e.to_string())
+        fn j<T: Serialize>(r: Result<T, HubError>) -> Result<Value, String> {
+            r.map(|v| serde_json::to_value(v).unwrap()).map_err(|e| e.to_string())
+        }
+        match op {
+            Op::Spawn { ty, prompt } => j(self.spawn(caller, &ty, prompt).await),
+            Op::Send { to, content } => j(self.send(caller, to, content).await),
+            Op::ListAgents => j(Ok(self.list_agents().await)),
+            Op::ListTypes => j(Ok(self.list_types().await)),
+            Op::Pause { id, mode, tree } => j(self.pause(caller, id, mode, tree).await),
+            Op::Resume { id, tree } => j(self.resume(caller, id, tree).await),
+            Op::Cancel { id } => j(self.cancel(caller, id).await),
+            Op::Approve { id, call_id, approved } => j(self.approve(caller, id, call_id, approved).await),
+            Op::Fork { id, at } => j(self.fork(caller, id, at).await),
+            Op::Transcript { id } => j(self.transcript(id).await),
+            Op::WaitInbox { timeout_ms } => j(self.wait_inbox(caller, timeout_ms).await),
+        }
     }
 
-    async fn op_inner(&self, caller: &Addr, op: Op) -> Result<Value, HubError> {
-        if let Op::WaitInbox { timeout_ms } = op {
-            return self.wait_inbox(caller, timeout_ms).await;
+    pub async fn list_agents(&self) -> Vec<AgentSummary> {
+        let st = self.st.lock().await;
+        let mut v: Vec<_> = st.agents.iter().map(|(id, r)| summary(&st, *id, r)).collect();
+        v.sort_by_key(|a| a.id);
+        v
+    }
+
+    pub async fn list_types(&self) -> Vec<TypeSummary> {
+        list_types(&*self.st.lock().await)
+    }
+
+    pub async fn transcript(&self, id: AgentId) -> Result<Transcript, HubError> {
+        let st = self.st.lock().await;
+        let Some(r) = st.agents.get(&id) else { return no_agent(id) };
+        Ok(Transcript {
+            summary: summary(&st, id, r),
+            messages: r.a.messages.clone(),
+            partial: (!r.a.acc.is_empty()).then(|| r.a.acc.partial()),
+            inbox: r.a.inbox.iter().cloned().collect(),
+        })
+    }
+
+    pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {
+        let mut st = self.st.lock().await;
+        match &to {
+            Addr::Agent(id) if st.agents.contains_key(id) => {
+                self.commit(&mut st, *id, vec![Event::Inbox { from: caller.clone(), content, reply: false }]).await?
+            }
+            Addr::Agent(id) => return no_agent(*id),
+            other => self.put_mail(other, &Mail { from: caller.clone(), content, status: None }).await?,
+        }
+        Ok(Done::OK)
+    }
+
+    pub async fn pause(&self, caller: &Addr, id: AgentId, mode: PauseMode, tree: bool) -> Result<Done, HubError> {
+        self.control(caller, id, tree, Event::PauseRequested { mode }).await
+    }
+
+    pub async fn resume(&self, caller: &Addr, id: AgentId, tree: bool) -> Result<Done, HubError> {
+        self.control(caller, id, tree, Event::Resumed).await
+    }
+
+    pub async fn cancel(&self, caller: &Addr, id: AgentId) -> Result<Done, HubError> {
+        self.control(caller, id, true, Event::Cancelled).await
+    }
+
+    pub async fn approve(&self, caller: &Addr, id: AgentId, call_id: String, approved: bool) -> Result<Done, HubError> {
+        self.control(caller, id, false, Event::Approval { call_id, approved }).await
+    }
+
+    async fn control(&self, caller: &Addr, id: AgentId, tree: bool, ev: Event) -> Result<Done, HubError> {
+        let mut st = self.st.lock().await;
+        for id in self.targets(&st, caller, id, tree)? {
+            self.commit(&mut st, id, vec![ev.clone()]).await?;
+        }
+        Ok(Done::OK)
+    }
+
+    pub async fn fork(&self, caller: &Addr, id: AgentId, at: Option<u64>) -> Result<Spawned, HubError> {
+        if matches!(caller, Addr::Agent(_)) {
+            return Err(HubError::Forbidden("agents may not fork".into()));
         }
         let mut st = self.st.lock().await;
-        let st = &mut *st;
-        match op {
-            Op::Spawn { ty, prompt } => self.spawn(st, caller, &ty, prompt).await,
-            Op::Send { to, content } => {
-                match &to {
-                    Addr::Agent(id) if st.agents.contains_key(id) => {
-                        self.commit(st, *id, vec![Event::Inbox { from: caller.clone(), content, reply: false }]).await?
-                    }
-                    Addr::Agent(id) => return bad(format!("no agent {id}")),
-                    other => self.put_mail(other, &Mail { from: caller.clone(), content, status: None }).await?,
-                }
-                Ok(json!({"sent": true}))
-            }
-            Op::ListAgents => Ok(Value::Array(st.agents.iter().map(|(id, r)| summary(st, *id, r)).collect())),
-            Op::ListTypes => Ok(list_types(st)),
-            Op::Pause { id, mode, tree } => {
-                let ids = self.targets(st, caller, id, tree)?;
-                for id in ids {
-                    self.commit(st, id, vec![Event::PauseRequested { mode }]).await?;
-                }
-                Ok(json!({"paused": true}))
-            }
-            Op::Resume { id, tree } => {
-                let ids = self.targets(st, caller, id, tree)?;
-                for id in ids {
-                    self.commit(st, id, vec![Event::Resumed]).await?;
-                }
-                Ok(json!({"resumed": true}))
-            }
-            Op::Cancel { id } => {
-                let ids = self.targets(st, caller, id, true)?;
-                for id in ids {
-                    self.commit(st, id, vec![Event::Cancelled]).await?;
-                }
-                Ok(json!({"cancelled": true}))
-            }
-            Op::Approve { id, call_id, approved } => {
-                self.targets(st, caller, id, false)?;
-                self.commit(st, id, vec![Event::Approval { call_id, approved }]).await?;
-                Ok(json!({"ok": true}))
-            }
-            Op::Fork { id, at } => {
-                if matches!(caller, Addr::Agent(_)) {
-                    return bad("agents may not fork");
-                }
-                let Some(r) = st.agents.get(&id) else { return bad(format!("no agent {id}")) };
-                let mut events = self.db.events(id, 0).await?;
-                events.truncate(at.unwrap_or(r.seq) as usize);
-                let spec = Spec { parent: None, ..r.a.spec.clone() };
-                let new = Uuid::new_v4();
-                self.db.create_agent(new, &spec).await?;
-                let a = Agent::new(new, spec);
-                st.agents.insert(new, AgentRec { a, seq: 0, epoch: 0, spawner: None });
-                self.commit(st, new, events).await?;
-                Ok(json!({"id": new}))
-            }
-            Op::Transcript { id } => {
-                let Some(r) = st.agents.get(&id) else { return bad(format!("no agent {id}")) };
-                let mut v = summary(st, id, r);
-                v["messages"] = json!(r.a.messages);
-                v["partial"] = if r.a.acc.is_empty() { Value::Null } else { json!(r.a.acc.partial()) };
-                v["inbox"] = json!(r.a.inbox);
-                Ok(v)
-            }
-            Op::WaitInbox { .. } => unreachable!(),
-        }
+        let Some(r) = st.agents.get(&id) else { return no_agent(id) };
+        let mut events = self.db.events(id, 0).await?;
+        events.truncate(at.unwrap_or(r.seq) as usize);
+        let spec = Spec { parent: None, ..r.a.spec.clone() };
+        let ty = spec.ty.clone();
+        let new = Uuid::new_v4();
+        self.db.create_agent(new, &spec).await?;
+        st.agents.insert(new, AgentRec { a: Agent::new(new, spec), seq: 0, epoch: 0, spawner: None });
+        self.commit(&mut st, new, events).await?;
+        Ok(Spawned { id: new, ty })
     }
 
-    async fn wait_inbox(&self, caller: &Addr, timeout_ms: Option<u64>) -> Result<Value, HubError> {
+    pub async fn wait_inbox(&self, caller: &Addr, timeout_ms: Option<u64>) -> Result<Vec<Mail>, HubError> {
         if matches!(caller, Addr::Agent(_)) {
             return bad("agents receive messages in their inbox");
         }
@@ -442,10 +469,10 @@ impl Hub {
             notified.as_mut().enable();
             let mail = self.db.take_mail(caller).await?;
             if !mail.is_empty() {
-                return Ok(json!(mail));
+                return Ok(mail);
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Ok(json!([]));
+                return Ok(vec![]);
             }
         }
     }
@@ -454,12 +481,12 @@ impl Hub {
     /// users and clients may act on anyone, agents only on their descendants.
     fn targets(&self, st: &State, caller: &Addr, id: AgentId, tree: bool) -> Result<Vec<AgentId>, HubError> {
         if !st.agents.contains_key(&id) {
-            return bad(format!("no agent {id}"));
+            return no_agent(id);
         }
         if let Addr::Agent(me) = caller
             && !is_ancestor(st, *me, id)
         {
-            return bad(format!("{id} is not a descendant of {caller}"));
+            return Err(HubError::Forbidden(format!("{id} is not a descendant of {caller}")));
         }
         let mut out = vec![id];
         if tree {
@@ -473,7 +500,12 @@ impl Hub {
         Ok(out)
     }
 
-    async fn spawn(&self, st: &mut State, caller: &Addr, ty: &str, prompt: String) -> Result<Value, HubError> {
+    pub async fn spawn(&self, caller: &Addr, ty: &str, prompt: String) -> Result<Spawned, HubError> {
+        let mut st = self.st.lock().await;
+        self.spawn_in(&mut st, caller, ty, prompt).await
+    }
+
+    async fn spawn_in(&self, st: &mut State, caller: &Addr, ty: &str, prompt: String) -> Result<Spawned, HubError> {
         // Newest registration wins when several hashes share a name.
         let Some(info) =
             st.spawners.values().flat_map(|s| &s.types).filter(|t| t.name == ty || t.id() == ty).last().cloned()
@@ -523,7 +555,7 @@ impl Hub {
             self.commit(st, p, vec![Event::ChildSpawned { id, reserved }]).await?;
         }
         self.commit(st, id, vec![Event::Inbox { from: caller.clone(), content: prompt, reply: false }]).await?;
-        Ok(json!({"id": id, "type": info.id()}))
+        Ok(Spawned { id, ty: info.id() })
     }
 }
 
@@ -586,39 +618,42 @@ fn is_ancestor(st: &State, anc: AgentId, mut id: AgentId) -> bool {
     false
 }
 
-fn summary(st: &State, id: AgentId, r: &AgentRec) -> Value {
+fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
     let awaiting_approval = match &r.a.phase {
-        Phase::Tools { queue, wait: ToolWait::Approval } => json!(queue[0]),
-        _ => Value::Null,
+        Phase::Tools { queue, wait: ToolWait::Approval } => Some(queue[0].clone()),
+        _ => None,
     };
-    json!({
-        "awaiting_approval": awaiting_approval,
-        "id": id,
-        "type": r.a.spec.ty,
-        "parent": r.a.spec.parent,
-        "phase": serde_json::to_value(&r.a.phase).unwrap()["phase"],
-        "pause": r.a.pause,
-        "paused": r.a.is_paused(),
-        "spawner": r.spawner.and_then(|c| st.spawners.get(&c)).map(|s| s.name.clone()),
-        "usage": r.a.usage,
-        "reserved": r.a.reserved,
-        "seq": r.seq,
-    })
+    let phase = serde_json::to_value(&r.a.phase).unwrap()["phase"].as_str().unwrap_or_default().to_string();
+    AgentSummary {
+        id,
+        ty: r.a.spec.ty.clone(),
+        parent: r.a.spec.parent,
+        phase,
+        pause: r.a.pause,
+        paused: r.a.is_paused(),
+        spawner: r.spawner.and_then(|c| st.spawners.get(&c)).map(|s| s.name.clone()),
+        usage: r.a.usage,
+        reserved: r.a.reserved,
+        seq: r.seq,
+        awaiting_approval,
+    }
 }
 
-fn list_types(st: &State) -> Value {
-    let mut out: HashMap<String, Value> = HashMap::new();
+fn list_types(st: &State) -> Vec<TypeSummary> {
+    let mut out: std::collections::BTreeMap<String, TypeSummary> = Default::default();
     for s in st.spawners.values() {
         let free = s.capacity.saturating_sub(s.agents.len() as u32);
         for t in &s.types {
-            let e = out.entry(t.id()).or_insert_with(
-                || json!({"name": t.name, "id": t.id(), "description": t.description, "spawners": 0, "free": 0}),
-            );
-            e["spawners"] = json!(e["spawners"].as_u64().unwrap() + 1);
-            e["free"] = json!(e["free"].as_u64().unwrap() + free as u64);
+            let e = out.entry(t.id()).or_insert_with(|| TypeSummary {
+                name: t.name.clone(),
+                id: t.id(),
+                description: t.description.clone(),
+                spawners: 0,
+                free: 0,
+            });
+            e.spawners += 1;
+            e.free += free;
         }
     }
-    let mut v: Vec<_> = out.into_values().collect();
-    v.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    Value::Array(v)
+    out.into_values().collect()
 }

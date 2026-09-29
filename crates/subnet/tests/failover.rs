@@ -11,7 +11,8 @@ use std::time::Duration;
 use common::db_url;
 use common::llm::MockLlm;
 use serde_json::{Value, json};
-use subnet::client::Remote;
+use subnet::api::AS_HEADER;
+use subnet::client::Client;
 use tokio::process::{Child, Command};
 
 const SYS: &str = "failover worker";
@@ -57,9 +58,9 @@ model = {{ base_url = "{llm}", model = "m" }}
     bin().arg("spawner").arg("-c").arg(&path).env("SUBNET_TOKEN", "tok").spawn().unwrap()
 }
 
-async fn connect(port: u16) -> Remote {
+async fn connect(port: u16) -> Client {
     for _ in 0..100 {
-        if let Ok(r) = Remote::connect(&format!("http://127.0.0.1:{port}"), Some("tok"), "user").await {
+        if let Ok(r) = remote(&format!("http://127.0.0.1:{port}"), Some("tok"), "user").await {
             return r;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -67,9 +68,9 @@ async fn connect(port: u16) -> Remote {
     panic!("hub did not come up");
 }
 
-async fn until(r: &Remote, what: &str, f: impl Fn(&Value) -> bool) -> Value {
+async fn until(r: &Client, what: &str, f: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..300 {
-        if let Ok(v) = r.call("list_agents", Value::Null).await
+        if let Ok(v) = r.call_raw("list_agents", Value::Null).await
             && f(&v)
         {
             return v;
@@ -79,8 +80,8 @@ async fn until(r: &Remote, what: &str, f: impl Fn(&Value) -> bool) -> Value {
     panic!("timed out waiting for {what}");
 }
 
-async fn partial_len(r: &Remote, id: &str) -> usize {
-    let t = r.call("transcript", json!({"id": id})).await.unwrap();
+async fn partial_len(r: &Client, id: &str) -> usize {
+    let t = r.call_raw("transcript", json!({"id": id})).await.unwrap();
     t["partial"]["content"].as_str().map_or(0, str::len)
 }
 
@@ -94,13 +95,13 @@ async fn killed_spawner_hands_agent_over_with_partial() {
     let r = connect(port).await;
     let mut a = spawner("a", port, &llm.url);
     for _ in 0..100 {
-        if r.call("list_types", Value::Null).await.unwrap().as_array().is_some_and(|t| !t.is_empty()) {
+        if r.call_raw("list_types", Value::Null).await.unwrap().as_array().is_some_and(|t| !t.is_empty()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let id =
-        r.call("spawn", json!({"type":"worker","prompt":"count"})).await.unwrap()["id"].as_str().unwrap().to_string();
+        r.call_raw("spawn", json!({"type":"worker","prompt":"count"})).await.unwrap()["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
         if partial_len(&r, &id).await >= 8 {
             break;
@@ -114,7 +115,7 @@ async fn killed_spawner_hands_agent_over_with_partial() {
     llm.say(SYS, &["<continued>"]);
     a.kill().await.unwrap(); // SIGKILL / TerminateProcess
     let _b = spawner("b", port, &llm.url);
-    let mail = r.call("wait_inbox", json!({"timeout_ms": 20_000})).await.unwrap();
+    let mail = r.call_raw("wait_inbox", json!({"timeout_ms": 20_000})).await.unwrap();
     let c = mail[0]["content"].as_str().unwrap();
     assert!(c.starts_with("one two"), "{c}");
     assert!(c.ends_with("<continued>"), "{c}");
@@ -134,13 +135,13 @@ async fn killed_hub_restarts_and_spawner_reconnects() {
     let r = connect(port).await;
     let _s = spawner("s", port, &llm.url);
     for _ in 0..100 {
-        if r.call("list_types", Value::Null).await.unwrap().as_array().is_some_and(|t| !t.is_empty()) {
+        if r.call_raw("list_types", Value::Null).await.unwrap().as_array().is_some_and(|t| !t.is_empty()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let id =
-        r.call("spawn", json!({"type":"worker","prompt":"greek"})).await.unwrap()["id"].as_str().unwrap().to_string();
+        r.call_raw("spawn", json!({"type":"worker","prompt":"greek"})).await.unwrap()["id"].as_str().unwrap().to_string();
     for _ in 0..100 {
         if partial_len(&r, &id).await >= 6 {
             break;
@@ -156,8 +157,15 @@ async fn killed_hub_restarts_and_spawner_reconnects() {
     let _h2 = hub(&db, port);
     let r = connect(port).await;
     // The spawner reconnects on its own (backoff ≤ 2s) and gets the agent back.
-    let mail = r.call("wait_inbox", json!({"timeout_ms": 20_000})).await.unwrap();
+    let mail = r.call_raw("wait_inbox", json!({"timeout_ms": 20_000})).await.unwrap();
     let c = mail[0]["content"].as_str().unwrap();
     assert!(c.starts_with("alpha "), "{c}");
     assert!(c.ends_with("<after restart>"), "{c}");
+}
+
+async fn remote(base: &str, token: Option<&str>, who: &str) -> Result<Client, subnet_ops::OpError> {
+    let c = Client::new(base, token.map(String::from)).with_header(AS_HEADER, who);
+    // Fail early like a session handshake would.
+    c.call_raw("list_types", serde_json::Value::Null).await?;
+    Ok(c)
 }

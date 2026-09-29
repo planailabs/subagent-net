@@ -14,6 +14,7 @@ pub struct Client {
     bases: Vec<String>,
     current: AtomicUsize,
     token: Option<String>,
+    headers: Vec<(String, String)>,
     http: reqwest::Client,
 }
 
@@ -21,7 +22,13 @@ impl Client {
     /// `bases` is a comma-separated list of hub URLs.
     pub fn new(bases: &str, token: Option<String>) -> Self {
         let bases = bases.split(',').map(|b| b.trim().trim_end_matches('/').to_string()).filter(|b| !b.is_empty()).collect();
-        Self { bases, current: AtomicUsize::new(0), token, http: reqwest::Client::new() }
+        Self { bases, current: AtomicUsize::new(0), token, headers: vec![], http: reqwest::Client::new() }
+    }
+
+    /// Sends an extra header with every call.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
     }
 
     pub fn base(&self) -> &str {
@@ -45,6 +52,9 @@ impl Client {
             let mut req = self.http.post(format!("{base}/v1/ops/{name}")).json(&args);
             if let Some(t) = &self.token {
                 req = req.bearer_auth(t);
+            }
+            for (k, v) in &self.headers {
+                req = req.header(k, v);
             }
             let resp = match req.send().await {
                 Ok(r) => r,

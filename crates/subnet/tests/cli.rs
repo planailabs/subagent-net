@@ -57,13 +57,13 @@ async fn subnet(base: &str, args: &[&str]) -> (bool, String, String) {
 async fn cli_round_trip() {
     let (base, llm) = setup().await;
     llm.say("sys", &["cli ", "works"]);
-    let (ok, out, err) = subnet(&base, &["types"]).await;
+    let (ok, out, err) = subnet(&base, &["list-types"]).await;
     assert!(ok, "{err}");
     assert!(out.contains("\"helper\""), "{out}");
     let (ok, out, err) = subnet(&base, &["spawn", "helper", "hello", "--wait"]).await;
     assert!(ok, "{err}");
     assert_eq!(out.trim(), "cli works");
-    let (ok, out, _) = subnet(&base, &["agents"]).await;
+    let (ok, out, _) = subnet(&base, &["list-agents"]).await;
     assert!(ok);
     let agents: serde_json::Value = serde_json::from_str(&out).unwrap();
     let id = agents[0]["id"].as_str().unwrap().to_string();
@@ -82,7 +82,7 @@ async fn cli_reports_errors() {
     assert!(!ok);
     assert!(err.contains("no live spawner"), "{err}");
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_subnet"))
-        .args(["types"])
+        .args(["list-types"])
         .env("SUBNET_HUB", &base)
         .env("SUBNET_TOKEN", "wrong")
         .output()
