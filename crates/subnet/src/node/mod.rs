@@ -340,7 +340,7 @@ impl Runner {
             tracing::error!(agent = %id, ?last, "assignment does not end with Recovered");
         }
         let (base, start) = match snapshot {
-            Some(s) => (s.seq, s.state.clone()),
+            Some(s) => (s.seq, s.state),
             None => (0, Agent::new(id, spec)),
         };
         let mut a = start.fold(prefix);
