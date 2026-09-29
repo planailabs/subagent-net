@@ -139,10 +139,10 @@ impl Env {
         attach(self.hub.clone(), Arc::new(sp)).await.unwrap()
     }
     async fn spawn(&self) -> AgentId {
-        id_of(&self.hub.op(&Addr::User, Op::Spawn { ty: "tooler".into(), prompt: "go".into() }).await.unwrap())
+        id_of(&self.hub.op(&Addr::root(), Op::Spawn { ty: "tooler".into(), prompt: "go".into() }).await.unwrap())
     }
     async fn mail(&self) -> Value {
-        let m = self.hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
+        let m = self.hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
         assert!(!m.as_array().unwrap().is_empty(), "no mail");
         m[0].clone()
     }
@@ -188,16 +188,16 @@ async fn hard_pause_cancels_mcp_call() {
     let id = e.spawn().await;
     let stats = e.stats.clone();
     e.until("slow started", || stats.slow_started.load(Ordering::SeqCst) == 1).await;
-    e.hub.op(&Addr::User, Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
+    e.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
     e.until("server-side cancel", || stats.slow_dropped.load(Ordering::SeqCst) == 1).await;
     for _ in 0..100 {
-        if e.hub.op(&Addr::User, Op::Transcript { id }).await.unwrap()["paused"] == true {
+        if e.hub.op(&Addr::root(), Op::Transcript { id }).await.unwrap()["paused"] == true {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     e.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
-    e.hub.op(&Addr::User, Op::Resume { id, tree: false }).await.unwrap();
+    e.hub.op(&Addr::root(), Op::Resume { id, tree: false }).await.unwrap();
     assert_eq!(e.mail().await["content"], "[aborted before completion]");
     assert_eq!(stats.slow_finished.load(Ordering::SeqCst), 0);
 }
@@ -210,12 +210,12 @@ async fn quick_pause_lets_mcp_call_finish() {
     let id = e.spawn().await;
     let stats = e.stats.clone();
     e.until("slow started", || stats.slow_started.load(Ordering::SeqCst) == 1).await;
-    e.hub.op(&Addr::User, Op::Pause { id, mode: PauseMode::Quick, tree: false }).await.unwrap();
+    e.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Quick, tree: false }).await.unwrap();
     e.until("slow finished", || stats.slow_finished.load(Ordering::SeqCst) == 1).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(e.llm.requests().len(), 1, "no LLM call while paused");
     e.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
-    e.hub.op(&Addr::User, Op::Resume { id, tree: false }).await.unwrap();
+    e.hub.op(&Addr::root(), Op::Resume { id, tree: false }).await.unwrap();
     assert_eq!(e.mail().await["content"], "slept");
 }
 
@@ -300,7 +300,7 @@ async fn stdio_mcp_server_with_env() {
             msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
         text(&[&results.join(" | ")])
     });
-    hub.op(&Addr::User, Op::Spawn { ty: "tooler".into(), prompt: "go".into() }).await.unwrap();
-    let m = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
+    hub.op(&Addr::root(), Op::Spawn { ty: "tooler".into(), prompt: "go".into() }).await.unwrap();
+    let m = hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
     assert_eq!(m[0]["content"], "stdio echo: hi | hello from env");
 }

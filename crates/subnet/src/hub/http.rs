@@ -52,7 +52,7 @@ async fn auth(State(hub): State<Arc<Hub>>, Query(q): Query<TokenQuery>, req: Req
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
-    if hub.token_ok(bearer.or(q.token).as_deref()) {
+    if hub.authenticate(bearer.or(q.token).as_deref()).is_ok() {
         next.run(req).await
     } else {
         StatusCode::UNAUTHORIZED.into_response()

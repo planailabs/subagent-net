@@ -505,7 +505,7 @@ impl Agent {
         for Queued { from, content, reply } in std::mem::take(&mut self.inbox) {
             let kind = if reply { "reply" } else { "message" };
             self.messages.push(Message::user(match &from {
-                Addr::User if !reply => content,
+                Addr::User(_) if !reply => content,
                 other => format!("[{kind} from {other}]\n{content}"),
             }));
             if !reply {

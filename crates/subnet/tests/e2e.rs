@@ -67,20 +67,20 @@ impl Net {
     }
 
     async fn spawn(&self, ty: &str, prompt: &str) -> AgentId {
-        id_of(&self.hub.op(&Addr::User, Op::Spawn { ty: ty.into(), prompt: prompt.into() }).await.unwrap())
+        id_of(&self.hub.op(&Addr::root(), Op::Spawn { ty: ty.into(), prompt: prompt.into() }).await.unwrap())
     }
 
     async fn mail(&self) -> Value {
-        let m = self.hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
+        let m = self.hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
         if m.as_array().unwrap().is_empty() {
-            let agents = self.hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+            let agents = self.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
             panic!("no mail within timeout; agents: {agents}");
         }
         m[0].clone()
     }
 
     async fn t(&self, id: AgentId) -> Value {
-        self.hub.op(&Addr::User, Op::Transcript { id }).await.unwrap()
+        self.hub.op(&Addr::root(), Op::Transcript { id }).await.unwrap()
     }
 
     /// Polls the transcript until `f` holds.
@@ -122,7 +122,7 @@ async fn conversation_continues_with_follow_ups() {
     n.llm.say(WORKER, &["two"]);
     let id = n.spawn("worker", "count").await;
     assert_eq!(n.mail().await["content"], "one");
-    n.hub.op(&Addr::User, Op::Send { to: Addr::Agent(id), content: "again".into() }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(id), content: "again".into() }).await.unwrap();
     assert_eq!(n.mail().await["content"], "two");
     let msgs = n.llm.requests()[1]["messages"].as_array().unwrap().len();
     assert_eq!(msgs, 4, "system, user, assistant, user");
@@ -175,7 +175,7 @@ async fn boss_spawns_worker_and_waits_for_it() {
     // The worker's prompt came from the boss.
     let wreq = n.llm.requests().into_iter().find(|r| r["messages"][0]["content"] == WORKER).unwrap();
     assert!(wreq["messages"][1]["content"].as_str().unwrap().contains("compute 6*7"));
-    let agents = n.hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+    let agents = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
     let worker = agents.as_array().unwrap().iter().find(|a| a["parent"] == json!(boss)).unwrap();
     assert_eq!(worker["phase"], "idle");
 }
@@ -188,7 +188,7 @@ async fn hard_pause_keeps_partial_and_resume_continues_it() {
     n.llm.say(WORKER, &["The ", "quick ", "brown ", "fox ", "jumps ", "over"]);
     let id = n.spawn("worker", "write").await;
     n.until(id, "some streamed text", |t| t["partial"]["content"].as_str().is_some_and(|c| c.len() >= 4)).await;
-    n.hub.op(&Addr::User, Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
     let t = n.until(id, "paused", |t| t["paused"] == true).await;
     let partial = t["partial"]["content"].as_str().unwrap().to_string();
     assert!(partial.starts_with("The "), "{partial}");
@@ -196,7 +196,7 @@ async fn hard_pause_keeps_partial_and_resume_continues_it() {
 
     n.llm.set_gap(Duration::ZERO);
     n.llm.say(WORKER, &["<rest>"]);
-    n.hub.op(&Addr::User, Op::Resume { id, tree: false }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Resume { id, tree: false }).await.unwrap();
     let m = n.mail().await;
     assert_eq!(m["content"], format!("{partial}<rest>"));
     let req = n.llm.requests().pop().unwrap();
@@ -215,12 +215,12 @@ async fn prefill_models_continue_the_partial_directly() {
     n.llm.say(WORKER, &["a", "b", "c", "d", "e", "f"]);
     let id = n.spawn("worker", "x").await;
     n.until(id, "text", |t| t["partial"]["content"].as_str().is_some_and(|c| c.len() >= 2)).await;
-    n.hub.op(&Addr::User, Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
     let t = n.until(id, "paused", |t| t["paused"] == true).await;
     let partial = t["partial"]["content"].as_str().unwrap().to_string();
     n.llm.set_gap(Duration::ZERO);
     n.llm.say(WORKER, &["Z"]);
-    n.hub.op(&Addr::User, Op::Resume { id, tree: false }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Resume { id, tree: false }).await.unwrap();
     assert_eq!(n.mail().await["content"], format!("{partial}Z"));
     let req = n.llm.requests().pop().unwrap();
     assert_eq!(req["continue_final_message"], true);
@@ -264,7 +264,7 @@ async fn approval_gates_tool() {
     assert_eq!(t["paused"], false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(n.llm.requests().len(), 1, "tool must not run before approval");
-    n.hub.op(&Addr::User, Op::Approve { id, call_id: "c1".into(), approved: true }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Approve { id, call_id: "c1".into(), approved: true }).await.unwrap();
     assert_eq!(n.mail().await["content"], "listed");
     assert_eq!(n.t(id).await["awaiting_approval"], Value::Null);
 }
@@ -279,7 +279,7 @@ async fn llm_error_fails_agent_and_resume_retries() {
     assert_eq!(m["status"], "failed");
     assert_eq!(n.t(id).await["phase"], "failed");
     n.llm.say(WORKER, &["recovered"]);
-    n.hub.op(&Addr::User, Op::Resume { id, tree: false }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Resume { id, tree: false }).await.unwrap();
     assert_eq!(n.mail().await["content"], "recovered");
 }
 
@@ -291,7 +291,7 @@ async fn cancel_stops_streaming_agent() {
     n.llm.say(WORKER, &["a", "b", "c", "d", "e"]);
     let id = n.spawn("worker", "x").await;
     n.until(id, "thinking", |t| t["phase"] == "thinking").await;
-    n.hub.op(&Addr::User, Op::Cancel { id }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Cancel { id }).await.unwrap();
     assert_eq!(n.mail().await["status"], "cancelled");
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let t = n.t(id).await;
@@ -347,7 +347,7 @@ async fn boss_pauses_and_cancels_its_worker() {
     let boss = n.spawn("boss", "start and stop").await;
     let m = n.mail().await;
     assert_eq!(m["content"], "stopped it");
-    let agents = n.hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+    let agents = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
     let w = agents.as_array().unwrap().iter().find(|a| a["parent"] == json!(boss)).unwrap();
     assert_eq!(w["phase"], "cancelled");
     // The boss's tool results confirm both ops.

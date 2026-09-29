@@ -8,6 +8,7 @@ license.workspace = true
 subnet-core.workspace = true
 subnet-llm.workspace = true
 subnet-ops.workspace = true
+subnet-cluster.workspace = true
 schemars.workspace = true
 anyhow.workspace = true
 clap.workspace = true

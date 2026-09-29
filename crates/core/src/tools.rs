@@ -28,7 +28,7 @@ pub fn builtin_tools() -> Vec<ToolDef> {
         ),
         def(
             "send_message",
-            "Send a message to an agent (agent id), the user (\"user\") or a client (\"client:<id>\").",
+            "Send a message to an agent (agent id), a resident (\"resident:<name>\"), a user (\"user:<name>\"), a client (\"client:<name>\") or a mailbox (\"mailbox:<name>\").",
             obj(json!({"to":{"type":"string"},"content":{"type":"string"}}), &["to", "content"]),
         ),
         def(
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn every_builtin_except_wait_maps_to_op() {
         let id = Uuid::new_v4();
-        let args = json!({"type":"t","prompt":"p","to":"user","content":"c","id":id,"mode":"hard"}).to_string();
+        let args = json!({"type":"t","prompt":"p","to":"user:u","content":"c","id":id,"mode":"hard"}).to_string();
         for t in builtin_tools() {
             let r = builtin_op(&call(&t.name, &args));
             if t.name == WAIT_FOR {

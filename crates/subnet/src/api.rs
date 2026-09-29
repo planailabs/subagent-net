@@ -11,6 +11,8 @@ use subnet_core::chat::{Message, ToolCall, Usage};
 use subnet_core::proto::Mail;
 use subnet_ops::{Caller, ErrorKind, Method, NoArgs, Op, OpError, OpMeta, Registry, Role};
 
+use crate::hub::auth::{Applied, PrincipalKind};
+use crate::hub::db::{ClusterFile, VersionInfo};
 use crate::hub::{Hub, HubError};
 
 // ---------- result types ----------
@@ -96,6 +98,7 @@ impl From<HubError> for OpError {
             HubError::Bad(_) => ErrorKind::BadRequest,
             HubError::NotFound(_) => ErrorKind::NotFound,
             HubError::Forbidden(_) => ErrorKind::Forbidden,
+            HubError::Unauthorized(_) => ErrorKind::Unauthorized,
             HubError::Db(_) => ErrorKind::Internal,
         };
         OpError::new(kind, e.to_string())
@@ -168,6 +171,51 @@ pub struct ForkArgs {
     pub at: Option<u64>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyArgs {
+    /// Cluster files; their blocks are merged.
+    pub files: Vec<ClusterFile>,
+    /// Only validate and show the changes.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterView {
+    /// None before the first apply.
+    pub version: Option<VersionInfo>,
+    pub files: Vec<ClusterFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct VersionArgs {
+    pub version: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PrincipalArgs {
+    pub kind: PrincipalKind,
+    /// Name as declared in the cluster file.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Token {
+    /// Shown once; the hub keeps only its hash.
+    pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Revoked {
+    pub revoked: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WhoAmI {
+    pub addr: Addr,
+    pub role: Role,
+}
+
 macro_rules! op {
     ($t:ident, $name:literal, $role:ident, $http:expr, $args:ty, $out:ty, $summary:literal) => {
         pub struct $t;
@@ -192,6 +240,13 @@ op!(Pause, "pause", Operator, Some((Method::Post, "/v1/agents/{id}/pause")), Pau
 op!(Resume, "resume", Operator, Some((Method::Post, "/v1/agents/{id}/resume")), ResumeArgs, Done, "Resume a paused or failed agent.");
 op!(Cancel, "cancel", Operator, Some((Method::Post, "/v1/agents/{id}/cancel")), IdArgs, Done, "Cancel an agent and all its descendants.");
 op!(Approve, "approve", Operator, Some((Method::Post, "/v1/agents/{id}/approve")), ApproveArgs, Done, "Approve or deny the tool call an agent is waiting on.");
+op!(ApplyCluster, "apply_cluster", Admin, Some((Method::Put, "/v1/cluster")), ApplyArgs, Applied, "Validate cluster files and make them the desired state (or just diff with dry_run).");
+op!(GetCluster, "get_cluster", Viewer, Some((Method::Get, "/v1/cluster")), NoArgs, ClusterView, "The applied cluster files and their version.");
+op!(ClusterHistory, "cluster_history", Viewer, Some((Method::Get, "/v1/cluster/history")), NoArgs, Vec<VersionInfo>, "All applied cluster versions, newest first.");
+op!(RollbackCluster, "rollback_cluster", Admin, Some((Method::Post, "/v1/cluster/rollback")), VersionArgs, Applied, "Re-apply an earlier cluster version as a new version.");
+op!(IssueToken, "issue_token", Admin, Some((Method::Post, "/v1/tokens")), PrincipalArgs, Token, "Create a token for a user, client or node declared in the cluster.");
+op!(RevokeTokens, "revoke_tokens", Admin, Some((Method::Post, "/v1/tokens/revoke")), PrincipalArgs, Revoked, "Revoke all tokens of a principal.");
+op!(WhoAmIOp, "whoami", Viewer, Some((Method::Get, "/v1/whoami")), NoArgs, WhoAmI, "Who the hub thinks you are.");
 op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events) into a new agent.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
@@ -208,6 +263,13 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<Cancel>(),
         OpMeta::of::<Approve>(),
         OpMeta::of::<Fork>(),
+        OpMeta::of::<ApplyCluster>(),
+        OpMeta::of::<GetCluster>(),
+        OpMeta::of::<ClusterHistory>(),
+        OpMeta::of::<RollbackCluster>(),
+        OpMeta::of::<IssueToken>(),
+        OpMeta::of::<RevokeTokens>(),
+        OpMeta::of::<WhoAmIOp>(),
     ]
 }
 
@@ -263,36 +325,55 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
         let h = h.clone();
         async move { Ok(h.approve(&c.addr, a.id, a.call_id, a.approved).await?) }
     });
-    let h = hub;
+    let h = hub.clone();
     r.add::<Fork, _, _>(move |c, a| {
         let h = h.clone();
         async move { Ok(h.fork(&c.addr, a.id, a.at).await?) }
     });
+    let h = hub.clone();
+    r.add::<ApplyCluster, _, _>(move |c, a| {
+        let h = h.clone();
+        async move { Ok(h.apply_cluster(a.files, a.dry_run, &c.addr).await?) }
+    });
+    let h = hub.clone();
+    r.add::<GetCluster, _, _>(move |_, _: NoArgs| {
+        let h = h.clone();
+        async move {
+            let c = h.cluster();
+            Ok(ClusterView { version: c.version, files: c.files })
+        }
+    });
+    let h = hub.clone();
+    r.add::<ClusterHistory, _, _>(move |_, _: NoArgs| {
+        let h = h.clone();
+        async move { Ok(h.cluster_history().await?) }
+    });
+    let h = hub.clone();
+    r.add::<RollbackCluster, _, _>(move |c, a| {
+        let h = h.clone();
+        async move { Ok(h.rollback_cluster(a.version, &c.addr).await?) }
+    });
+    let h = hub.clone();
+    r.add::<IssueToken, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(Token { token: h.issue_token(a.kind, &a.name).await? }) }
+    });
+    let h = hub;
+    r.add::<RevokeTokens, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(Revoked { revoked: h.revoke_tokens(a.kind, &a.name).await? }) }
+    });
+    r.add::<WhoAmIOp, _, _>(|c, _: NoArgs| async move { Ok(WhoAmI { addr: c.addr, role: c.role }) });
     r
 }
 
-/// Header naming who a token holder acts as (until named principals exist).
-pub const AS_HEADER: &str = "x-subnet-as";
-
-/// Token auth: the hub token (if any) grants admin; the caller's address comes
-/// from `x-subnet-as` (`user` or a client name), else the MCP session id.
+/// Bearer token → principal (see `Hub::authenticate`).
 pub fn auth(hub: Arc<Hub>) -> subnet_ops::http::Auth<Principal> {
     Arc::new(move |h: HeaderMap| {
         let hub = hub.clone();
         Box::pin(async move {
-            let header = |n: &str| h.get(n).and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()).map(String::from);
-            let bearer = header("authorization").and_then(|v| v.strip_prefix("Bearer ").map(String::from));
-            if !hub.token_ok(bearer.as_deref()) {
-                return Err(OpError::new(ErrorKind::Unauthorized, "missing or wrong token"));
-            }
-            let addr = match header(AS_HEADER).as_deref() {
-                None | Some("user") => match header("mcp-session-id") {
-                    Some(s) if header(AS_HEADER).is_none() => Addr::Client(s),
-                    _ => Addr::User,
-                },
-                Some(name) => Addr::Client(name.into()),
-            };
-            Ok(Principal { addr, role: Role::Admin })
+            let bearer = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+            Ok(hub.authenticate(bearer)?)
         })
     })
 }

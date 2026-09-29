@@ -73,25 +73,25 @@ fn text(s: &str) -> Event {
 }
 
 async fn transcript(hub: &Hub, id: AgentId) -> Value {
-    hub.op(&Addr::User, Op::Transcript { id }).await.unwrap()
+    hub.op(&Addr::root(), Op::Transcript { id }).await.unwrap()
 }
 
 #[tokio::test]
 async fn spawned_agent_waits_for_a_spawner_then_is_assigned() {
     let hub = hub().await;
-    assert!(spawn(&hub, &Addr::User, "worker").await.unwrap_err().contains("no live spawner"));
+    assert!(spawn(&hub, &Addr::root(), "worker").await.unwrap_err().contains("no live spawner"));
     let mut sp = spawner(&hub, "s1", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (agent, epoch, events) = expect_assign(&mut sp).await;
     assert_eq!((agent, epoch), (id, 1));
-    assert_eq!(events, vec![Event::Inbox { from: Addr::User, content: "go".into(), reply: false }, Event::Recovered]);
+    assert_eq!(events, vec![Event::Inbox { from: Addr::root(), content: "go".into(), reply: false }, Event::Recovered]);
 }
 
 #[tokio::test]
 async fn pending_agents_are_placed_when_spawner_connects() {
     let hub = hub().await;
     let mut a = spawner(&hub, "a", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     expect_assign(&mut a).await;
     hub.disconnect(a.conn).await;
     let mut b = spawner(&hub, "b", vec![worker()], 4).await;
@@ -104,7 +104,7 @@ async fn pending_agents_are_placed_when_spawner_connects() {
 async fn proposals_are_committed_and_echoed() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("hi"), Event::LlmDone] }).await.unwrap();
     assert_eq!(expect_commit(&mut sp).await, (id, 3, text("hi")));
@@ -118,7 +118,7 @@ async fn proposals_are_committed_and_echoed() {
 async fn stale_epoch_writes_are_fenced() {
     let hub = hub().await;
     let mut a = spawner(&hub, "a", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     expect_assign(&mut a).await;
     let mut b = spawner(&hub, "b", vec![worker()], 4).await;
     // Simulate a partition: the hub gives the agent to b while a is still alive.
@@ -136,9 +136,9 @@ async fn stale_epoch_writes_are_fenced() {
 async fn spawner_may_only_propose_its_own_events() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
-    let forged = Event::Inbox { from: Addr::User, content: "forged".into(), reply: false };
+    let forged = Event::Inbox { from: Addr::root(), content: "forged".into(), reply: false };
     assert!(hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![forged] }).await.is_err());
     assert_eq!(transcript(&hub, id).await["seq"], 2);
 }
@@ -148,12 +148,12 @@ async fn placement_respects_type_hash_and_capacity() {
     let hub = hub().await;
     let mut old = spawner(&hub, "old", vec![ty("worker", "OLD")], 4).await;
     let mut sp = spawner(&hub, "new", vec![worker()], 1).await;
-    let a = spawn(&hub, &Addr::User, "worker@w1").await.unwrap();
+    let a = spawn(&hub, &Addr::root(), "worker@w1").await.unwrap();
     assert_eq!(expect_assign(&mut sp).await.0, a);
-    let b = spawn(&hub, &Addr::User, "worker@w1").await.unwrap();
+    let b = spawn(&hub, &Addr::root(), "worker@w1").await.unwrap();
     quiet(&mut sp.rx).await;
     quiet(&mut old.rx).await;
-    let v = hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+    let v = hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
     let pending = v.as_array().unwrap().iter().find(|x| id_of(x) == b).unwrap();
     assert_eq!(pending["spawner"], Value::Null);
 }
@@ -163,8 +163,8 @@ async fn least_loaded_spawner_wins() {
     let hub = hub().await;
     let mut a = spawner(&hub, "a", vec![worker()], 4).await;
     let mut b = spawner(&hub, "b", vec![worker()], 4).await;
-    spawn(&hub, &Addr::User, "worker").await.unwrap();
-    spawn(&hub, &Addr::User, "worker").await.unwrap();
+    spawn(&hub, &Addr::root(), "worker").await.unwrap();
+    spawn(&hub, &Addr::root(), "worker").await.unwrap();
     expect_assign(&mut a).await;
     expect_assign(&mut b).await;
 }
@@ -183,20 +183,20 @@ async fn bad_token_is_rejected() {
 async fn send_to_agent_commits_inbox() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     expect_assign(&mut sp).await;
     let c = Addr::Client("x".into());
     hub.op(&c, Op::Send { to: Addr::Agent(id), content: "yo".into() }).await.unwrap();
     assert_eq!(expect_commit(&mut sp).await.2, Event::Inbox { from: c, content: "yo".into(), reply: false });
     let missing = Addr::Agent(uuid::Uuid::new_v4());
-    assert!(hub.op(&Addr::User, Op::Send { to: missing, content: "?".into() }).await.is_err());
+    assert!(hub.op(&Addr::root(), Op::Send { to: missing, content: "?".into() }).await.is_err());
 }
 
 #[tokio::test]
 async fn reports_go_to_parent_log_and_user_mail() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![boss(), worker()], 8).await;
-    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     expect_assign(&mut sp).await;
     let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
     // Parent gets ChildSpawned, then the child is assigned.
@@ -205,7 +205,7 @@ async fn reports_go_to_parent_log_and_user_mail() {
     let (_, kid_epoch, _) = expect_assign(&mut sp).await;
 
     // The user also asks the kid something mid-turn.
-    hub.op(&Addr::User, Op::Send { to: Addr::Agent(kid), content: "and you?".into() }).await.unwrap();
+    hub.op(&Addr::root(), Op::Send { to: Addr::Agent(kid), content: "and you?".into() }).await.unwrap();
     expect_commit(&mut sp).await;
     let answer = |s: &str| ToHub::Propose { agent: kid, epoch: kid_epoch, events: vec![text(s), Event::LlmDone] };
     hub.handle(sp.conn, answer("done")).await.unwrap();
@@ -219,10 +219,10 @@ async fn reports_go_to_parent_log_and_user_mail() {
         }
     }
     assert!(got_report);
-    assert_eq!(hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(50) }).await.unwrap(), json!([]));
+    assert_eq!(hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(50) }).await.unwrap(), json!([]));
     // Second turn answers the user (and the parent again).
     hub.handle(sp.conn, answer("me too")).await.unwrap();
-    let mail = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(1000) }).await.unwrap();
+    let mail = hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(1000) }).await.unwrap();
     assert_eq!(mail, json!([{"from": format!("agent:{kid}"), "content": "me too", "status": "idle"}]));
 }
 
@@ -230,9 +230,9 @@ async fn reports_go_to_parent_log_and_user_mail() {
 async fn cancel_reports_to_parent_even_though_spawner_is_revoked() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![boss(), worker()], 8).await;
-    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
-    hub.op(&Addr::User, Op::Cancel { id: kid }).await.unwrap();
+    hub.op(&Addr::root(), Op::Cancel { id: kid }).await.unwrap();
     let t = transcript(&hub, boss_id).await;
     assert_eq!(t["phase"], "thinking", "the report woke the boss");
     let _ = &mut sp;
@@ -244,9 +244,9 @@ async fn unlimited_child_type_gets_half_of_parent_budget() {
     let mut w = worker();
     w.budget.max_tokens = None;
     let _sp = spawner(&hub, "s", vec![boss(), w], 8).await;
-    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
-    let rows = hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+    let rows = hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
     assert!(rows.as_array().unwrap().iter().any(|r| id_of(r) == kid));
     assert_eq!(transcript(&hub, boss_id).await["reserved"], 500);
 }
@@ -259,10 +259,10 @@ async fn wait_inbox_wakes_on_new_mail() {
     let c2 = c.clone();
     let waiter = tokio::spawn(async move { h2.op(&c2, Op::WaitInbox { timeout_ms: Some(5000) }).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    hub.op(&Addr::User, Op::Send { to: c.clone(), content: "psst".into() }).await.unwrap();
+    hub.op(&Addr::root(), Op::Send { to: c.clone(), content: "psst".into() }).await.unwrap();
     let got = tokio::time::timeout(Duration::from_secs(2), waiter).await.unwrap().unwrap();
     assert_eq!(got[0]["content"], "psst");
-    assert_eq!(got[0]["from"], "user");
+    assert_eq!(got[0]["from"], "user:root");
     // Mail is taken exactly once.
     assert_eq!(hub.op(&c, Op::WaitInbox { timeout_ms: Some(10) }).await.unwrap(), json!([]));
 }
@@ -277,8 +277,8 @@ async fn agents_cannot_wait_inbox() {
 async fn spawn_permissions_and_budgets() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![boss(), worker()], 16).await;
-    let w = spawn(&hub, &Addr::User, "worker").await.unwrap();
-    let b = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let w = spawn(&hub, &Addr::root(), "worker").await.unwrap();
+    let b = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     // worker's type may not spawn anything
     assert!(spawn(&hub, &Addr::Agent(w), "worker").await.unwrap_err().contains("may not spawn"));
     // boss may not spawn boss
@@ -303,7 +303,7 @@ async fn token_reservation_limits_children() {
     b.budget.max_tokens = Some(500);
     b.budget.max_children = 5;
     let _sp = spawner(&hub, "s", vec![b, worker()], 16).await;
-    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap(); // reserves 400
     spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap(); // reserves the last 100
     assert!(spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap_err().contains("token budget"));
@@ -316,7 +316,7 @@ async fn depth_budget_stops_grandchildren() {
     b.spawns = vec!["boss".into()];
     b.budget.max_depth = 1;
     let _sp = spawner(&hub, "s", vec![b], 16).await;
-    let root = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let root = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let child = spawn(&hub, &Addr::Agent(root), "boss").await.unwrap();
     assert!(spawn(&hub, &Addr::Agent(child), "boss").await.unwrap_err().contains("depth"));
 }
@@ -325,10 +325,10 @@ async fn depth_budget_stops_grandchildren() {
 async fn pause_tree_reaches_descendants_and_agents_only_control_their_own() {
     let hub = hub().await;
     let _sp = spawner(&hub, "s", vec![boss(), worker()], 16).await;
-    let root = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let root = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let kid = spawn(&hub, &Addr::Agent(root), "worker").await.unwrap();
-    let other = spawn(&hub, &Addr::User, "worker").await.unwrap();
-    hub.op(&Addr::User, Op::Pause { id: root, mode: PauseMode::Quick, tree: true }).await.unwrap();
+    let other = spawn(&hub, &Addr::root(), "worker").await.unwrap();
+    hub.op(&Addr::root(), Op::Pause { id: root, mode: PauseMode::Quick, tree: true }).await.unwrap();
     for id in [root, kid] {
         assert_eq!(transcript(&hub, id).await["pause"], "quick");
     }
@@ -344,12 +344,12 @@ async fn pause_tree_reaches_descendants_and_agents_only_control_their_own() {
 async fn cancel_revokes_subtree_and_frees_capacity() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![boss(), worker()], 2).await;
-    let root = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let root = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     expect_assign(&mut sp).await;
     let kid = spawn(&hub, &Addr::Agent(root), "worker").await.unwrap();
     expect_commit(&mut sp).await; // ChildSpawned
     expect_assign(&mut sp).await;
-    hub.op(&Addr::User, Op::Cancel { id: root }).await.unwrap();
+    hub.op(&Addr::root(), Op::Cancel { id: root }).await.unwrap();
     let mut revoked = vec![];
     while revoked.len() < 2 {
         if let ToSpawner::Revoke { agent } = recv(&mut sp.rx).await {
@@ -361,7 +361,7 @@ async fn cancel_revokes_subtree_and_frees_capacity() {
     want.sort();
     assert_eq!(revoked, want);
     // Capacity is free again.
-    let n = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let n = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     loop {
         if let ToSpawner::Assign { agent, .. } = recv(&mut sp.rx).await {
             assert_eq!(agent, n);
@@ -374,9 +374,9 @@ async fn cancel_revokes_subtree_and_frees_capacity() {
 async fn approve_commits_approval() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     expect_assign(&mut sp).await;
-    hub.op(&Addr::User, Op::Approve { id, call_id: "c".into(), approved: true }).await.unwrap();
+    hub.op(&Addr::root(), Op::Approve { id, call_id: "c".into(), approved: true }).await.unwrap();
     assert_eq!(expect_commit(&mut sp).await.2, Event::Approval { call_id: "c".into(), approved: true });
 }
 
@@ -385,7 +385,7 @@ async fn hub_restart_reloads_state_and_keeps_fencing() {
     let url = db_url().await;
     let hub = Hub::open(&url, None).await.unwrap();
     let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("partial")] }).await.unwrap();
     let before = transcript(&hub, id).await;
@@ -406,11 +406,11 @@ async fn hub_restart_reloads_state_and_keeps_fencing() {
 async fn fork_copies_a_prefix() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 4).await;
-    let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("a"), Event::LlmDone] }).await.unwrap();
     // inbox, recovered, "a" | done
-    let f = id_of(&hub.op(&Addr::User, Op::Fork { id, at: Some(3) }).await.unwrap());
+    let f = id_of(&hub.op(&Addr::root(), Op::Fork { id, at: Some(3) }).await.unwrap());
     let t = transcript(&hub, f).await;
     assert_eq!(t["seq"], 4, "the fork is placed, which logs a recovery");
     assert_eq!(t["partial"]["content"], "a");
@@ -423,7 +423,7 @@ async fn list_types_aggregates_spawners() {
     let hub = hub().await;
     let _a = spawner(&hub, "a", vec![worker(), boss()], 3).await;
     let _b = spawner(&hub, "b", vec![worker()], 2).await;
-    let v = hub.op(&Addr::User, Op::ListTypes).await.unwrap();
+    let v = hub.op(&Addr::root(), Op::ListTypes).await.unwrap();
     let w = v.as_array().unwrap().iter().find(|t| t["name"] == "worker").unwrap();
     assert_eq!((w["spawners"].as_u64(), w["free"].as_u64()), (Some(2), Some(5)));
 }
@@ -448,15 +448,15 @@ async fn next_assign(sp: &mut Sp) -> ((AgentId, u64), Vec<AgentId>) {
 async fn idle_agents_are_evicted_for_agents_with_work() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 1).await;
-    let a = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let a = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let ((_, ea), _) = next_assign(&mut sp).await;
     finish_turn(&hub, &mut sp, a, ea, "a done").await;
     // b needs the only slot: a is idle, so it's evicted.
-    let b = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let b = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let ((got, eb), revoked) = next_assign(&mut sp).await;
     assert_eq!((got, revoked), (b, vec![a]));
     // a gets a message while b is busy: it waits for a slot...
-    hub.op(&Addr::User, Op::Send { to: Addr::Agent(a), content: "again".into() }).await.unwrap();
+    hub.op(&Addr::root(), Op::Send { to: Addr::Agent(a), content: "again".into() }).await.unwrap();
     quiet(&mut sp.rx).await;
     assert_eq!(transcript(&hub, a).await["spawner"], Value::Null);
     // ...which frees up as soon as b goes idle.
@@ -470,19 +470,19 @@ async fn idle_agents_are_evicted_for_agents_with_work() {
 async fn paused_agents_give_up_their_slot_and_come_back_on_resume() {
     let hub = hub().await;
     let mut sp = spawner(&hub, "s", vec![worker()], 1).await;
-    let a = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let a = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let ((_, ea), _) = next_assign(&mut sp).await;
-    hub.op(&Addr::User, Op::Pause { id: a, mode: PauseMode::Hard, tree: false }).await.unwrap();
+    hub.op(&Addr::root(), Op::Pause { id: a, mode: PauseMode::Hard, tree: false }).await.unwrap();
     hub.handle(sp.conn, ToHub::Propose { agent: a, epoch: ea, events: vec![text("par"), Event::LlmAborted] })
         .await
         .unwrap();
     assert_eq!(transcript(&hub, a).await["paused"], true);
-    let b = spawn(&hub, &Addr::User, "worker").await.unwrap();
+    let b = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     let ((got, _), revoked) = next_assign(&mut sp).await;
     assert_eq!((got, revoked), (b, vec![a]));
-    hub.op(&Addr::User, Op::Resume { id: a, tree: false }).await.unwrap();
+    hub.op(&Addr::root(), Op::Resume { id: a, tree: false }).await.unwrap();
     // b is busy (thinking): a waits; cancel b and a gets the slot.
-    hub.op(&Addr::User, Op::Cancel { id: b }).await.unwrap();
+    hub.op(&Addr::root(), Op::Cancel { id: b }).await.unwrap();
     let ((got, _), _) = next_assign(&mut sp).await;
     assert_eq!(got, a);
     assert_eq!(transcript(&hub, a).await["partial"]["content"], "par");
@@ -494,7 +494,7 @@ async fn agents_waiting_on_children_do_not_hold_a_slot() {
     let mut b = boss();
     b.budget.max_tokens = None;
     let mut sp = spawner(&hub, "s", vec![b, worker()], 1).await;
-    let boss_id = spawn(&hub, &Addr::User, "boss").await.unwrap();
+    let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
     let ((_, eb), _) = next_assign(&mut sp).await;
     let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
     // The boss is thinking, so the kid can't run yet.
@@ -517,4 +517,13 @@ async fn quiet_except_commits(sp: &mut Sp) {
     while let Ok(Some(m)) = tokio::time::timeout(Duration::from_millis(100), sp.rx.recv()).await {
         assert!(matches!(m, ToSpawner::Commit { .. }), "unexpected {m:?}");
     }
+}
+
+#[tokio::test]
+async fn mailbox_and_unknown_resident_addresses() {
+    let hub = hub().await;
+    let mb = Addr::Mailbox("door".into());
+    hub.op(&Addr::root(), Op::Send { to: mb.clone(), content: "knock".into() }).await.unwrap();
+    let e = hub.op(&Addr::root(), Op::Send { to: Addr::Resident("nobody".into()), content: "?".into() }).await.unwrap_err();
+    assert!(e.contains("no resident"), "{e}");
 }

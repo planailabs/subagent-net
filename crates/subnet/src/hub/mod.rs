@@ -2,6 +2,7 @@
 //! fencing and message routing. Transports (WebSocket, MCP) are thin layers
 //! over `Hub::connect`, `Hub::handle` and `Hub::op`.
 
+pub mod auth;
 pub mod db;
 pub mod http;
 
@@ -31,6 +32,8 @@ pub enum HubError {
     NotFound(String),
     #[error("{0}")]
     Forbidden(String),
+    #[error("{0}")]
+    Unauthorized(String),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -77,7 +80,10 @@ pub struct Hub {
     db: Db,
     // ponytail: one global lock serialises all commits; shard per agent if it becomes the bottleneck.
     st: Mutex<State>,
-    token: Option<String>,
+    admin_token: Option<String>,
+    cluster: std::sync::RwLock<auth::ClusterState>,
+    /// Token hash → principal.
+    tokens: std::sync::RwLock<HashMap<String, (auth::PrincipalKind, String)>>,
     mail: Notify,
     notices: broadcast::Sender<Notice>,
 }
@@ -96,7 +102,9 @@ fn spawner_event(e: &Event) -> bool {
 }
 
 impl Hub {
-    pub async fn open(db_url: &str, token: Option<String>) -> Result<Arc<Self>, HubError> {
+    /// `admin_token` is the bootstrap `user:root` token; without one the hub
+    /// runs in open mode (everyone is root) for development.
+    pub async fn open(db_url: &str, admin_token: Option<String>) -> Result<Arc<Self>, HubError> {
         let db = Db::connect(db_url).await?;
         let mut st = State::default();
         for row in db.agents().await? {
@@ -105,17 +113,25 @@ impl Hub {
             st.agents.insert(row.id, AgentRec { a, seq: events.len() as u64, epoch: row.epoch, spawner: None });
         }
         tracing::info!(agents = st.agents.len(), "hub loaded");
-        Ok(Arc::new(Self { db, st: Mutex::new(st), token, mail: Notify::new(), notices: broadcast::channel(4096).0 }))
+        if admin_token.is_none() {
+            tracing::warn!("no admin token: open mode, every caller is user:root");
+        }
+        let hub = Arc::new(Self {
+            db,
+            st: Mutex::new(st),
+            admin_token,
+            cluster: Default::default(),
+            tokens: Default::default(),
+            mail: Notify::new(),
+            notices: broadcast::channel(4096).0,
+        });
+        hub.load_auth().await?;
+        Ok(hub)
     }
 
     /// For in-process spawners, which are trusted.
     pub(crate) fn token(&self) -> Option<String> {
-        self.token.clone()
-    }
-
-    /// True if no token is configured or `given` matches it.
-    pub fn token_ok(&self, given: Option<&str>) -> bool {
-        self.token.as_deref().is_none_or(|t| given.is_some_and(|g| ct_eq(g.as_bytes(), t.as_bytes())))
+        self.admin_token.clone()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notice> {
@@ -128,7 +144,7 @@ impl Hub {
         let ToHub::Hello { name, token, types, capacity } = hello else {
             return Err("expected hello".into());
         };
-        if !self.token_ok(token.as_deref()) {
+        if !self.node_ok(&name, token.as_deref()) {
             return Err("bad token".into());
         }
         let (tx, rx) = mpsc::unbounded_channel();
@@ -406,6 +422,7 @@ impl Hub {
     }
 
     pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {
+        let to = self.resolve(to).await?;
         let mut st = self.st.lock().await;
         match &to {
             Addr::Agent(id) if st.agents.contains_key(id) => {
@@ -415,6 +432,17 @@ impl Hub {
             other => self.put_mail(other, &Mail { from: caller.clone(), content, status: None }).await?,
         }
         Ok(Done::OK)
+    }
+
+    /// `resident:<name>` → the resident's agent; other addresses unchanged.
+    pub async fn resolve(&self, a: Addr) -> Result<Addr, HubError> {
+        match a {
+            Addr::Resident(n) => match self.db.resident(&n).await? {
+                Some(id) => Ok(Addr::Agent(id)),
+                None => Err(HubError::NotFound(format!("no resident {n:?}"))),
+            },
+            other => Ok(other),
+        }
     }
 
     pub async fn pause(&self, caller: &Addr, id: AgentId, mode: PauseMode, tree: bool) -> Result<Done, HubError> {

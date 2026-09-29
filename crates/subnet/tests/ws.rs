@@ -56,7 +56,7 @@ async fn spawner_over_websocket_gets_assignments_and_loses_them_on_disconnect() 
     .await;
     assert_eq!(next(&mut ws).await, ToSpawner::Welcome);
 
-    let id = id_of(&hub.op(&Addr::User, Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap());
+    let id = id_of(&hub.op(&Addr::root(), Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap());
     let ToSpawner::Assign { agent, epoch, .. } = next(&mut ws).await else { panic!() };
     assert_eq!(agent, id);
 
@@ -126,13 +126,13 @@ async fn real_spawner_over_websocket_answers() {
     let task = tokio::spawn(async move { subnet::spawner::ws::run(sp, &url).await });
     // Wait for the type to show up.
     for _ in 0..100 {
-        if !hub.op(&Addr::User, Op::ListTypes).await.unwrap().as_array().unwrap().is_empty() {
+        if !hub.op(&Addr::root(), Op::ListTypes).await.unwrap().as_array().unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    hub.op(&Addr::User, Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap();
-    let mail = hub.op(&Addr::User, Op::WaitInbox { timeout_ms: Some(5000) }).await.unwrap();
+    hub.op(&Addr::root(), Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap();
+    let mail = hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(5000) }).await.unwrap();
     assert_eq!(mail[0]["content"], "over the wire");
     task.abort();
 }

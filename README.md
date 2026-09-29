@@ -22,7 +22,7 @@ subnet pause <id> --mode hard    # or safe / quick; --tree for descendants
 subnet resume <id>
 ```
 
-For a real deployment, run `subnet hub` once and `subnet spawner -c <config>` on every machine that has models or tools. Set `SUBNET_TOKEN` everywhere.
+For a real deployment, start the hub with `SUBNET_ADMIN_TOKEN` set, declare users/clients/nodes in a cluster file (`subnet apply cluster.hcl`), and issue each a token (`subnet issue-token client claude`). Clients use theirs as `SUBNET_TOKEN`.
 
 ## Driving it from another agent
 
@@ -30,7 +30,7 @@ Add the hub as an HTTP MCP server, e.g. for Claude Code:
 
 ```sh
 claude mcp add --transport http subnet http://127.0.0.1:7700/mcp \
-  --header "Authorization: Bearer $SUBNET_TOKEN" --header "x-subnet-as: claude"
+  --header "Authorization: Bearer $CLAUDE_TOKEN"   # from: subnet issue-token client claude
 ```
 
 The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`, `fork`, `transcript`, `list_agents` and `list_types`. The same operations are a REST/RPC API (`/v1/…`, OpenAPI at `/v1/openapi.json`, docs at `/v1/docs`) and `subnet` subcommands.

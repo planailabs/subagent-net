@@ -9,18 +9,36 @@ pub type AgentId = Uuid;
 /// A participant that can send or receive messages.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Addr {
-    User,
-    /// An external MCP client session.
+    /// A human principal.
+    User(String),
+    /// A program principal (e.g. an MCP client such as another agent).
     Client(String),
     Agent(AgentId),
+    /// A long-lived named agent from the cluster file; resolved by the hub.
+    Resident(String),
+    /// A durable queue agents read with `mailbox_take`.
+    Mailbox(String),
+}
+
+impl Addr {
+    /// The built-in bootstrap admin.
+    pub fn root() -> Self {
+        Addr::User("root".into())
+    }
+
+    pub fn user(name: &str) -> Self {
+        Addr::User(name.into())
+    }
 }
 
 impl fmt::Display for Addr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Addr::User => f.write_str("user"),
+            Addr::User(s) => write!(f, "user:{s}"),
             Addr::Client(s) => write!(f, "client:{s}"),
             Addr::Agent(id) => write!(f, "agent:{id}"),
+            Addr::Resident(s) => write!(f, "resident:{s}"),
+            Addr::Mailbox(s) => write!(f, "mailbox:{s}"),
         }
     }
 }
@@ -29,8 +47,10 @@ impl FromStr for Addr {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
         match s.split_once(':') {
-            None if s == "user" => Ok(Addr::User),
-            Some(("client", c)) if !c.is_empty() => Ok(Addr::Client(c.into())),
+            Some(("user", n)) if !n.is_empty() => Ok(Addr::User(n.into())),
+            Some(("client", n)) if !n.is_empty() => Ok(Addr::Client(n.into())),
+            Some(("resident", n)) if !n.is_empty() => Ok(Addr::Resident(n.into())),
+            Some(("mailbox", n)) if !n.is_empty() => Ok(Addr::Mailbox(n.into())),
             Some(("agent", id)) => id.parse().map(Addr::Agent).map_err(|e| format!("bad agent id {id:?}: {e}")),
             // A bare uuid is an agent: that is what models tend to pass around.
             None => s.parse().map(Addr::Agent).map_err(|_| format!("bad address {s:?}")),
@@ -52,8 +72,8 @@ impl schemars::JsonSchema for Addr {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "user, client:<name>, agent:<id> (or a bare agent id)",
-            "examples": ["user", "client:claude", "agent:6f1c0f7e-6b0a-4c55-9c3e-2f1f7b6d8a10"]
+            "description": "user:<name>, client:<name>, agent:<id> (or a bare agent id), resident:<name>, mailbox:<name>",
+            "examples": ["user:maciej", "client:claude", "resident:concierge", "agent:6f1c0f7e-6b0a-4c55-9c3e-2f1f7b6d8a10"]
         })
     }
 }
@@ -71,7 +91,13 @@ mod tests {
     #[test]
     fn roundtrips() {
         let id = Uuid::new_v4();
-        for a in [Addr::User, Addr::Client("s1".into()), Addr::Agent(id)] {
+        for a in [
+            Addr::user("m"),
+            Addr::Client("s1".into()),
+            Addr::Agent(id),
+            Addr::Resident("r".into()),
+            Addr::Mailbox("q".into()),
+        ] {
             assert_eq!(a.to_string().parse::<Addr>().unwrap(), a);
             let j = serde_json::to_string(&a).unwrap();
             assert_eq!(serde_json::from_str::<Addr>(&j).unwrap(), a);
@@ -86,7 +112,7 @@ mod tests {
 
     #[test]
     fn rejects_garbage() {
-        for s in ["", "client:", "agent:nope", "foo:bar", "nobody"] {
+        for s in ["", "user", "user:", "client:", "agent:nope", "foo:bar", "nobody", "mailbox:"] {
             assert!(s.parse::<Addr>().is_err(), "{s}");
         }
     }

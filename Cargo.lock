@@ -2521,6 +2521,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "subnet-cluster",
  "subnet-core",
  "subnet-llm",
  "subnet-ops",

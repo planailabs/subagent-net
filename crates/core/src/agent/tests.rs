@@ -21,7 +21,7 @@ impl H {
         self.a.apply(&e)
     }
     fn user(&mut self, s: &str) -> Vec<Effect> {
-        self.ev(Event::Inbox { from: Addr::User, content: s.into(), reply: false })
+        self.ev(Event::Inbox { from: Addr::root(), content: s.into(), reply: false })
     }
     fn text(&mut self, s: &str) -> Vec<Effect> {
         self.ev(Event::LlmDelta { delta: Delta { content: Some(s.into()), ..Default::default() } })
@@ -82,7 +82,7 @@ fn message_starts_turn_and_answer_ends_it() {
     assert_eq!(h.a.llm_messages(), vec![Message::user("hi")]);
     h.text("hel");
     h.text("lo");
-    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "hello")]);
+    assert_eq!(h.done(), vec![report(vec![Addr::root()], Status::Idle, "hello")]);
     assert_eq!(h.a.phase, Phase::Idle);
     assert_eq!(h.contents(), vec![(Role::User, "hi".into()), (Role::Assistant, "hello".into())]);
     assert!(h.a.acc.is_empty());
@@ -130,7 +130,7 @@ fn inbox_during_final_answer_starts_new_turn() {
     h.user("first");
     h.user("second");
     h.text("answer");
-    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "answer"), Effect::CallLlm]);
+    assert_eq!(h.done(), vec![report(vec![Addr::root()], Status::Idle, "answer"), Effect::CallLlm]);
 }
 
 #[test]
@@ -149,12 +149,12 @@ fn replies_wake_but_are_not_owed_an_answer() {
     let mut h = H::new(spec());
     h.user("ask b");
     h.text("asked");
-    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "asked")]);
+    assert_eq!(h.done(), vec![report(vec![Addr::root()], Status::Idle, "asked")]);
     assert_eq!(h.ev(Event::Inbox { from: b.clone(), content: "answer".into(), reply: true }), vec![Effect::CallLlm]);
     assert_eq!(h.contents().last().unwrap().1, format!("[reply from {b}]\nanswer"));
     h.text("b says answer");
     // Not back to b (no ping-pong) but to whoever asked last.
-    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "b says answer")]);
+    assert_eq!(h.done(), vec![report(vec![Addr::root()], Status::Idle, "b says answer")]);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn hard_pause_aborts_and_keeps_partial() {
     assert_eq!(h.resume(), vec![Effect::CallLlm]);
     h.text("brown fox");
     let fx = h.done();
-    assert_eq!(fx[0], report(vec![Addr::User], Status::Idle, "The quick brown fox"));
+    assert_eq!(fx[0], report(vec![Addr::root()], Status::Idle, "The quick brown fox"));
     // Queued message was injected before the continuation call, so no new turn.
     assert_eq!(fx.len(), 1);
 }
@@ -260,7 +260,7 @@ fn resume_while_still_inflight_does_not_duplicate() {
     h.pause(PauseMode::Quick);
     assert!(h.resume().is_empty(), "the stream is still running");
     h.text("a");
-    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "a")]);
+    assert_eq!(h.done(), vec![report(vec![Addr::root()], Status::Idle, "a")]);
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn safe_pause_finishes_the_turn() {
     assert!(!h.a.is_paused());
     h.user("queued");
     h.text("final");
-    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "final")], "no new turn while paused");
+    assert_eq!(h.done(), vec![report(vec![Addr::root()], Status::Idle, "final")], "no new turn while paused");
     assert!(h.a.is_paused());
     assert_eq!(h.resume(), vec![Effect::CallLlm]);
 }
@@ -479,7 +479,7 @@ fn cancel_aborts_and_reports() {
     h.user("x");
     let fx = h.ev(Event::Cancelled);
     assert_eq!(fx[0], Effect::AbortInflight);
-    assert_eq!(fx[1], report(vec![Addr::User, Addr::Agent(parent)], Status::Cancelled, "[cancelled]"));
+    assert_eq!(fx[1], report(vec![Addr::root(), Addr::Agent(parent)], Status::Cancelled, "[cancelled]"));
     assert!(h.done().is_empty(), "late completion is dropped");
     assert_eq!(h.a.phase, Phase::Cancelled);
     assert!(h.user("hello?").is_empty());
@@ -493,14 +493,14 @@ fn llm_failure_then_resume_continues_partial() {
     h.user("x");
     h.text("par");
     let fx = h.ev(Event::LlmFailed { error: "boom".into() });
-    assert_eq!(fx, vec![report(vec![Addr::User], Status::Failed, "boom")]);
+    assert_eq!(fx, vec![report(vec![Addr::root()], Status::Failed, "boom")]);
     assert!(matches!(h.a.phase, Phase::Failed { .. }));
     assert!(h.user("still there?").is_empty());
     assert_eq!(h.resume(), vec![Effect::CallLlm]);
     h.text("tial");
     let Effect::Report { content, to, .. } = &h.done()[0] else { panic!() };
     assert_eq!(content, "partial");
-    assert_eq!(to, &vec![Addr::User], "the answer still reaches whoever asked");
+    assert_eq!(to, &vec![Addr::root()], "the answer still reaches whoever asked");
 }
 
 #[test]

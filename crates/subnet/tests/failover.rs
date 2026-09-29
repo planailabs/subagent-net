@@ -11,7 +11,6 @@ use std::time::Duration;
 use common::db_url;
 use common::llm::MockLlm;
 use serde_json::{Value, json};
-use subnet::api::AS_HEADER;
 use subnet::client::Client;
 use tokio::process::{Child, Command};
 
@@ -164,7 +163,8 @@ async fn killed_hub_restarts_and_spawner_reconnects() {
 }
 
 async fn remote(base: &str, token: Option<&str>, who: &str) -> Result<Client, subnet_ops::OpError> {
-    let c = Client::new(base, token.map(String::from)).with_header(AS_HEADER, who);
+    let _ = who;
+    let c = Client::new(base, token.map(String::from));
     // Fail early like a session handshake would.
     c.call_raw("list_types", serde_json::Value::Null).await?;
     Ok(c)

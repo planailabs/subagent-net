@@ -8,7 +8,6 @@ use std::time::Duration;
 use common::db_url;
 use common::llm::MockLlm;
 use serde_json::{Value, json};
-use subnet::api::AS_HEADER;
 use subnet::client::{Client, tail};
 use subnet::hub::{Hub, http};
 use subnet::spawner::config::{Config, TypeConfig};
@@ -18,9 +17,22 @@ use subnet_llm::ModelConfig;
 
 const SYS: &str = "helper";
 
+const PRINCIPALS: &str = r#"
+client "claude" { role = "operator" }
+user "watcher" { role = "viewer" }
+"#;
+
+/// Hub with principals `client:claude` (operator) and `user:watcher` (viewer).
 async fn setup(token: Option<&str>) -> (String, MockLlm) {
+    let (base, llm, _) = setup_hub(token).await;
+    (base, llm)
+}
+
+async fn setup_hub(token: Option<&str>) -> (String, MockLlm, Arc<Hub>) {
     let llm = MockLlm::start().await;
     let hub = Hub::open(&db_url().await, token.map(Into::into)).await.unwrap();
+    let files = vec![subnet::hub::db::ClusterFile { name: "p.hcl".into(), text: PRINCIPALS.into() }];
+    hub.apply_cluster(files, false, &subnet_core::addr::Addr::root()).await.unwrap();
     let t = TypeConfig {
         name: "helper".into(),
         description: "helps".into(),
@@ -42,15 +54,23 @@ async fn setup(token: Option<&str>) -> (String, MockLlm) {
     attach(hub.clone(), Arc::new(Spawner::new(&cfg).await.unwrap())).await.unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(l, http::router(hub)).await.unwrap() });
-    (base, llm)
+    let h = hub.clone();
+    tokio::spawn(async move { axum::serve(l, http::router(h)).await.unwrap() });
+    (base, llm, hub)
+}
+
+async fn token(hub: &Hub, kind: &str, name: &str) -> String {
+    let kind = serde_json::from_value(json!(kind)).unwrap();
+    hub.issue_token(kind, name).await.unwrap()
 }
 
 #[tokio::test]
 async fn mcp_client_spawns_and_gets_the_answer_in_its_own_inbox() {
-    let (base, llm) = setup(None).await;
+    let (base, llm, hub) = setup_hub(None).await;
     llm.say(SYS, &["at your service"]);
-    let c = remote(&base, None, "claude").await.unwrap();
+    let claude = token(&hub, "client", "claude").await;
+    let c = remote(&base, Some(&claude), "claude").await.unwrap();
+    assert_eq!(c.call_raw("whoami", Value::Null).await.unwrap(), json!({"addr":"client:claude","role":"operator"}));
     let types = c.call_raw("list_types", Value::Null).await.unwrap();
     assert_eq!(types[0]["name"], "helper");
     let spawned = c.call_raw("spawn", json!({"type":"helper","prompt":"hello"})).await.unwrap();
@@ -138,7 +158,8 @@ async fn tail_filters_by_agent() {
 }
 
 async fn remote(base: &str, token: Option<&str>, who: &str) -> Result<Client, subnet_ops::OpError> {
-    let c = Client::new(base, token.map(String::from)).with_header(AS_HEADER, who);
+    let _ = who;
+    let c = Client::new(base, token.map(String::from));
     // Fail early like a session handshake would.
     c.call_raw("list_types", serde_json::Value::Null).await?;
     Ok(c)
@@ -151,19 +172,16 @@ async fn hub_mcp_endpoint_serves_the_same_operations() {
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
-    let (base, llm) = setup(None).await;
+    let (base, llm, hub) = setup_hub(Some("adm")).await;
     llm.say(SYS, &["via mcp"]);
-    let mut h = std::collections::HashMap::new();
-    h.insert(
-        axum::http::HeaderName::from_static(AS_HEADER),
-        axum::http::HeaderValue::from_static("claude"),
-    );
-    let cfg = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).custom_headers(h);
+    let claude = token(&hub, "client", "claude").await;
+    let cfg = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).auth_header(claude);
     let mcp = ().serve(StreamableHttpClientTransport::from_config(cfg)).await.unwrap();
     let tools: Vec<String> = mcp.list_all_tools().await.unwrap().into_iter().map(|t| t.name.to_string()).collect();
     for t in ["spawn", "send", "wait_inbox", "pause", "resume", "cancel", "approve", "fork", "transcript", "list_agents", "list_types"] {
         assert!(tools.contains(&t.to_string()), "missing {t}: {tools:?}");
     }
+    assert!(!tools.contains(&"apply_cluster".to_string()), "an operator sees no admin tools");
     let mut p = CallToolRequestParams::new("spawn");
     p.arguments = json!({"type":"helper","prompt":"hi"}).as_object().cloned();
     let r = mcp.call_tool(p).await.unwrap();
@@ -189,4 +207,33 @@ async fn rest_routes_and_openapi_are_served() {
         .await
         .unwrap();
     assert_eq!(r.status(), 404);
+}
+
+#[tokio::test]
+async fn roles_gate_operations() {
+    let (base, _llm, hub) = setup_hub(Some("adm")).await;
+    let watcher = token(&hub, "user", "watcher").await;
+    let v = remote(&base, Some(&watcher), "").await.unwrap();
+    assert_eq!(v.call_raw("whoami", Value::Null).await.unwrap()["role"], "viewer");
+    let e = v.call_raw("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap_err();
+    assert_eq!(e.kind, subnet_ops::ErrorKind::Forbidden);
+    // Admin via the bootstrap token.
+    let root = remote(&base, Some("adm"), "").await.unwrap();
+    assert_eq!(root.call_raw("whoami", Value::Null).await.unwrap(), json!({"addr":"user:root","role":"admin"}));
+    // Revoked tokens stop working.
+    root.call_raw("revoke_tokens", json!({"kind":"user","name":"watcher"})).await.unwrap();
+    assert_eq!(v.call_raw("whoami", Value::Null).await.unwrap_err().kind, subnet_ops::ErrorKind::Unauthorized);
+    // Undeclared principals get no tokens.
+    let e = root.call_raw("issue_token", json!({"kind":"user","name":"ghost"})).await.unwrap_err();
+    assert_eq!(e.kind, subnet_ops::ErrorKind::NotFound);
+}
+
+#[tokio::test]
+async fn principals_removed_from_the_cluster_lose_access() {
+    let (base, _llm, hub) = setup_hub(Some("adm")).await;
+    let claude = token(&hub, "client", "claude").await;
+    let c = remote(&base, Some(&claude), "").await.unwrap();
+    let root = remote(&base, Some("adm"), "").await.unwrap();
+    root.call_raw("apply_cluster", json!({"files":[{"name":"p.hcl","text":"user \"watcher\" { role = \"viewer\" }"}]})).await.unwrap();
+    assert_eq!(c.call_raw("whoami", Value::Null).await.unwrap_err().kind, subnet_ops::ErrorKind::Unauthorized);
 }

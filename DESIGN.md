@@ -321,7 +321,8 @@ The web UI and the TUI use the same API.
   - `viewer`: read only
   - nodes: the node protocol only
 - `subnet token issue <kind> <name>` (admin) creates a random token. The hub stores only its SHA-256.
-- The hub's `SUBNET_ADMIN_TOKEN` env var is a built-in `user:root` admin for bootstrap.
+- The hub's `SUBNET_ADMIN_TOKEN` env var is a built-in `user:root` admin for bootstrap. Without it the hub runs in **open mode** (development): every caller without a known token is `user:root`.
+- A principal removed from the cluster file loses access immediately; its tokens stop resolving.
 - API and MCP use `Authorization: Bearer <token>`. The web UI exchanges a token for an HTTP-only session cookie (`POST /v1/login`).
 - A caller's address is its principal: `user:maciej`, `client:claude`.
 
@@ -374,5 +375,10 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 ## Status
 
 - **Implemented (v1):** core state machine, `llm` client, hub sequencer/placement/fencing/dormancy, spawner (to become node) with internal executor and per-type MCP, kill -9 failover tests.
-- **Implemented (v2):** `ops` registry with REST/RPC + OpenAPI + docs, MCP and CLI front-ends and an HA-aware client; the hub's operations run on it. (Auth is still the single hub token plus `x-subnet-as` until named principals land.)
+- **Implemented (v2):**
+  - `ops` registry with REST/RPC + OpenAPI + docs, MCP and CLI front-ends and an HA-aware client; the hub's operations run on it.
+  - `cluster` crate: HCL parsing, validation, identities, node views, diff.
+  - Cluster versions (`apply_cluster`, `get_cluster`, `cluster_history`, `rollback_cluster`; `subnet apply` reads files).
+  - Principals, roles and tokens (`issue_token`, `revoke_tokens`, `whoami`); `SUBNET_ADMIN_TOKEN` bootstrap; open mode without it.
+  - Addresses `user:<name>`, `client:<name>`, `resident:<name>`, `mailbox:<name>`.
 - **In progress (v2):** everything else in this document. Each item moves to "implemented" in the commit that finishes it.
