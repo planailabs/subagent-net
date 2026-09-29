@@ -191,6 +191,9 @@ pub struct ForkArgs {
     /// Number of events to copy; default all.
     #[serde(default)]
     pub at: Option<u64>,
+    /// Also fork the children it had spawned by then (with their descendants).
+    #[serde(default)]
+    pub tree: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -270,7 +273,7 @@ op!(RollbackCluster, "rollback_cluster", Admin, Some((Method::Post, "/v1/cluster
 op!(IssueToken, "issue_token", Admin, Some((Method::Post, "/v1/tokens")), PrincipalArgs, Token, "Create a token for a user, client or node declared in the cluster.");
 op!(RevokeTokens, "revoke_tokens", Admin, Some((Method::Post, "/v1/tokens/revoke")), PrincipalArgs, Revoked, "Revoke all tokens of a principal.");
 op!(WhoAmIOp, "whoami", Viewer, Some((Method::Get, "/v1/whoami")), NoArgs, WhoAmI, "Who the hub thinks you are.");
-op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events) into a new agent.");
+op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events, optionally with its children) into a new agent.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
 pub fn metas() -> Vec<OpMeta> {
@@ -357,7 +360,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     let h = hub.clone();
     r.add::<Fork, _, _>(move |c, a| {
         let h = h.clone();
-        async move { Ok(h.fork(&c.addr, a.id, a.at).await?) }
+        async move { Ok(h.fork(&c.addr, a.id, a.at, a.tree).await?) }
     });
     let h = hub.clone();
     r.add::<ApplyCluster, _, _>(move |c, a| {

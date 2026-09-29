@@ -39,11 +39,14 @@ pub enum Op {
         call_id: String,
         approved: bool,
     },
-    /// Copy an agent's log (up to `at` events) into a new, parentless agent.
+    /// Copy an agent's log (up to `at` events) into a new, parentless agent
+    /// (with `tree`, its descendants too).
     Fork {
         id: AgentId,
         #[serde(default)]
         at: Option<u64>,
+        #[serde(default)]
+        tree: bool,
     },
     Transcript {
         id: AgentId,

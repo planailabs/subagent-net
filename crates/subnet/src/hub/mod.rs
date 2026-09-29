@@ -555,7 +555,7 @@ impl Hub {
             Op::Resume { id, tree } => j(self.resume(caller, id, tree).await),
             Op::Cancel { id } => j(self.cancel(caller, id).await),
             Op::Approve { id, call_id, approved } => j(self.approve(caller, id, call_id, approved).await),
-            Op::Fork { id, at } => j(self.fork(caller, id, at).await),
+            Op::Fork { id, at, tree } => j(self.fork(caller, id, at, tree).await),
             Op::Transcript { id } => j(self.transcript(id).await),
             Op::WaitInbox { timeout_ms } => j(self.wait_inbox(caller, timeout_ms).await),
             Op::MailboxTake { name, max } => j(self.mailbox(caller, &name, max, true).await),
@@ -659,21 +659,67 @@ impl Hub {
         Ok(Done::OK)
     }
 
-    pub async fn fork(&self, caller: &Addr, id: AgentId, at: Option<u64>) -> Result<Spawned, HubError> {
+    /// Copies an agent's history (the first `at` events) into a new agent.
+    /// Without `tree` the copy has no children; with `tree` every child it
+    /// had spawned by then is forked too (recursively, with their full logs),
+    /// and agent ids are remapped throughout the copied events.
+    pub async fn fork(&self, caller: &Addr, id: AgentId, at: Option<u64>, tree: bool) -> Result<Spawned, HubError> {
         if matches!(caller, Addr::Agent(_)) {
             return Err(HubError::Forbidden("agents may not fork".into()));
         }
         let mut st = self.st.lock().await;
         let Some(r) = st.agents.get(&id) else { return no_agent(id) };
-        let mut events = self.db.events(id, 0).await?;
-        events.truncate(at.unwrap_or(r.seq) as usize);
-        let spec = Spec { parent: None, ..r.a.spec.clone() };
-        let ty = spec.ty.clone();
-        let new = Uuid::new_v4();
-        self.db.create_agent(new, &spec).await?;
-        st.agents.insert(new, AgentRec { a: Agent::new(new, spec), seq: 0, epoch: 0, node: None });
-        self.commit(&mut st, new, events).await?;
-        Ok(Spawned { id: new, ty })
+        let mut root_events = self.db.events(id, 0).await?;
+        root_events.truncate(at.unwrap_or(r.seq) as usize);
+        let spawned = |evs: &[Event]| -> Vec<AgentId> {
+            evs.iter().filter_map(|e| if let Event::ChildSpawned { id, .. } = e { Some(*id) } else { None }).collect()
+        };
+        // (old id, events) for the root and, with `tree`, every descendant.
+        let mut subtree = vec![(id, root_events)];
+        if tree {
+            let mut i = 0;
+            while i < subtree.len() {
+                for c in spawned(&subtree[i].1) {
+                    if st.agents.contains_key(&c) && !subtree.iter().any(|(x, _)| *x == c) {
+                        subtree.push((c, self.db.events(c, 0).await?));
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            subtree[0].1.retain(|e| !matches!(e, Event::ChildSpawned { .. } | Event::ChildReport { .. }));
+        }
+        let map: HashMap<AgentId, AgentId> = subtree.iter().map(|(old, _)| (*old, Uuid::new_v4())).collect();
+        let remap = |e: &Event| -> Event {
+            let mut j = serde_json::to_string(e).unwrap();
+            for (old, new) in &map {
+                j = j.replace(&old.to_string(), &new.to_string());
+            }
+            serde_json::from_str(&j).expect("remapped event parses")
+        };
+        for (old, events) in &subtree {
+            let new = map[old];
+            let mut spec = st.agents[old].a.spec.clone();
+            spec.parent = if old == &id { None } else { spec.parent.and_then(|p| map.get(&p).copied()) };
+            self.db.create_agent(new, &spec).await?;
+            st.agents.insert(new, AgentRec { a: Agent::new(new, spec), seq: 0, epoch: 0, node: None });
+            let events: Vec<Event> = events.iter().map(remap).collect();
+            self.restore(&mut st, new, events).await?;
+        }
+        let root = map[&id];
+        Ok(Spawned { id: root, ty: st.agents[&root].a.spec.ty.clone() })
+    }
+
+    /// Appends copied history: the replica folds it, but its effects (reports)
+    /// already happened for the original and aren't repeated.
+    async fn restore(&self, st: &mut State, id: AgentId, events: Vec<Event>) -> Result<(), HubError> {
+        if !events.is_empty() {
+            let r = st.agents.get_mut(&id).unwrap();
+            self.db.append(id, r.seq + 1, &events).await?;
+            r.seq += events.len() as u64;
+            r.a = std::mem::replace(&mut r.a, Agent::new(id, Spec::of_type(""))).fold(&events);
+        }
+        self.run(st, vec![Work::Place(id)]).await
     }
 
     pub async fn wait_inbox(&self, caller: &Addr, timeout_ms: Option<u64>) -> Result<Vec<Mail>, HubError> {

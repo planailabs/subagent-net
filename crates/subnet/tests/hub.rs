@@ -476,12 +476,12 @@ async fn fork_copies_a_prefix() {
     let (_, epoch, _) = expect_assign(&mut sp).await;
     hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("a"), Event::LlmDone] }).await.unwrap();
     // inbox, recovered, "a" | done
-    let f = id_of(&hub.op(&Addr::root(), Op::Fork { id, at: Some(3) }).await.unwrap());
+    let f = id_of(&hub.op(&Addr::root(), Op::Fork { id, at: Some(3), tree: false }).await.unwrap());
     let t = transcript(&hub, f).await;
     assert_eq!(t["seq"], 4, "the fork is placed, which logs a recovery");
     assert_eq!(t["partial"]["content"], "a");
     assert_eq!(t["parent"], Value::Null);
-    assert!(hub.op(&Addr::Agent(id), Op::Fork { id, at: None }).await.is_err());
+    assert!(hub.op(&Addr::Agent(id), Op::Fork { id, at: None, tree: false }).await.is_err());
 }
 
 #[tokio::test]
@@ -619,4 +619,44 @@ async fn snapshots_bound_replay_and_feed_assignments() {
     assert_eq!(snap.seq, 6);
     assert_eq!(events, vec![text("e"), Event::Recovered]);
     assert_eq!(snap.state.acc.content, "abcd");
+}
+
+#[tokio::test]
+async fn forks_do_not_repeat_reports() {
+    let hub = hub().await;
+    let mut sp = spawner(&hub, "s", vec![worker()], 4).await;
+    let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
+    let (_, epoch, _) = expect_assign(&mut sp).await;
+    hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![text("answer"), Event::LlmDone] }).await.unwrap();
+    assert_eq!(hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(1000) }).await.unwrap()[0]["content"], "answer");
+    hub.op(&Addr::root(), Op::Fork { id, at: None, tree: false }).await.unwrap();
+    let again = hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(100) }).await.unwrap();
+    assert_eq!(again, json!([]), "the copy's history must not be delivered again");
+}
+
+#[tokio::test]
+async fn fork_with_and_without_tree() {
+    let hub = hub().await;
+    let mut sp = spawner(&hub, "s", vec![boss(), worker()], 8).await;
+    let b = spawn(&hub, &Addr::root(), "boss").await.unwrap();
+    let kid = spawn(&hub, &Addr::Agent(b), "worker").await.unwrap();
+    let _ = &mut sp;
+    // Without tree: no children.
+    let plain = id_of(&hub.op(&Addr::root(), Op::Fork { id: b, at: None, tree: false }).await.unwrap());
+    let t = transcript(&hub, plain).await;
+    assert_eq!(t["reserved"], 0);
+    let agents = hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
+    assert!(!agents.as_array().unwrap().iter().any(|a| a["parent"] == json!(plain)));
+
+    // With tree: the child is forked under the new boss, ids remapped.
+    let forked = id_of(&hub.op(&Addr::root(), Op::Fork { id: b, at: None, tree: true }).await.unwrap());
+    let agents = hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
+    let new_kid = agents.as_array().unwrap().iter().find(|a| a["parent"] == json!(forked)).expect("forked child");
+    let new_kid: AgentId = new_kid["id"].as_str().unwrap().parse().unwrap();
+    assert_ne!(new_kid, kid);
+    let kt = transcript(&hub, new_kid).await;
+    assert!(kt["messages"][0]["content"].as_str().unwrap().contains(&forked.to_string()), "{kt}");
+    assert_eq!(transcript(&hub, forked).await["reserved"], 400);
+    // The originals are untouched.
+    assert_eq!(transcript(&hub, kid).await["parent"], json!(b));
 }
