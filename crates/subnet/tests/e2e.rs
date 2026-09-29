@@ -289,3 +289,74 @@ async fn cancel_stops_streaming_agent() {
     assert_eq!(t["phase"], "cancelled");
     assert_eq!(t["spawner"], Value::Null);
 }
+
+#[tokio::test]
+async fn agents_message_each_other_and_replies_come_back() {
+    let n = Net::new().await;
+    n.spawner("s", std_types(&n.llm)).await;
+    // B (a boss, for its own reply queue) answers; A messages B, then reports what B said.
+    n.llm.say(BOSS, &["B idle"]);
+    let b = n.spawn("boss", "wait").await;
+    assert_eq!(n.mail().await["content"], "B idle");
+    n.llm.push(WORKER, move |_| tool_call("m1", "send_message", json!({"to": b.to_string(), "content": "ping"})));
+    n.llm.push(WORKER, |_| text(&["sent"]));
+    n.llm.say(BOSS, &["pong"]);
+    n.llm.push(WORKER, |body| {
+        let last = body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().to_string();
+        text(&[&format!("A got: {last}")])
+    });
+    let a = n.spawn("worker", "talk to B").await;
+    let mut got = vec![];
+    for _ in 0..2 {
+        got.push(n.mail().await["content"].as_str().unwrap().to_string());
+    }
+    assert_eq!(got[0], "sent");
+    assert_eq!(got[1], format!("A got: [reply from agent:{b}]\npong"));
+    let t = n.t(b).await;
+    assert!(t["messages"].to_string().contains(&format!("[message from agent:{a}]")));
+}
+
+#[tokio::test]
+async fn boss_pauses_and_cancels_its_worker() {
+    let n = Net::new().await;
+    n.spawner("s", std_types(&n.llm)).await;
+    n.llm.set_gap(Duration::from_millis(100));
+    n.llm.say(WORKER, &["w1 ", "w2 ", "w3 ", "w4 ", "w5 ", "w6 ", "w7 ", "w8"]);
+    n.llm.push(BOSS, |_| tool_call("s1", "spawn_agent", json!({"type":"worker","prompt":"long job"})));
+    n.llm.push(BOSS, |body| {
+        let id = serde_json::from_str::<Value>(&last_tool_result(body)).unwrap()["id"].as_str().unwrap().to_string();
+        tool_call("p1", "pause_agent", json!({"id": id, "mode": "hard"}))
+    });
+    n.llm.push(BOSS, |body| {
+        let id = body["messages"].as_array().unwrap().iter().find_map(|m| {
+            let c = m["content"].as_str()?;
+            serde_json::from_str::<Value>(c).ok()?.get("id")?.as_str().map(String::from)
+        });
+        tool_call("c1", "cancel_agent", json!({"id": id.unwrap()}))
+    });
+    n.llm.push(BOSS, |_| text(&["stopped it"]));
+    let boss = n.spawn("boss", "start and stop").await;
+    let m = n.mail().await;
+    assert_eq!(m["content"], "stopped it");
+    let agents = n.hub.op(&Addr::User, Op::ListAgents).await.unwrap();
+    let w = agents.as_array().unwrap().iter().find(|a| a["parent"] == json!(boss)).unwrap();
+    assert_eq!(w["phase"], "cancelled");
+    // The boss's tool results confirm both ops.
+    let bt = n.t(boss).await.to_string();
+    assert!(bt.contains("paused") && bt.contains("cancelled"), "{bt}");
+}
+
+#[tokio::test]
+async fn agents_cannot_touch_strangers() {
+    let n = Net::new().await;
+    n.spawner("s", std_types(&n.llm)).await;
+    n.llm.say(WORKER, &["x"]);
+    let stranger = n.spawn("worker", "hi").await;
+    n.mail().await;
+    n.llm.push(WORKER, move |_| tool_call("c", "cancel_agent", json!({"id": stranger.to_string()})));
+    n.llm.push(WORKER, |body| text(&[&last_tool_result(body)]));
+    n.spawn("worker", "cancel them").await;
+    let c = n.mail().await["content"].as_str().unwrap().to_string();
+    assert!(c.contains("not a descendant"), "{c}");
+    assert_eq!(n.t(stranger).await["phase"], "idle");
+}

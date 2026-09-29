@@ -62,7 +62,9 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Inbox { from: Addr, content: String },
+    /// `reply` marks an automatic turn-end answer: it wakes the agent but its
+    /// sender is not owed an answer back, so agents can't ping-pong forever.
+    Inbox { from: Addr, content: String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] reply: bool },
     LlmDelta { delta: Delta },
     LlmDone,
     LlmAborted,
@@ -120,6 +122,13 @@ pub enum Phase {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Queued {
+    pub from: Addr,
+    pub content: String,
+    pub reply: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub status: Status,
     pub content: String,
@@ -135,9 +144,12 @@ pub struct Agent {
     pub phase: Phase,
     pub pause: Option<PauseMode>,
     /// Messages waiting for the next LLM call.
-    pub inbox: VecDeque<(Addr, String)>,
+    pub inbox: VecDeque<Queued>,
     /// Who gets this turn's final answer.
     pub reply_to: BTreeSet<Addr>,
+    /// Askers of the last turn that had any; a turn woken only by replies or
+    /// child reports answers them.
+    pub askers: BTreeSet<Addr>,
     /// Children and their reports not yet shown to the model.
     pub children: BTreeMap<AgentId, Vec<Report>>,
     pub usage: Usage,
@@ -156,6 +168,7 @@ impl Agent {
             pause: None,
             inbox: VecDeque::new(),
             reply_to: BTreeSet::new(),
+            askers: BTreeSet::new(),
             children: BTreeMap::new(),
             usage: Usage::default(),
             reserved: 0,
@@ -237,8 +250,8 @@ impl Agent {
         match ev {
             // Late stream events (after cancel/fail) are dropped.
             Event::LlmDelta { .. } | Event::LlmDone | Event::LlmAborted | Event::LlmFailed { .. } if !thinking => {}
-            Event::Inbox { from, content } => {
-                self.inbox.push_back((from.clone(), content.clone()));
+            Event::Inbox { from, content, reply } => {
+                self.inbox.push_back(Queued { from: from.clone(), content: content.clone(), reply: *reply });
                 if self.phase == Phase::Idle {
                     self.advance(&mut fx);
                 }
@@ -443,12 +456,15 @@ impl Agent {
 
     /// Moves queued input into the transcript right before an LLM call.
     fn inject_pending(&mut self) {
-        for (from, content) in std::mem::take(&mut self.inbox) {
+        for Queued { from, content, reply } in std::mem::take(&mut self.inbox) {
+            let kind = if reply { "reply" } else { "message" };
             self.messages.push(Message::user(match &from {
-                Addr::User => content,
-                other => format!("[message from {other}]\n{content}"),
+                Addr::User if !reply => content,
+                other => format!("[{kind} from {other}]\n{content}"),
             }));
-            self.reply_to.insert(from);
+            if !reply {
+                self.reply_to.insert(from);
+            }
         }
         for (id, reports) in &mut self.children {
             for r in std::mem::take(reports) {
@@ -470,8 +486,14 @@ impl Agent {
     }
 
     fn report(&mut self, status: Status, content: String, fx: &mut Vec<Effect>) {
+        if !self.reply_to.is_empty() {
+            self.askers = self.reply_to.clone();
+        }
         // A failed turn can be resumed, so its askers still await the answer.
-        let mut to = if status == Status::Failed { self.reply_to.clone() } else { std::mem::take(&mut self.reply_to) };
+        if status != Status::Failed {
+            self.reply_to.clear();
+        }
+        let mut to = self.askers.clone();
         if let Some(p) = self.spec.parent {
             to.insert(Addr::Agent(p));
         }

@@ -227,7 +227,7 @@ impl Hub {
                             work.push_back((p, vec![Event::ChildReport { id, status, content: content.clone() }]));
                         }
                         Addr::Agent(x) if st.agents.contains_key(&x) => {
-                            work.push_back((x, vec![Event::Inbox { from: Addr::Agent(id), content: content.clone() }]));
+                            work.push_back((x, vec![Event::Inbox { from: Addr::Agent(id), content: content.clone(), reply: true }]));
                         }
                         Addr::Agent(x) => tracing::warn!(from = %id, to = %x, "report to unknown agent dropped"),
                         other => {
@@ -306,7 +306,7 @@ impl Hub {
             Op::Send { to, content } => {
                 match &to {
                     Addr::Agent(id) if st.agents.contains_key(id) => {
-                        self.commit(st, *id, vec![Event::Inbox { from: caller.clone(), content }]).await?
+                        self.commit(st, *id, vec![Event::Inbox { from: caller.clone(), content, reply: false }]).await?
                     }
                     Addr::Agent(id) => return bad(format!("no agent {id}")),
                     other => self.put_mail(other, &Mail { from: caller.clone(), content, status: None }).await?,
@@ -459,7 +459,7 @@ impl Hub {
         if let Some(p) = parent {
             self.commit(st, p, vec![Event::ChildSpawned { id, reserved }]).await?;
         }
-        self.commit(st, id, vec![Event::Inbox { from: caller.clone(), content: prompt }]).await?;
+        self.commit(st, id, vec![Event::Inbox { from: caller.clone(), content: prompt, reply: false }]).await?;
         self.place(st, id).await?;
         Ok(json!({"id": id, "type": info.id()}))
     }

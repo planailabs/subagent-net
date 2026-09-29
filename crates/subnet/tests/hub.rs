@@ -87,7 +87,7 @@ async fn spawned_agent_waits_for_a_spawner_then_is_assigned() {
     let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let (agent, epoch, events) = expect_assign(&mut sp).await;
     assert_eq!((agent, epoch), (id, 1));
-    assert_eq!(events, vec![Event::Inbox { from: Addr::User, content: "go".into() }]);
+    assert_eq!(events, vec![Event::Inbox { from: Addr::User, content: "go".into(), reply: false }]);
 }
 
 #[tokio::test]
@@ -140,7 +140,7 @@ async fn spawner_may_only_propose_its_own_events() {
     let mut sp = spawner(&hub, "s", vec![worker()], 4).await;
     let id = spawn(&hub, &Addr::User, "worker").await.unwrap();
     let (_, epoch, _) = expect_assign(&mut sp).await;
-    let forged = Event::Inbox { from: Addr::User, content: "forged".into() };
+    let forged = Event::Inbox { from: Addr::User, content: "forged".into(), reply: false };
     assert!(hub.handle(sp.conn, ToHub::Propose { agent: id, epoch, events: vec![forged] }).await.is_err());
     assert_eq!(transcript(&hub, id).await["seq"], 1);
 }
@@ -188,7 +188,7 @@ async fn send_to_agent_commits_inbox() {
     expect_assign(&mut sp).await;
     let c = Addr::Client("x".into());
     hub.op(&c, Op::Send { to: Addr::Agent(id), content: "yo".into() }).await.unwrap();
-    assert_eq!(expect_commit(&mut sp).await.2, Event::Inbox { from: c, content: "yo".into() });
+    assert_eq!(expect_commit(&mut sp).await.2, Event::Inbox { from: c, content: "yo".into(), reply: false });
     let missing = Addr::Agent(uuid::Uuid::new_v4());
     assert!(hub.op(&Addr::User, Op::Send { to: missing, content: "?".into() }).await.is_err());
 }

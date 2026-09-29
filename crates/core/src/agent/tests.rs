@@ -21,7 +21,7 @@ impl H {
         self.a.apply(&e)
     }
     fn user(&mut self, s: &str) -> Vec<Effect> {
-        self.ev(Event::Inbox { from: Addr::User, content: s.into() })
+        self.ev(Event::Inbox { from: Addr::User, content: s.into(), reply: false })
     }
     fn text(&mut self, s: &str) -> Vec<Effect> {
         self.ev(Event::LlmDelta { delta: Delta { content: Some(s.into()), ..Default::default() } })
@@ -138,18 +138,44 @@ fn inbox_during_final_answer_starts_new_turn() {
 fn agent_messages_are_prefixed_and_replied_to() {
     let mut h = H::new(spec());
     let other = Addr::Agent(Uuid::from_u128(9));
-    h.ev(Event::Inbox { from: other.clone(), content: "ping".into() });
+    h.ev(Event::Inbox { from: other.clone(), content: "ping".into(), reply: false });
     assert!(h.contents()[0].1.starts_with(&format!("[message from {other}]")));
     h.text("pong");
     assert_eq!(h.done(), vec![report(vec![other], Status::Idle, "pong")]);
 }
 
 #[test]
+fn replies_wake_but_are_not_owed_an_answer() {
+    let b = Addr::Agent(Uuid::from_u128(9));
+    let mut h = H::new(spec());
+    h.user("ask b");
+    h.text("asked");
+    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "asked")]);
+    assert_eq!(h.ev(Event::Inbox { from: b.clone(), content: "answer".into(), reply: true }), vec![Effect::CallLlm]);
+    assert_eq!(h.contents().last().unwrap().1, format!("[reply from {b}]\nanswer"));
+    h.text("b says answer");
+    // Not back to b (no ping-pong) but to whoever asked last.
+    assert_eq!(h.done(), vec![report(vec![Addr::User], Status::Idle, "b says answer")]);
+}
+
+#[test]
+fn child_report_turn_answers_previous_askers() {
+    let mut h = H::new(spec());
+    h.ev(Event::ChildSpawned { id: kid(1), reserved: 0 });
+    h.ev(Event::Inbox { from: Addr::Client("c".into()), content: "start".into(), reply: false });
+    h.text("started");
+    h.done();
+    h.ev(child_report(kid(1), "result"));
+    h.text("final");
+    assert_eq!(h.done(), vec![report(vec![Addr::Client("c".into())], Status::Idle, "final")]);
+}
+
+#[test]
 fn report_goes_to_parent_and_senders() {
     let parent = Uuid::from_u128(7);
     let mut h = H::new(Spec { parent: Some(parent), ..spec() });
-    h.ev(Event::Inbox { from: Addr::Agent(parent), content: "task".into() });
-    h.ev(Event::Inbox { from: Addr::Client("s".into()), content: "also".into() });
+    h.ev(Event::Inbox { from: Addr::Agent(parent), content: "task".into(), reply: false });
+    h.ev(Event::Inbox { from: Addr::Client("s".into()), content: "also".into(), reply: false });
     h.text("ok");
     // The client's message arrived mid-turn, so it starts the next turn.
     assert_eq!(h.done(), vec![report(vec![Addr::Agent(parent)], Status::Idle, "ok"), Effect::CallLlm]);
@@ -506,7 +532,7 @@ fn unlimited_budget_has_no_remaining() {
 #[test]
 fn events_roundtrip_through_json() {
     let evs = vec![
-        Event::Inbox { from: Addr::Client("c".into()), content: "x".into() },
+        Event::Inbox { from: Addr::Client("c".into()), content: "x".into(), reply: true },
         Event::LlmDelta { delta: Delta { content: Some("a".into()), ..Default::default() } },
         Event::LlmDone,
         Event::ToolResult { call_id: "c".into(), content: "r".into(), is_error: true },
