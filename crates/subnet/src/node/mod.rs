@@ -3,6 +3,7 @@
 //! machine; it applies committed events from the hub and performs the
 //! resulting effects (LLM calls, tool calls).
 
+pub mod external;
 pub mod mcp;
 pub mod ws;
 
@@ -30,17 +31,28 @@ use mcp::McpHost;
 /// How often streamed deltas are flushed to the hub.
 pub const FLUSH_EVERY: Duration = Duration::from_millis(250);
 
+/// What produces an agent's assistant messages.
+pub enum Brain {
+    Llm(Client),
+    External(Arc<external::External>),
+}
+
 /// An agent type this node runs.
 pub struct AgentRt {
     pub id: String,
     pub system: String,
-    pub llm: Client,
+    pub brain: Brain,
 }
 
 impl AgentRt {
     fn new(a: &NodeAgent) -> Result<Self, String> {
         if a.def.executor.is_external() {
-            return Err("external executors are not supported by this node yet".into());
+            let ext = external::External::new(a)?;
+            return Ok(Self {
+                id: a.id.clone(),
+                system: a.def.system_prompt.clone(),
+                brain: Brain::External(Arc::new(ext)),
+            });
         }
         let key = match &a.def.credential.env {
             Some(var) => Some(std::env::var(var).map_err(|e| format!("credential env {var}: {e}"))?),
@@ -53,7 +65,24 @@ impl AgentRt {
             prefill: a.def.prefill,
             params: a.def.params.clone(),
         };
-        Ok(Self { id: a.id.clone(), system: a.def.system_prompt.clone(), llm: Client::new(cfg, key) })
+        Ok(Self { id: a.id.clone(), system: a.def.system_prompt.clone(), brain: Brain::Llm(Client::new(cfg, key)) })
+    }
+
+    /// Streams the next assistant message.
+    async fn think(
+        &self,
+        agent: AgentId,
+        msgs: &[Message],
+        tools: &[subnet_core::chat::ToolDef],
+    ) -> Result<futures::stream::BoxStream<'static, Result<Delta, String>>, String> {
+        match &self.brain {
+            Brain::Llm(c) => {
+                let s = c.stream(msgs, tools).await.map_err(|e| e.to_string())?;
+                Ok(Box::pin(s.map(|r| r.map_err(|e| e.to_string()))))
+            }
+            // The external process gets the system prompt separately.
+            Brain::External(x) => x.think(agent, &self.system, &msgs[1..], tools).await,
+        }
     }
 }
 
@@ -351,7 +380,7 @@ impl Runner {
                     let mut msgs = vec![Message::system(self.rt.system.clone())];
                     msgs.extend(self.a.llm_messages());
                     let tools = self.a.spec.tools.clone();
-                    tokio::spawn(llm_call(self.rt.clone(), msgs, tools, self.proposer(), self.inflight.clone()));
+                    tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, self.proposer(), self.inflight.clone()));
                 }
                 Effect::CallTool { call, retry } => {
                     self.inflight = self.life.child_token();
@@ -413,18 +442,19 @@ fn take_delta(buf: &mut Delta) -> Option<Event> {
 
 async fn llm_call(
     rt: Arc<AgentRt>,
+    agent: AgentId,
     msgs: Vec<Message>,
     tools: Vec<subnet_core::chat::ToolDef>,
     p: Proposer,
     abort: CancellationToken,
 ) {
     let stream = tokio::select! {
-        s = rt.llm.stream(&msgs, &tools) => s,
+        s = rt.think(agent, &msgs, &tools) => s,
         _ = abort.cancelled() => return p.propose(vec![Event::LlmAborted]),
     };
     let mut s = match stream {
         Ok(s) => s,
-        Err(e) => return p.propose(vec![Event::LlmFailed { error: e.to_string() }]),
+        Err(error) => return p.propose(vec![Event::LlmFailed { error }]),
     };
     let mut buf = Delta::default();
     let mut flush = tokio::time::interval(FLUSH_EVERY);
@@ -439,9 +469,9 @@ async fn llm_call(
             }
             d = s.next() => match d {
                 Some(Ok(d)) => merge(&mut buf, d),
-                Some(Err(e)) => {
+                Some(Err(error)) => {
                     let mut evs: Vec<_> = take_delta(&mut buf).into_iter().collect();
-                    evs.push(Event::LlmFailed { error: e.to_string() });
+                    evs.push(Event::LlmFailed { error });
                     return p.propose(evs);
                 }
                 None => {

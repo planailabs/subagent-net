@@ -92,3 +92,23 @@ pub async fn quiet(rx: &mut UnboundedReceiver<ToNode>) {
 pub fn id_of(v: &Value) -> uuid::Uuid {
     v["id"].as_str().unwrap().parse().unwrap()
 }
+
+/// Path of one of this crate's examples, building it if a narrower `cargo
+/// test` invocation didn't. (Shelling out to cargo is the point here.)
+pub fn example(name: &str) -> String {
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_subnet"));
+    let p = bin.parent().unwrap().join("examples").join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    if !p.exists() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        if !p.exists() {
+            let ok = Command::new(env!("CARGO"))
+                .args(["build", "-q", "-p", "subnet", "--example", name])
+                .status()
+                .expect("running cargo")
+                .success();
+            assert!(ok, "building example {name} failed");
+        }
+    }
+    p.to_string_lossy().into_owned()
+}

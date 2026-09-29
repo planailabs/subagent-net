@@ -267,12 +267,8 @@ async fn crash_mid_call_does_not_rerun_other_tools() {
     assert_eq!(e.stats.slow_started.load(Ordering::SeqCst), 1);
 }
 
-/// Path of the `mcp_echo` example, which `cargo test` builds alongside.
 fn echo_server() -> String {
-    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_subnet"));
-    let p = bin.parent().unwrap().join("examples").join(format!("mcp_echo{}", std::env::consts::EXE_SUFFIX));
-    assert!(p.exists(), "build the example first: cargo build --example mcp_echo ({})", p.display());
-    p.to_string_lossy().into_owned()
+    common::example("mcp_echo")
 }
 
 #[tokio::test]
