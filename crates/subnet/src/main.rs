@@ -74,6 +74,8 @@ enum Cmd {
         #[arg(long, requires = "id")]
         tree: bool,
     },
+    /// The agent park and an agent pane in the terminal.
+    Tui,
     /// Apply cluster files (HCL) to the hub.
     Apply {
         #[arg(required = true)]
@@ -195,7 +197,7 @@ async fn run_op(name: &str, sub: &ArgMatches, c: &Client) -> anyhow::Result<()> 
 async fn main() -> anyhow::Result<()> {
     let m = cli().get_matches();
     let (name, sub) = m.subcommand().expect("subcommand required");
-    let builtin = matches!(name, "hub" | "node" | "dev" | "tail" | "apply");
+    let builtin = matches!(name, "hub" | "node" | "dev" | "tail" | "apply" | "tui");
     // Servers log their work; client commands only problems.
     let default = if matches!(name, "hub" | "node" | "dev") { "info,rmcp=warn" } else { "warn" };
     tracing_subscriber::fmt()
@@ -238,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
             std::future::pending::<()>().await;
         }
         Cmd::Tail { id, tree } => tail(&cli.hub, cli.token.as_deref(), id, tree, show_event).await?,
+        Cmd::Tui => subnet::tui::run(Client::new(&cli.hub, cli.token.clone()), cli.hub.clone(), cli.token).await?,
         Cmd::Apply { files, dry_run } => {
             let files = read_files(&files)?;
             let c = Client::new(&cli.hub, cli.token);

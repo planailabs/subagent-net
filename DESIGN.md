@@ -146,13 +146,13 @@ route "log-everything" {
 
 - Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets and `nodes`. An agent is only ever resumed on a node offering the same hash: changing an agent type in the cluster leaves existing agents of the old version pending (roll back, or fork them).
 - A `resident` is created when its type is available, answers to whoever applied the cluster, and is cancelled when removed from the file. Changing a resident's mixture doesn't replace the running agent.
-- `$VAR` in values and `env = "..."` in credentials are resolved on the node. A missing variable makes that type unavailable on that node, reported back to the hub and shown in `cluster status`.
+- `$VAR` in values and `env = "..."` in credentials are resolved on the node. A missing variable makes that type unavailable on that node, reported back to the hub and shown by `subnet list-nodes`.
 - Durations are `250ms`, `10s`, `5m`, `2h`, `1d`. Rates are `N/duration`.
 - HCL allows one attribute per line inside a block, so multi-field values on one line use object syntax: `budget = { max_tokens = 1000, max_depth = 2 }`.
 - Several files can be applied together; each `kind "name"` may be declared once across them. Unknown blocks or fields are errors.
 - The example above is parsed and validated by the `cluster` crate's tests, so it stays correct.
 - Validation happens at apply time. Unknown references (a route to a missing mixture, a sense on an undeclared node) reject the whole version.
-- `subnet apply --dry-run` prints the diff against the current version. `subnet cluster history` and `subnet cluster rollback <version>` manage versions.
+- `subnet apply --dry-run` prints the diff against the current version. `subnet cluster-history` and `subnet rollback-cluster <version>` manage versions.
 
 ## Agents
 
@@ -329,7 +329,7 @@ The web UI and the TUI use the same API.
   - `operator`: spawn, send, pause, resume, cancel, approve, fork
   - `viewer`: read only
   - nodes: the node protocol only
-- `subnet token issue <kind> <name>` (admin) creates a random token. The hub stores only its SHA-256.
+- `subnet issue-token <kind> <name>` (admin) creates a random token. The hub stores only its SHA-256.
 - The hub's `SUBNET_ADMIN_TOKEN` env var is a built-in `user:root` admin for bootstrap. Without it the hub runs in **open mode** (development): every caller without a known token is `user:root`.
 - A principal removed from the cluster file loses access immediately; its tokens stop resolving.
 - API and MCP use `Authorization: Bearer <token>`. The web UI exchanges a token for an HTTP-only session cookie (`POST /v1/login`).
@@ -363,9 +363,11 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 
 `subnet tui` (ratatui), built on the same API and event stream:
 
-- a park view (tree plots as text blocks)
-- an agent pane (transcript and partial)
-- key bindings for pause (`s`/`q`/`h`), resume (`r`), cancel (`x`), approve (`a`/`d`) and message (`m`)
+- a park view: plots as headed groups, agents as tree rows with glyph, type, token bar and last line
+- an agent pane: transcript, streaming partial and pending approval, scrolled to the end
+- keys: `j`/`k` select, `s`/`q`/`h` pause safe/quick/hard, `r` resume, `x` cancel, `a`/`d` approve/deny, `m` message, `f` fork, `esc` quit
+
+State and key handling (`tui::App`) are pure and tested; rendering is tested against ratatui's `TestBackend`.
 
 ## Crates
 
@@ -386,17 +388,13 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 
 ## Status
 
-- **Implemented (v1):** core state machine, `llm` client, hub sequencer/placement/fencing/dormancy, internal executor, kill -9 failover tests.
-- **Implemented (v2):**
-  - `ops` registry with REST/RPC + OpenAPI + docs, MCP and CLI front-ends and an HA-aware client; the hub's operations run on it.
-  - `cluster` crate: HCL parsing, validation, identities, node views, diff.
-  - Cluster versions (`apply_cluster`, `get_cluster`, `cluster_history`, `rollback_cluster`; `subnet apply` reads files).
-  - Principals, roles and tokens (`issue_token`, `revoke_tokens`, `whoami`); `SUBNET_ADMIN_TOKEN` bootstrap; open mode without it.
-  - Addresses `user:<name>`, `client:<name>`, `resident:<name>`, `mailbox:<name>`.
-  - Nodes: pull-based configuration (`Configure`/`Ready`), credential resolution on the node with errors reported in `list_nodes`, `subnet node`, `subnet dev <files>`.
-  - Agent types, mixtures and MCP types from the cluster; tools fixed in the spec at spawn; MCP calls local or routed through the hub with mixture ACLs and remote cancellation.
-  - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
-- **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub; the switchboard (routes, flow control, all delivery kinds, deliveries log, `list_routes`/`list_deliveries`/`list_senses`/`peek_mail`/`inject_event`).
-- **Implemented (v2), continued:** stream relay across nodes; blob store; active-standby HA with term fencing.
-- **Implemented (v2), continued:** web UI (park, agent panel, senses, switchboard, cluster, inbox; cookie sign-in).
-- **In progress (v2):** TUI. Each item moves to "implemented" in the commit that finishes it.
+Everything in this document is implemented, except what "Not in scope yet" lists:
+
+- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools), snapshots, forks (with tree), internal and external executors.
+- **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing.
+- **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
+- **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.
+- **Switchboard:** CEL, flow control, all delivery kinds, deliveries log.
+- **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
+
+When something in this document changes, the change and its status land in the same commit.
