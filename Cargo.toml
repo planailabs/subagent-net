@@ -10,7 +10,11 @@ license = "MIT"
 subnet-core = { path = "crates/core" }
 subnet-llm = { path = "crates/llm" }
 subnet-ops = { path = "crates/ops" }
+subnet-cluster = { path = "crates/cluster" }
 anyhow = "1"
+hcl-rs = "0.19"
+indexmap = { version = "2", features = ["serde"] }
+croner = "4"
 clap = { version = "4", features = ["derive", "env", "string"] }
 axum = { version = "0.8", features = ["ws"] }
 eventsource-stream = "0.2"
@@ -18,7 +22,7 @@ futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-schemars = { version = "1", features = ["uuid1"] }
+schemars = { version = "1", features = ["uuid1", "indexmap2"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

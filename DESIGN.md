@@ -40,6 +40,7 @@ A cluster is described by HCL files. `subnet apply cluster.hcl` sends the files 
 user "maciej"  { role = "admin" }
 client "claude" { role = "operator" }
 node "gpu-1"   { labels = { gpu = "a100" } }
+node "laptop"  { capacity = 4 }
 node "pi-hall" {}
 
 # --- agent types ------------------------------------------------------------
@@ -58,7 +59,7 @@ agent "deepseek-flash" {
   executor { internal = true }               # or: command = ["python3", "my_agent.py"]
   nodes    = ["gpu-1", "laptop"]
   spawns   = ["deepseek-flash"]
-  budget { max_tokens = 200000  max_depth = 2  max_children = 4 }
+  budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
 }
 
@@ -71,7 +72,7 @@ mcp "memory" {
 }
 mcp "web" {
   url = "https://mcp.example.com/mcp"                     # streamable HTTP
-  credential { header = "Authorization"  env = "WEB_MCP_TOKEN"  prefix = "Bearer " }
+  credential = { header = "Authorization", env = "WEB_MCP_TOKEN", prefix = "Bearer " }
   nodes = ["laptop"]
 }
 
@@ -109,11 +110,11 @@ sense "hall-speech" {
 }
 sense "hourly" {
   node   = "gpu-1"
-  source { timer { cron = "0 * * * *" } }
+  source { timer = { cron = "0 * * * *" } }
 }
 sense "github" {
   node   = "laptop"
-  source { webhook { path = "/github" } }                  # served by the node
+  source { webhook = { path = "/github" } }                # served by the node
 }
 
 # --- switchboard ---------------------------------------------------------------
@@ -136,14 +137,19 @@ route "speech" {
 }
 route "log-everything" {
   from  = "door"
-  batch { window = "1m"  max = 500 }
-  deliver { mcp { server = "memory"  tool = "store"  args = "{'events': batch}" } }
+  batch = { window = "1m", max = 500 }
+  deliver {
+    mcp = { server = "memory", tool = "store", args = "{'events': batch}" }
+  }
 }
 ```
 
 - Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets. An agent is only ever resumed on a node offering the same hash.
 - `$VAR` in values and `env = "..."` in credentials are resolved on the node. A missing variable makes that type unavailable on that node, reported back to the hub and shown in `cluster status`.
-- Durations are `10s`, `5m`, `2h`, `1d`. Rates are `N/duration`.
+- Durations are `250ms`, `10s`, `5m`, `2h`, `1d`. Rates are `N/duration`.
+- HCL allows one attribute per line inside a block, so multi-field values on one line use object syntax: `budget = { max_tokens = 1000, max_depth = 2 }`.
+- Several files can be applied together; each `kind "name"` may be declared once across them. Unknown blocks or fields are errors.
+- The example above is parsed and validated by the `cluster` crate's tests, so it stays correct.
 - Validation happens at apply time. Unknown references (a route to a missing mixture, a sense on an undeclared node) reject the whole version.
 - `subnet apply --dry-run` prints the diff against the current version. `subnet cluster history` and `subnet cluster rollback <version>` manage versions.
 
