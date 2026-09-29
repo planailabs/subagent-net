@@ -3,6 +3,7 @@
 //! over `Hub::connect`, `Hub::handle` and `Hub::op`.
 
 pub mod db;
+pub mod http;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
