@@ -19,7 +19,7 @@ A distributed network of LLM agents. Every agent is a resumable state machine. A
            ▼                          ▼
    ┌───────────────┐  ┌───────────────┐
    │ spawner A     │  │ spawner B     │   hold API keys + MCP servers,
-   │ types: coder, │  │ types: coder, │   run agents: step() + effects
+   │ types: coder, │  │ types: coder, │   run agents: apply() + effects
    │   reviewer    │  │   researcher  │
    └───────────────┘  └───────────────┘
 ```
@@ -50,29 +50,36 @@ budget  = { max_tokens = 2_000_000, max_depth = 3, max_children = 8 }
 The hub is the **sequencer**. Spawners *propose* events, and the hub commits them in order and echoes them back. A spawner folds only committed events. Every write carries the owner's **lease epoch**, and the hub rejects writes from an old epoch. This fencing stops a stale spawner from writing after its agent has moved to another one.
 
 ```rust
-// core: no I/O, deterministic
-fn step(state: &Agent, ev: &Event) -> (Agent, Vec<Effect>);
-
-enum Event {
-    Created { ty, parent, spec },
-    Inbox { from: Addr, content },                 // user or agent message
-    LlmDelta { text, tool_call_frags },            // batched stream chunks (kept for partials)
-    LlmDone { message },                           // complete assistant message
-    LlmAborted,                                    // hard pause/crash: deltas so far are the partial
-    ToolStarted { call_id }, ToolResult { call_id, result }, ToolAborted { call_id },
-    ChildSpawned { id }, ChildDone { id, summary },
-    PauseRequested { mode, scope }, Resumed,
-    Cancelled, Failed { error },
+// core (crates/core/src/agent.rs): no I/O, deterministic
+impl Agent {
+    fn apply(&mut self, ev: &Event) -> Vec<Effect>;
+    fn replay(id, spec, events) -> Agent;          // apply without effects
 }
 
-enum Effect { CallLlm, CallTool { call_id }, AbortInflight, Spawn { ty, prompt },
-              Send { to, content }, ReportDone { summary } }
+enum Event {
+    Inbox { from: Addr, content, reply },          // `reply`: an automatic turn-end answer
+    LlmDelta { delta }, LlmDone, LlmAborted, LlmFailed { error },
+    ToolResult { call_id, content, is_error }, ToolAborted { call_id },
+    Approval { call_id, approved },
+    ChildSpawned { id, reserved }, ChildReport { id, status, content },
+    PauseRequested { mode }, Resumed, Cancelled,
+    Recovered,                                     // logged by the hub on every placement
+}
 
-enum Phase { Idle, Thinking, RunningTools { pending }, AwaitingChildren { ids },
-             AwaitingApproval { call_id }, Paused { mode, resume_to }, Done, Failed }
+enum Effect { CallLlm, CallTool { call, retry }, RequestApproval { call }, AbortInflight,
+              Report { to, status, content } }
+
+enum Phase { Idle, Thinking { running }, Tools { queue, wait }, Failed { error }, Cancelled }
+enum ToolWait { Ready { retry }, Running, Approval, Approved, Children { ids } }
 ```
 
-**Resuming** means folding the log and continuing from the phase you end up in. The same code path handles a restart, a spawner crash (the hub reassigns the agent) and a user-initiated resume.
+- The agent spec (type, parent, budget, approval list) is stored with the agent, not in the log.
+- Tool calls of one assistant message run **one at a time**, so `quick` pause has a meaningful boundary between them.
+- `wait_for` is handled by the state machine itself (it waits for `ChildReport` events). Every other tool, built-in or MCP, is executed by the spawner.
+
+**Resuming** means folding the log and continuing from the phase you end up in. Whenever the hub places an agent on a spawner, it first commits `Recovered`: whatever was in flight is gone, and applying `Recovered` returns the effects that restart it. Because recovery is itself logged, the hub's replica and the runner always fold identical state. The same path handles a spawner crash, a hub restart and waking a dormant agent.
+
+**Reports are routed by the hub.** The hub folds every log too, so it performs `Effect::Report` itself, from its own replica. Each report is delivered exactly once, even if the spawner is revoked at that moment (e.g. on cancel).
 
 **Forking** means copying a prefix of the log under a new agent id.
 
@@ -97,51 +104,66 @@ A pause request is a logged event, so it survives crashes and migration to anoth
 
 ## Messaging and the network
 
-- **Addresses** are `user`, `client:<mcp-session>` or `agent:<id>`. A message is an `Inbox` event committed by the hub to the target's log, which makes delivery durable and ordered.
+- **Addresses** are `user`, `client:<name>` or `agent:<id>`. A message is an `Inbox` event committed by the hub to the target's log, which makes delivery durable and ordered.
 - **Delivery by phase:**
   - `Idle`: the agent wakes up.
   - `Paused`: the message is queued.
-  - Any other phase: the message is injected at the next step boundary.
-- **Tools every agent gets** (served the same way as MCP tools):
+  - Any other phase: the message is injected at the next LLM call.
+- **Who gets the answer:** when a turn ends, its final message goes to everyone whose message started or joined that turn (the "askers"), plus the parent as a `ChildReport`.
+  - An answer delivered to another agent is marked `reply`. It wakes that agent, but its sender is not owed an answer back, so two agents can't ping-pong forever.
+  - A turn woken only by replies or child reports answers the previous askers. So the result of a non-blocking spawn still reaches the user who asked for it.
+  - A failed turn keeps its askers, so the answer after a resume still arrives.
+- **Tools every agent gets** (next to its MCP tools):
 
   | tool | behaviour |
   |---|---|
   | `spawn_agent(type, prompt)` | non-blocking; only types listed in the parent's `spawns` |
-  | `send_message(to, content)` | |
-  | `wait_for(ids)` | the agent enters `AwaitingChildren` |
-  | `list_agents` | |
-  | `pause(id, mode)` | |
-  | `cancel(id)` | |
+  | `send_message(to, content)` | to an agent, `user` or a client |
+  | `wait_for(ids)` | blocks until each child has reported; returns the reports |
+  | `list_agents`, `list_types` | |
+  | `pause_agent(id, mode, tree)`, `resume_agent(id, tree)`, `cancel_agent(id)` | descendants only |
 
-  A child's final answer arrives in its parent's inbox as `ChildDone`.
-- **Budgets** (tokens, depth, number of children) are taken from the parent's remaining budget, so a subtree can never outspend its root. Cancelling or hard-pausing an agent with `tree` scope cascades to all its descendants.
-- **Placement:** when an agent is spawned or woken, the hub picks a live spawner that offers the type and has free capacity. Spawners send heartbeats. When a lease expires, the hub bumps the epoch and reassigns the agent.
+- **Budgets:**
+  - A child's token budget is carved out of the parent's (`ChildSpawned.reserved`), so a subtree can never outspend its root. A child whose type has no limit gets half of what the parent has left.
+  - Depth shrinks by one per level; `max_children` is per agent.
+  - Cancel always cascades to the subtree; pause and resume do when `tree` is set.
+- **Placement:**
+  - An agent needs a spawner only while it has work: an LLM call or tool to run, or queued input.
+  - Idle, paused, failed and waiting agents (on children or approval) are **dormant**. They keep their slot until another agent needs it, and are placed again when an event gives them work. Thousands of dormant agents cost nothing.
+  - An agent goes to the least-loaded live spawner offering its exact type, evicting a dormant agent if all are full.
+  - The hub pings spawners. A dead connection moves its agents elsewhere, with the epoch bumped so late writes are fenced.
 
 ## User surfaces
 
-- **The hub is an MCP server** (`rmcp`, streamable HTTP). It offers `list_types`, `spawn`, `send`, `pause`, `resume`, `fork`, `cancel`, `tree` and `transcript`. An external agent such as Claude Code can use it to drive the network the way a user would.
-  - Each MCP session gets its own address, `client:<session>`, so agents can reply to that client specifically.
-  - Replies are picked up with a blocking `wait_inbox(timeout)` tool. Many MCP clients ignore server notifications, so the design doesn't rely on them.
-- **WS subscription** streams live events (tokens, phase changes, tool calls) for one agent or a whole tree. The CLI `tail` command uses it, and a TUI can be built on it later.
+- **The hub is an MCP server** at `/mcp` (streamable HTTP). It offers `list_types`, `list_agents`, `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `cancel`, `approve`, `fork` and `transcript`. Claude Code or any other agent can drive the network the way a user would.
+  - The caller's address comes from the `x-subnet-as` header: `user`, or a client name giving `client:<name>`. Without the header it is `client:<mcp-session-id>`.
+  - Answers are picked up with the blocking `wait_inbox(timeout_ms)` tool. Many MCP clients ignore server notifications, so the design doesn't rely on them.
+- **`/events`** (WebSocket) streams committed events live, for all agents or `?agent=<id>`. The CLI's `tail` uses it.
+- **Auth:** with `SUBNET_TOKEN` set, spawners present it in their hello, and users/clients as `Authorization: Bearer` (or `?token=` on `/events`).
+- **CLI:** `subnet types | agents | spawn [--wait] | send [--wait] | inbox | pause | resume | cancel | approve | fork | transcript | tail`. It talks to the hub through the same MCP endpoint.
 
 ## Crates
 
 | crate | purpose |
 |---|---|
-| `core` | events, phases, `step()`, wire protocol types. No I/O. |
+| `core` | chat types, events, phases, `Agent::apply`, wire protocol, built-in tools. No I/O. |
 | `llm` | OpenAI-compatible chat client: SSE streaming, tool calls, partial capture, abort, prefill. Thin serde types that keep unknown fields. |
-| `subnet` | binary: `hub` (axum, sqlx/Postgres), `spawner` (tokio-tungstenite, rmcp client, `CancellationToken`), `cli` |
+| `subnet` | library and binary: `hub` (axum, sqlx/Postgres, rmcp server), `spawner` (tokio-tungstenite, rmcp client, `CancellationToken`), `client` + CLI. `subnet dev` runs a hub and a spawner in one process. |
 
 ## Not in scope yet
 
 - **Multiple hubs.** There is one hub; Postgres provides durability. Add sharding by agent id if a single hub becomes the bottleneck.
 - **Snapshots.** Agents are resumed by folding the full log. Add a snapshot table when replay gets slow.
 - **Types that span spawners** (e.g. the model on one machine, MCP tools on another). Not needed until someone asks.
+- **Parallel tool calls.** Tools of one message run sequentially. Run them concurrently if latency matters; `quick` pause would then wait for all of them.
+- **Tree-filtered event stream.** `/events` filters by one agent or none.
+- **TUI.** `tail` and the MCP tools cover it for now.
+- **Stale children in forks.** A fork keeps its source's `ChildSpawned` entries, but the children still report to the original agent.
 
-## Milestones
+## Milestones (all done)
 
 1. **`llm`**: streaming, tool-call round trip, partial capture on abort, prefill continuation. Tested against a mock SSE server.
-2. **`core`**: `step()` and fold. Tests for every pause mode × every phase, plus fold determinism.
+2. **`core`**: `Agent::apply` and fold. Tests for every pause mode × every phase, plus fold determinism.
 3. **hub**: migrations, sequencer with epoch fencing, spawner register/heartbeat/lease, WS protocol.
 4. **spawner**: type config, placement, effect executor with cancellation, delta flushing.
 5. **MCP tools**: rmcp clients per type, cancellation, idempotency flag, approval gate.
