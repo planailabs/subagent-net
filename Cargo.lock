@@ -2388,6 +2388,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "subnet-ops"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
