@@ -38,12 +38,64 @@ pub fn router(hub: Arc<Hub>) -> Router {
     let guard = middleware::from_fn_with_state(hub.clone(), leader_guard);
     Router::new()
         .route("/node", get(node_ws))
+        .route("/v1/login", axum::routing::post(login))
+        .route("/v1/logout", axum::routing::post(logout))
         .route("/streams", get(super::relay::streams_ws))
         .merge(events)
         .with_state(hub)
         .merge(subnet_ops::http::router(reg.clone(), auth_fn.clone(), "subagent-net"))
         .nest_service("/mcp", subnet_ops::mcp::service(reg, auth_fn, Some(instructions)))
+        .fallback(get(web_ui))
         .layer(guard)
+}
+
+#[derive(Deserialize)]
+struct Login {
+    token: String,
+}
+
+/// Checks a token and keeps it in an HttpOnly session cookie (web UI).
+async fn login(State(hub): State<Arc<Hub>>, axum::Json(l): axum::Json<Login>) -> Response {
+    match hub.authenticate(Some(&l.token)) {
+        Ok(p) => {
+            let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Strict", crate::api::SESSION_COOKIE, l.token);
+            let who = serde_json::json!({"addr": p.addr, "role": p.role});
+            ([(axum::http::header::SET_COOKIE, cookie)], axum::Json(who)).into_response()
+        }
+        Err(e) => subnet_ops::OpError::from(e).into_response(),
+    }
+}
+
+async fn logout() -> Response {
+    let cookie = format!("{}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0", crate::api::SESSION_COOKIE);
+    ([(axum::http::header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
+}
+
+#[cfg(feature = "webui")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../webui/dist"]
+struct WebUi;
+
+/// The web UI; unknown paths get index.html (the app routes by hash).
+#[cfg(feature = "webui")]
+async fn web_ui(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let (path, file) = match WebUi::get(path) {
+        Some(f) if !path.is_empty() => (path, f),
+        _ => match WebUi::get("index.html") {
+            Some(f) => ("index.html", f),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
+    };
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let cache = if path == "index.html" { "no-cache" } else { "public, max-age=31536000, immutable" };
+    ([(axum::http::header::CONTENT_TYPE, mime.as_ref().to_string()), (axum::http::header::CACHE_CONTROL, cache.into())], file.data)
+        .into_response()
+}
+
+#[cfg(not(feature = "webui"))]
+async fn web_ui() -> Response {
+    (StatusCode::NOT_FOUND, "this hub was built without the web UI").into_response()
 }
 
 /// Standbys serve nothing: they answer 503 and name the leader.
@@ -68,13 +120,8 @@ struct TokenQuery {
 /// `Authorization: Bearer <token>`, or `?token=` for WebSocket clients that
 /// can't set headers.
 async fn auth(State(hub): State<Arc<Hub>>, Query(q): Query<TokenQuery>, req: Request, next: Next) -> Response {
-    let bearer = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    if hub.authenticate(bearer.or(q.token).as_deref()).is_ok() {
+    let token = crate::api::token_from(req.headers()).or(q.token);
+    if hub.authenticate(token.as_deref()).is_ok() {
         next.run(req).await
     } else {
         StatusCode::UNAUTHORIZED.into_response()

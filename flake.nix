@@ -19,7 +19,7 @@
         };
       in {
         devShells.default = pkgs.mkShell {
-          packages = [ rust pkgs.postgresql pkgs.sqlx-cli ];
+          packages = [ rust pkgs.postgresql pkgs.sqlx-cli pkgs.nodejs_22 ];
         };
       });
 }

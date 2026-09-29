@@ -1162,9 +1162,18 @@ fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
         paused: r.a.is_paused(),
         node: r.node.and_then(|c| st.nodes.get(&c)).map(|s| s.name.clone()),
         usage: r.a.usage,
+        budget: r.a.spec.budget.clone(),
         reserved: r.a.reserved,
         seq: r.seq,
         awaiting_approval,
+        last: r
+            .a
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == subnet_core::chat::Role::Assistant && m.content.as_deref().is_some_and(|c| !c.is_empty()))
+            .and_then(|m| m.content.as_deref())
+            .map(|c| c.chars().take(200).collect()),
     }
 }
 

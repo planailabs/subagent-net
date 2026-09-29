@@ -264,3 +264,29 @@ async fn blobs_roundtrip_over_the_api() {
     let e = c.call_raw("blob_get", json!({"hash": "../../etc/passwd"})).await.unwrap_err();
     assert_eq!(e.kind, subnet_ops::ErrorKind::BadRequest);
 }
+
+#[tokio::test]
+async fn web_ui_is_served_and_cookie_login_works() {
+    let (base, _llm, hub) = setup_hub(Some("adm")).await;
+    let page = reqwest::get(format!("{base}/")).await.unwrap();
+    assert_eq!(page.status(), 200);
+    assert!(page.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+    let html = page.text().await.unwrap();
+    assert!(html.contains("id=app") || html.contains("id=\"app\"") || html.contains("isn't built"), "{html}");
+    // Client-side routes fall back to the app.
+    assert_eq!(reqwest::get(format!("{base}/some/deep/link")).await.unwrap().status(), 200);
+
+    let c = reqwest::Client::builder().cookie_store(true).build().unwrap();
+    let r = c.post(format!("{base}/v1/login")).json(&json!({"token": "nope"})).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+    let watcher = token(&hub, "user", "watcher").await;
+    let r = c.post(format!("{base}/v1/login")).json(&json!({"token": watcher})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.headers()["set-cookie"].to_str().unwrap().contains("HttpOnly"));
+    // The cookie now authenticates RPC calls and the event stream.
+    let who: Value = c.post(format!("{base}/v1/ops/whoami")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(who["addr"], "user:watcher");
+    assert_eq!(c.get(format!("{base}/v1/events")).send().await.unwrap().status(), 200);
+    c.post(format!("{base}/v1/logout")).send().await.unwrap();
+    assert_eq!(c.post(format!("{base}/v1/ops/whoami")).send().await.unwrap().status(), 401);
+}

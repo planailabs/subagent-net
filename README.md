@@ -11,7 +11,9 @@ nix develop                      # rust, postgres, sqlx-cli
 initdb -D .pg && pg_ctl -D .pg -l .pg/log start
 createdb subnet
 
-# hub + every node of the cluster file in one process
+(cd webui && npm install && npm run build)   # the web UI, embedded into the hub
+
+# hub + every node of the cluster file in one process; UI at http://127.0.0.1:7700
 DATABASE_URL=postgres:///subnet OPENAI_API_KEY=… subnet dev examples/dev.hcl
 
 subnet list-types
@@ -45,6 +47,8 @@ The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`
 ```sh
 nix develop -c cargo test
 ```
+
+Web UI logic: `cd webui && npm test`.
 
 The tests start a throwaway Postgres under `target/tmp/testpg`, or use `$DATABASE_URL`. They cover:
 

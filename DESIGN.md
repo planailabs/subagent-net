@@ -348,11 +348,11 @@ The web UI and the TUI use the same API.
 
 ## Web UI
 
-Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo feature `webui`, on by default) and served at `/`.
+Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo feature `webui`, on by default) and served at `/` (unknown paths get the app). `npm run build` writes `webui/dist`; without it the build embeds a page saying so. Sign-in: `POST /v1/login {token}` sets an HttpOnly, SameSite=Strict session cookie that the API, MCP and event stream accept (`EventSource` can't send headers); `POST /v1/logout` clears it. Pure logic (park layout, notice folding) lives in `webui/src/lib` and is tested with `node --test`.
 
 - **Design:** monochrome and dark. Black background, white/grey text, no colour. State is shown by glyph and pattern: `●` thinking, `▣` tools, `○` idle, `‖` paused, `✕` failed, `·` cancelled. Monospace type throughout.
 - **Views:**
-  - **Park:** agents laid out as *plots*. Each root agent and its descendants form a bordered block, and plots flow in a responsive grid. Tiles show glyph, type, a token bar and the last line of output, updating live from the event stream. Filters: type, node, phase, route.
+  - **Park:** agents laid out as *plots*. Each root agent and its descendants form a bordered block (a tree in spawn order), and plots flow in a responsive grid with live plots first. Tiles show glyph, type, a token bar and the last line of output (streaming, else the last answer), updating live from the event stream. A text filter matches type, id, phase, node and "paused". `#park/<id>` opens an agent.
   - **Agent panel:** live transcript with the streaming partial, tool calls and results, pending approval (approve/deny), pause (safe/quick/hard), resume, fork, cancel, and a message box.
   - **Senses:** live event feed per sense, and stream status (rate, subscribers).
   - **Switchboard:** routes with counters (matched, dropped, throttled, delivered), and the latest deliveries.
@@ -398,4 +398,5 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - Residents (created when their node is ready, cancelled when removed) and mailboxes (`mailbox_take`/`mailbox_peek`, mixture ACL).
 - **Implemented (v2), continued:** external executors (think protocol); parallel tool calls; snapshots; tree forks; event stream (SSE/WS, agent and tree filters); senses on nodes (all sources, stages, same-node streams) with sense events and status in the hub; the switchboard (routes, flow control, all delivery kinds, deliveries log, `list_routes`/`list_deliveries`/`list_senses`/`peek_mail`/`inject_event`).
 - **Implemented (v2), continued:** stream relay across nodes; blob store; active-standby HA with term fencing.
-- **In progress (v2):** web UI, TUI. Each item moves to "implemented" in the commit that finishes it.
+- **Implemented (v2), continued:** web UI (park, agent panel, senses, switchboard, cluster, inbox; cookie sign-in).
+- **In progress (v2):** TUI. Each item moves to "implemented" in the commit that finishes it.

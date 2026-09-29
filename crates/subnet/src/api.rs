@@ -31,12 +31,16 @@ pub struct AgentSummary {
     /// Node the agent currently runs on; none when dormant or pending.
     pub node: Option<String>,
     pub usage: Usage,
+    /// Its token/depth/children limits.
+    pub budget: subnet_core::agent::Budget,
     /// Tokens handed to children.
     pub reserved: u64,
     /// Number of committed events.
     pub seq: u64,
     /// The tool call waiting for approval, if any.
     pub awaiting_approval: Option<ToolCall>,
+    /// The start of its last answer (up to 200 characters).
+    pub last: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -519,14 +523,25 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r
 }
 
-/// Bearer token → principal (see `Hub::authenticate`).
+/// The caller's token: `Authorization: Bearer`, else the web UI's session cookie.
+pub fn token_from(h: &HeaderMap) -> Option<String> {
+    if let Some(b) = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")) {
+        return Some(b.to_string());
+    }
+    h.get_all("cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| c.trim().strip_prefix(&format!("{SESSION_COOKIE}=")).map(String::from))
+}
+
+pub const SESSION_COOKIE: &str = "subnet_token";
+
+/// Token → principal (see `Hub::authenticate`).
 pub fn auth(hub: Arc<Hub>) -> subnet_ops::http::Auth<Principal> {
     Arc::new(move |h: HeaderMap| {
         let hub = hub.clone();
-        Box::pin(async move {
-            let bearer = h.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
-            Ok(hub.authenticate(bearer)?)
-        })
+        Box::pin(async move { Ok(hub.authenticate(token_from(&h).as_deref())?) })
     })
 }
 
