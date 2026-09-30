@@ -36,7 +36,7 @@ A real deployment:
 
 ## Example: a virtual personality
 
-[personality-example/](personality-example/) runs Vesper, a resident agent with a body in a 3D room. People talk to her by chat or microphone, and she answers aloud, walks around, makes coffee and remembers people. It exercises senses (webhooks, an stt stage, a timer), routes, residents, MCP servers over stdio and HTTP, and blobs. `cargo run -p personality -- up`; see its [README](personality-example/README.md).
+[personality-example/](personality-example/) runs Vesper, a resident agent with a body in a 3D room. People talk to her by chat or microphone, and she answers aloud, walks around, makes coffee and remembers people. It exercises senses (webhooks, an stt stage, a timer), routes, residents, and MCP servers over stdio and HTTP. `cargo run -p personality -- up`; see its [README](personality-example/README.md).
 
 ## Driving it from another agent
 
