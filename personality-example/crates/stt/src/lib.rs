@@ -2,6 +2,8 @@
 //! in (JSON lines on stdin), `{from, text}` out. The audio is dropped, so
 //! it never reaches the blob store or Vesper.
 
+pub mod stage;
+
 use base64::Engine;
 use serde_json::Value;
 
@@ -92,6 +94,8 @@ pub mod whisper {
 
     impl Whisper {
         pub fn load(model: &std::path::Path) -> anyhow::Result<Self> {
+            // whisper.cpp prints its model details on stderr; send them nowhere.
+            whisper_rs::install_logging_hooks();
             let path = model.to_str().ok_or_else(|| anyhow::anyhow!("model path isn't UTF-8"))?;
             Ok(Whisper(WhisperContext::new_with_params(path, WhisperContextParameters::default())?))
         }

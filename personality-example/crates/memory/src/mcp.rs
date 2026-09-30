@@ -88,3 +88,29 @@ impl MemoryServer {
         json(rows.into_iter().map(|(title, about)| serde_json::json!({"title": title, "about": about})).collect::<Vec<_>>())
     }
 }
+
+/// Serves the memory in `db` on stdio. `SUBJECT_MEMORY_EMBEDDINGS=off`
+/// disables dense retrieval (BM25 only); the e5 model is cached in
+/// `models/` next to the database.
+pub async fn serve_stdio(db: &std::path::Path) -> anyhow::Result<()> {
+    use rmcp::{ServiceExt, transport::stdio};
+    let embed = match std::env::var("SUBJECT_MEMORY_EMBEDDINGS").as_deref() {
+        Ok("off") => None,
+        _ => embeddings(db)?,
+    };
+    let memory = Memory::open(db, embed)?;
+    MemoryServer(Arc::new(memory)).serve(stdio()).await?.waiting().await?;
+    Ok(())
+}
+
+#[cfg(feature = "embeddings")]
+fn embeddings(db: &std::path::Path) -> anyhow::Result<Option<crate::Embed>> {
+    let cache = db.parent().unwrap_or(std::path::Path::new(".")).join("models");
+    Ok(Some(crate::e5(&cache)?))
+}
+
+#[cfg(not(feature = "embeddings"))]
+fn embeddings(_: &std::path::Path) -> anyhow::Result<Option<crate::Embed>> {
+    tracing::warn!("built without the embeddings feature: BM25 only");
+    Ok(None)
+}

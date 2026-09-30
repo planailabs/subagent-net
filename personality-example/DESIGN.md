@@ -30,7 +30,7 @@ memory MCP (Rust, crates/memory, stdio) ◄────────────�
 world MCP (the room server) ◄───────────────────────────┘
 ```
 
-Vesper is the resident `vesper` of mixture `vesper` (agent type on DeepSeek, MCP servers `world` and `memory`), declared in [cluster.hcl](cluster.hcl).
+Vesper is the resident `vesper` of mixture `vesper` (agent type `vesper-mind` on DeepSeek, MCP servers `world` and `memory`), declared in [cluster.hcl](cluster.hcl). The resident's first message is a `woke_up` event.
 
 ## One shared room
 
@@ -120,14 +120,15 @@ The room server keeps users in `<data>/users.json` (`vesper-room adduser <name>`
 
 ## Running
 
-`nix develop` builds everything (Rust, Postgres, node, cmake and libclang for whisper.cpp); `nix develop .#personality` adds Piper, and `nix develop .#assets` has Blender for the headless asset build. `cargo run -p personality -- up` starts, in one process:
+`nix develop` builds everything (Rust, Postgres, node, cmake and libclang for whisper.cpp); `nix develop .#personality` adds Piper, and `nix develop .#assets` has Blender for the headless asset build. See [README.md](README.md).
 
-- a Postgres (throwaway, like the tests, or `$DATABASE_URL`)
-- the subnet hub and node
-- the room server
-- the cluster applied
+`personality` (crates/personality) is one binary:
 
-Then it prints the URL. `DEEPSEEK_API_KEY` is needed for Vesper to think.
+- `personality up` starts, in one process: a Postgres (private, in `vesper-data/pg`, stopped on Ctrl-C; or `--database`/`$DATABASE_URL`), the subnet hub (`127.0.0.1:8780`, with a fresh admin token it prints), the room server (`127.0.0.1:8700`), the cluster applied, the node `room` in-process and its webhooks (`127.0.0.1:8790`). It sets `ROOM_MCP_TOKEN` to a random token unless given. `DEEPSEEK_API_KEY` is needed for Vesper to think; `--llm-url` uses another OpenAI-compatible endpoint; `--silent` skips Piper.
+- `personality adduser <name>` adds a login.
+- `personality memory <db>` and `personality stt …` are the memory MCP server and the stt stage the cluster file starts. (`vesper-memory` and `vesper-stt` are the same as standalone binaries.)
+
+Before applying [cluster.hcl](cluster.hcl), the launcher fills in this run's details: command heads `"personality"` become its own path, `vesper-data/` its data directory, `127.0.0.1:8700` the room's address, and the DeepSeek URL `--llm-url`.
 
 ## Tests
 
@@ -136,7 +137,7 @@ Then it prints the URL. `DEEPSEEK_API_KEY` is needed for Vesper to think.
 - room server: login, WebSocket state, chat → webhook, the MCP tools
 - stt stage: the protocol with a fake transcriber (real whisper test ignored by default)
 - assets: every .glb loads, has the expected nodes and animation clips
-- end to end: hub + node + room + scripted LLM. Chat "make me a coffee" → she walks to the coffee maker, brews, is told it's ready, pours, says something (a browser client hears it), and remembers who asked
+- end to end (`crates/personality/tests/e2e.rs`): private Postgres, hub, node, room server and the real cluster file, with a scripted OpenAI-compatible brain. Alice says "make me a coffee" into her microphone (stt in fake mode); Vesper recalls, walks to the coffee maker, picks up the mug, brews, says so, is told by a world event that it's ready, pours, brings it to the front, says so (Alice's browser gets both speeches), and remembers who asked
 - web: pure logic (lip-sync, state interpolation) with `node --test`
 
 ## Status
@@ -148,6 +149,7 @@ Implemented:
 - assets: Blender scripts and the three .glb files, checked by `crates/room/tests/assets.rs`
 - room server: `vesper-room` (login, WebSocket, world MCP, Piper/silent TTS, webhooks) with tests
 - stt stage: `vesper-stt` with tests (a real Piper → whisper round trip is `--ignored`)
+- launcher and end-to-end test: `personality`, `cluster.hcl`
 - web client (`web/`, Vue + Parcel + three.js): login, the 3D room following the state, clip blending (the pose's legs under an action's upper body), lip sync from the speech envelope, chat, push-to-talk (button or space; resampled to 16 kHz in the browser); `npm test` covers the pure logic
 
-Not yet: cluster file and launcher, end-to-end tests.
+Everything described here is implemented.
