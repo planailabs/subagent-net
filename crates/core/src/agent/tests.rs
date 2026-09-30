@@ -798,3 +798,80 @@ fn a_panic_while_applying_fails_only_that_agent() {
     assert_eq!(replayed.phase, h.a.phase);
     assert_eq!(h.resume(), vec![Effect::CallLlm]);
 }
+
+fn used(h: &mut H, prompt: u64) {
+    h.ev(Event::LlmDelta { delta: Delta { usage: Some(Usage { prompt_tokens: prompt, completion_tokens: 0, cached_prompt_tokens: 0 }), ..Default::default() } });
+}
+
+fn compacting_spec() -> Spec {
+    let mut s = spec();
+    s.tools = vec![ToolDef { name: "srv.t".into(), description: "A tool.".into(), parameters: json!({"type": "object"}) }];
+    s.lazy = vec!["srv.t".into()];
+    s.compact = Some(Compact { at_tokens: 1000, keep: 2 });
+    s
+}
+
+/// Runs until the context crosses the threshold: task, a load, two calls.
+fn grown(h: &mut H) -> Vec<Effect> {
+    assert_eq!(h.user("the task"), vec![Effect::CallLlm]);
+    h.call(0, "c1", "load_tools", r#"{"names":["srv"]}"#);
+    used(h, 400);
+    assert_eq!(h.done(), vec![Effect::CallLlm], "load_tools is resolved in place");
+    h.call(0, "c2", "call_tool", r#"{"name":"srv.t","arguments":{}}"#);
+    used(h, 600);
+    tool_effect(&h.done());
+    assert_eq!(h.result("c2", "r2"), vec![Effect::CallLlm], "600 < 1000: no compaction yet");
+    h.text("more");
+    h.call(0, "c3", "call_tool", r#"{"name":"srv.t","arguments":{}}"#);
+    used(h, 1200);
+    tool_effect(&h.done());
+    h.result("c3", "r3")
+}
+
+#[test]
+fn compaction_summarises_all_but_the_task_and_the_last_messages() {
+    let mut h = H::new(compacting_spec());
+    // task, c1 call + result, c2 call + result, c3 call + result: keep 2 from c3's call.
+    assert_eq!(grown(&mut h), vec![Effect::Compact { upto: 5 }]);
+    let req = h.a.compaction_request("be useful", 5);
+    let text = req[1].content.clone().unwrap();
+    assert!(text.contains("be useful") && text.contains("the task") && text.contains("r2") && !text.contains("r3"), "{text}");
+    // A crash while summarising: it's asked for again.
+    assert_eq!(h.crash(), vec![Effect::Compact { upto: 5 }]);
+    let before = h.a.usage.prompt_tokens;
+    let fx = h.ev(Event::Compacted { upto: 5, summary: "the notes".into(), usage: Some(Usage { prompt_tokens: 100, completion_tokens: 50, cached_prompt_tokens: 0 }) });
+    assert_eq!(fx, vec![Effect::CallLlm]);
+    assert_eq!(h.a.usage.prompt_tokens, before + 100, "the summary is paid for");
+    let c = h.contents();
+    assert_eq!(c.len(), 5, "{c:?}");
+    assert_eq!(c[0], (Role::User, "the task".into()));
+    assert!(c[1].1.contains("the notes"));
+    assert!(c[2].1.contains("srv.t"), "loaded schemas come back: {c:?}");
+    assert_eq!((c[3].0, c[4].0), (Role::Assistant, Role::Tool), "the kept call stays with its result");
+    assert_eq!(h.a.compactions, 1);
+    // A stale summary (after a cancel, say) changes nothing.
+    h.text("done");
+    used(&mut h, 300);
+    h.done();
+    let n = h.a.messages.len();
+    assert!(h.ev(Event::Compacted { upto: 3, summary: "late".into(), usage: None }).is_empty());
+    assert_eq!(h.a.messages.len(), n);
+    h.crash();
+}
+
+#[test]
+fn a_failed_compaction_goes_on_without_one() {
+    let mut h = H::new(compacting_spec());
+    assert_eq!(grown(&mut h), vec![Effect::Compact { upto: 5 }]);
+    assert_eq!(h.ev(Event::CompactFailed { error: "down".into() }), vec![Effect::CallLlm], "no second try this step");
+    assert_eq!(h.a.messages.len(), 7);
+    h.crash();
+}
+
+#[test]
+fn no_compaction_without_the_setting() {
+    let mut s = compacting_spec();
+    s.compact = None;
+    let mut h = H::new(s);
+    assert_eq!(grown(&mut h), vec![Effect::CallLlm]);
+}

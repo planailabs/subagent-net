@@ -382,3 +382,33 @@ async fn nodes_resume_agents_from_snapshots() {
     let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
     assert_eq!(msgs, 4, "system, one, first, two: the history survived the snapshot");
 }
+
+#[tokio::test]
+async fn long_conversations_are_compacted() {
+    let n = Net::new(&cluster("  compact = { at_tokens = 50, keep = 2 }")).await;
+    n.node("s").await;
+    // Two tool calls, each reporting a context over the threshold.
+    let call = |id: &'static str| {
+        move |_: &Value| {
+            let mut c = tool_call(id, "list_types", json!({}));
+            c[1] = json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":80,"completion_tokens":5}}).to_string();
+            c
+        }
+    };
+    n.llm.push(WORKER, call("c1"));
+    n.llm.push(WORKER, call("c2"));
+    n.llm.say(subnet_core::agent::COMPACT_PROMPT, &["found: boss and worker"]);
+    n.llm.push(WORKER, |body| text(&[&body["messages"].as_array().unwrap().len().to_string()]));
+    let id = n.spawn("worker", "look around").await;
+    // system, task, summary, then the kept call and its result.
+    assert_eq!(n.mail().await["content"], "5");
+    let reqs = n.llm.requests();
+    let summarise = reqs.iter().find(|r| r["messages"][0]["content"] == subnet_core::agent::COMPACT_PROMPT).expect("a summary was asked for");
+    assert!(summarise.get("tools").is_none_or(|t| t.as_array().is_none_or(Vec::is_empty)), "no tools for the summary");
+    assert!(summarise["messages"][1]["content"].as_str().unwrap().contains("look around"));
+    let last = reqs.last().unwrap();
+    assert_eq!(last["messages"][1]["content"], "look around", "the task stays");
+    assert!(last["messages"][2]["content"].as_str().unwrap().contains("found: boss and worker"));
+    let t = n.t(id).await;
+    assert_eq!(t["compactions"], 1);
+}

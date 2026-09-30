@@ -429,6 +429,7 @@ mod tests {
             usage: Usage { prompt_tokens: 30, completion_tokens: 20, ..Default::default() },
             budget: Budget { max_tokens: Some(100), ..Default::default() },
             reserved: 0,
+            compactions: 0,
             seq: 1,
             awaiting_approval: None,
             last: Some("all done".into()),

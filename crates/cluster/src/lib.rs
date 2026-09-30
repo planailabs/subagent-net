@@ -120,6 +120,37 @@ pub struct AgentDef {
     /// Tools needing approval: built-ins or `<mcp>.<tool>`.
     #[serde(default)]
     pub approve: Vec<String>,
+    /// Conversation compaction (on unless `enabled = false`).
+    #[serde(default, skip_serializing_if = "CompactDef::is_default")]
+    pub compact: CompactDef,
+}
+
+/// `compact { ... }` of an agent: when a model call's context reaches
+/// `at_tokens`, all but the task and the last `keep` messages are replaced
+/// by a summary the model writes. External executors never compact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct CompactDef {
+    pub enabled: bool,
+    pub at_tokens: u64,
+    pub keep: usize,
+}
+
+impl Default for CompactDef {
+    fn default() -> Self {
+        Self { enabled: true, at_tokens: 96_000, keep: 8 }
+    }
+}
+
+impl CompactDef {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// What agents of a type get, if anything.
+    pub fn spec(&self, executor: &Executor) -> Option<subnet_core::agent::Compact> {
+        (self.enabled && !executor.is_external()).then(|| subnet_core::agent::Compact { at_tokens: self.at_tokens, keep: self.keep })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -492,6 +523,9 @@ impl Cluster {
                 if !spawnable(s) {
                     return invalid(format!("{ctx}: spawns unknown mixture or agent {s:?}"));
                 }
+            }
+            if a.compact.enabled && (a.compact.at_tokens == 0 || a.compact.keep == 0) {
+                return invalid(format!("{ctx}: compact needs at_tokens and keep above 0"));
             }
             if a.executor.internal && a.executor.command.is_some() {
                 return invalid(format!("{ctx}: executor is either internal or a command"));

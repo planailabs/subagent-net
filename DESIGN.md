@@ -62,6 +62,7 @@ agent "deepseek-flash" {
   spawns   = ["deepseek-flash"]
   budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
+  compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off
 }
 
 # --- MCP servers ------------------------------------------------------------
@@ -178,10 +179,12 @@ enum Event {
     ChildSpawned { id, reserved }, ChildReport { id, status, content },
     PauseRequested { mode }, Resumed, Cancelled,
     Recovered,                                     // logged by the hub on every placement
+    ToolsLoaded { names },                         // the tool router
+    Compacted { upto, summary, usage }, CompactFailed { error },
 }
 
-enum Effect { CallLlm, CallTool { call, retry }, RequestApproval { call }, AbortInflight,
-              Report { to, status, content } }
+enum Effect { CallLlm, Compact { upto }, CallTool { call, retry }, RequestApproval { call },
+              AbortInflight, Report { to, status, content } }
 
 enum Phase { Idle, Thinking { running }, Tools { calls }, Failed { error }, Cancelled }
 // each pending tool call has its own state:
@@ -193,10 +196,24 @@ enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
 - `wait_for` is handled by the state machine itself (it waits for `ChildReport` events). Every other tool is executed by the node.
 - **Recovery:** whenever the hub places an agent, it first commits `Recovered`: whatever was in flight is gone, and applying `Recovered` returns the effects that restart it. Because recovery is logged, every replica folds identical state.
 - **Reports are routed by the hub** from its own replica, exactly once.
+- **Compaction** (on by default; see below) keeps long conversations within the model's context.
 - **Snapshots:** each time an agent's log crosses a multiple of 200 events the hub stores its folded state (`agent_snapshots`, newest only). Loading an agent reads the snapshot and the events after it; `Assign` carries the snapshot and only the events after it (never a snapshot taken at the final `Recovered`, so the node always has an event to start from).
 - **Forking:** `fork(id, at, tree)` copies the log prefix into a new agent. Copied history is folded without re-running its effects, so old answers aren't delivered again.
   - Without `tree`, the copy has no children: `ChildSpawned`/`ChildReport` events are left out, so a `wait_for` pending at the fork point returns "not a child".
   - With `tree`, every child spawned within the prefix is forked as well (recursively, with its full log), with ids remapped in all copied events and specs.
+
+### Compaction
+
+Each LLM call reports its context size (prompt + completion tokens). Before the next call, if that reached the agent type's `compact.at_tokens` (default 96 000), the state machine asks for a compaction (`Effect::Compact { upto }`) instead of the call:
+
+- **What goes:** everything but the first message (the task) and the last `keep` messages (default 8). The kept part never starts with a tool result, so a call stays with its result. It only happens between steps, when no tool call is pending.
+- **The summary:** the node asks the agent's own model, without tools, to summarise the conversation up to `upto` (`Agent::compaction_request`: fixed instructions, the agent's system prompt, the transcript as text). It proposes `Compacted { upto, summary, usage }`.
+- **Applying it:** messages `1..upto` become one user message with the summary. Schemas the agent loaded (`load_tools`) come back as a note after it, since `call_tool` still needs them. The summary call's usage counts towards the budget. The LLM call then goes ahead.
+- **Deterministic:** the summary is in the log, so replicas fold the same transcript. After a crash mid-summary, recovery asks for it again.
+- **Failures are not fatal:** `CompactFailed` (the model errored or returned nothing) lets the call go ahead uncompacted; the next step tries again.
+- The provider's prompt cache restarts after a compaction (the prefix changed); that's the price.
+- Watchers whose cursor is past the end of a compacted transcript start again from the top. Agent summaries show `compactions`.
+- `compact { enabled = false }` turns it off for a type; external executors never compact (their brain owns its context).
 
 ### Executors
 
@@ -419,7 +436,7 @@ State and key handling (`tui::App`) are pure and tested; rendering is tested aga
 
 Everything in this document is implemented, except what "Not in scope yet" lists:
 
-- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools), snapshots, forks (with tree), internal and external executors.
+- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), snapshots, forks (with tree), internal and external executors.
 - **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing.
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.

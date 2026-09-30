@@ -12,6 +12,15 @@ use serde_json::{Value, json};
 use crate::addr::{Addr, AgentId};
 use crate::chat::{Accumulator, Delta, Message, ToolCall, ToolDef, Usage};
 
+/// How a compaction's summary is written.
+pub const COMPACT_PROMPT: &str = "You compact an AI agent's conversation. The agent will continue its work from your summary plus its most recent messages, which it keeps verbatim; the rest is gone. Write the summary for the agent itself, as its own notes:\n\
+- the task, its constraints and who asked;\n\
+- everything found, decided or produced so far: facts, numbers, names, ids (agents, entities, documents, calls), URLs, DOIs, quotes the agent may cite, exactly as they appeared;\n\
+- what was done and with what result, including what failed and why;\n\
+- child agents: their ids, what each was asked, and what each reported;\n\
+- open threads and the next steps the agent was about to take.\n\
+Drop small talk, repetition and raw tool output that no longer matters. Be complete rather than short, but don't pad. Answer with the summary only.";
+
 /// Name of the one built-in tool the state machine handles itself.
 pub const WAIT_FOR: &str = "wait_for";
 /// Loads lazy tools' schemas; resolved by the state machine itself.
@@ -42,6 +51,15 @@ impl Budget {
     }
 }
 
+/// When and how an agent's conversation is compacted: once a model call's
+/// context reaches `at_tokens`, everything but the task (the first message)
+/// and the last `keep` messages is replaced by a summary the model writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Compact {
+    pub at_tokens: u64,
+    pub keep: usize,
+}
+
 /// What an agent is, fixed when it is created (stored beside the log).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Spec {
@@ -70,6 +88,9 @@ pub struct Spec {
     /// `load_tools`' description) until they're loaded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lazy: Vec<String>,
+    /// Compaction; `None` = never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact: Option<Compact>,
 }
 
 impl Spec {
@@ -85,6 +106,7 @@ impl Spec {
             tools: vec![],
             idempotent: vec![],
             lazy: vec![],
+            compact: None,
         }
     }
 }
@@ -164,6 +186,17 @@ pub enum Event {
     ToolsLoaded {
         names: Vec<String>,
     },
+    /// The conversation's messages `1..upto` summarised (`Effect::Compact`).
+    Compacted {
+        upto: usize,
+        summary: String,
+        #[serde(default)]
+        usage: Option<Usage>,
+    },
+    /// Compaction didn't work out; the agent goes on uncompacted.
+    CompactFailed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,6 +205,9 @@ pub enum Effect {
     /// Stream a completion for `Agent::llm_messages()`; propose `LlmDelta`s then
     /// `LlmDone`, `LlmAborted` or `LlmFailed`.
     CallLlm,
+    /// Summarise the conversation up to `upto` (`Agent::compaction_request`);
+    /// propose `Compacted`, or `CompactFailed` (`LlmAborted` when aborted).
+    Compact { upto: usize },
     /// Run a tool; propose `ToolResult`. `retry` is set when the call was started
     /// before a crash: the runtime re-runs idempotent tools and proposes
     /// `ToolAborted` for the rest.
@@ -268,6 +304,20 @@ pub struct Agent {
     /// Schemas the router loaded, shown to the model with the next message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Context size of the last model call (prompt + completion tokens):
+    /// what compaction is decided on.
+    #[serde(default)]
+    pub context: u64,
+    /// A compaction failed this step: go on without one until the next call.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_skip: bool,
+    /// How often the conversation was compacted.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub compactions: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Agent {
@@ -287,6 +337,9 @@ impl Agent {
             reserved: 0,
             loaded: BTreeSet::new(),
             notes: vec![],
+            context: 0,
+            compact_skip: false,
+            compactions: 0,
         }
     }
 
@@ -378,6 +431,49 @@ impl Agent {
             m.push(self.acc.partial());
         }
         m
+    }
+
+    /// Where to compact before the next model call, if it's time: messages
+    /// `1..upto` go (the first, the task, stays), the last `keep` stay, and
+    /// the kept part never starts with a tool result (its call must stay
+    /// with it).
+    fn compact_point(&self) -> Option<usize> {
+        let c = self.spec.compact.as_ref()?;
+        if self.compact_skip || self.context < c.at_tokens || !self.acc.is_empty() {
+            return None;
+        }
+        let mut upto = self.messages.len().saturating_sub(c.keep);
+        while upto > 1 && self.messages.get(upto).is_some_and(|m| m.role == crate::chat::Role::Tool) {
+            upto -= 1;
+        }
+        // Nothing worth summarising.
+        (upto >= 3).then_some(upto)
+    }
+
+    /// The model call that writes a compaction's summary: `system` is the
+    /// agent's own system prompt (what it's for), then the conversation up
+    /// to `upto` as text.
+    pub fn compaction_request(&self, system: &str, upto: usize) -> Vec<Message> {
+        use std::fmt::Write;
+        let mut t = String::new();
+        for m in &self.messages[..upto.min(self.messages.len())] {
+            let role = serde_json::to_value(&m.role).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+            let _ = writeln!(t, "[{role}]");
+            if let Some(c) = m.content.as_deref().filter(|c| !c.is_empty()) {
+                let _ = writeln!(t, "{c}");
+            }
+            for c in &m.tool_calls {
+                let _ = writeln!(t, "-> {} {} (call {})", c.function.name, c.function.arguments, c.id);
+            }
+            if let Some(id) = &m.tool_call_id {
+                let _ = writeln!(t, "(result of call {id})");
+            }
+            t.push('\n');
+        }
+        vec![
+            Message::system(COMPACT_PROMPT),
+            Message::user(format!("The agent's instructions:\n{system}\n\nIts conversation so far:\n\n{t}")),
+        ]
     }
 
     /// A tool's name as the spec has it: models may use the wire form
@@ -536,7 +632,8 @@ impl Agent {
         let thinking = matches!(self.phase, Phase::Thinking { .. });
         match ev {
             // Late stream events (after cancel/fail) are dropped.
-            Event::LlmDelta { .. } | Event::LlmDone | Event::LlmAborted | Event::LlmFailed { .. } if !thinking => {}
+            Event::LlmDelta { .. } | Event::LlmDone | Event::LlmAborted | Event::LlmFailed { .. } | Event::Compacted { .. } | Event::CompactFailed { .. }
+                if !thinking => {}
             Event::Inbox { from, content, reply } => {
                 self.inbox.push_back(Queued { from: from.clone(), content: content.clone(), reply: *reply });
                 if self.phase == Phase::Idle {
@@ -549,7 +646,9 @@ impl Agent {
                     self.usage.prompt_tokens += u.prompt_tokens;
                     self.usage.completion_tokens += u.completion_tokens;
                     self.usage.cached_prompt_tokens += u.cached_prompt_tokens;
+                    self.context = u.prompt_tokens + u.completion_tokens;
                 }
+                self.compact_skip = false;
                 let mut msg = self.acc.finish();
                 self.acc = Accumulator::default();
                 for c in &mut msg.tool_calls {
@@ -638,6 +737,38 @@ impl Agent {
                     ));
                 }
             }
+            Event::Compacted { upto, summary, usage } => {
+                if let Some(u) = usage {
+                    self.usage.prompt_tokens += u.prompt_tokens;
+                    self.usage.completion_tokens += u.completion_tokens;
+                    self.usage.cached_prompt_tokens += u.cached_prompt_tokens;
+                }
+                if (2..=self.messages.len()).contains(upto) {
+                    let tail = self.messages.split_off(*upto);
+                    self.messages.truncate(1);
+                    self.messages.push(Message::user(format!(
+                        "[The conversation so far was compacted: earlier messages were replaced by this summary.]\n{summary}"
+                    )));
+                    // Loaded schemas were in the compacted part; call_tool still needs them.
+                    let loaded: Vec<String> = self.loaded.iter().cloned().collect();
+                    if !loaded.is_empty() {
+                        self.messages.push(Message::user(format!(
+                            "[tools you loaded earlier; call them with call_tool {{\"name\", \"arguments\"}}]\n{}",
+                            self.schemas(&loaded)
+                        )));
+                    }
+                    self.messages.extend(tail);
+                    self.compactions += 1;
+                    self.context = 0;
+                }
+                self.phase = Phase::Thinking { running: false };
+                self.advance(&mut fx);
+            }
+            Event::CompactFailed { .. } => {
+                self.compact_skip = true;
+                self.phase = Phase::Thinking { running: false };
+                self.advance(&mut fx);
+            }
             Event::Cancelled => {
                 if self.terminal() {
                     return fx;
@@ -674,7 +805,10 @@ impl Agent {
                         return;
                     }
                     self.phase = Phase::Thinking { running: true };
-                    fx.push(Effect::CallLlm);
+                    match self.compact_point() {
+                        Some(upto) => fx.push(Effect::Compact { upto }),
+                        None => fx.push(Effect::CallLlm),
+                    }
                     return;
                 }
                 Phase::Tools { calls } => {

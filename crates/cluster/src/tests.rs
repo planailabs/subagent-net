@@ -217,3 +217,19 @@ mixture "plain" {
     assert_eq!(c.mixtures["plain"].router, None);
     assert!(err("mixture \"m\" {\n agent = \"a\"\n router { top_k = 0 }\n}").contains("top_k"));
 }
+
+#[test]
+fn compaction_is_on_unless_turned_off() {
+    let with_compact = |c: &str| parse(&BASE.replace("nodes = [\"n1\"]", &format!("nodes = [\"n1\"]\n  {c}")));
+    let on = parse(BASE).unwrap();
+    let a = &on.agents["a"];
+    assert_eq!(a.compact.spec(&a.executor), Some(subnet_core::agent::Compact { at_tokens: 96_000, keep: 8 }));
+    let tuned = with_compact("compact {\n    at_tokens = 50000\n  }").unwrap();
+    assert_eq!(tuned.agents["a"].compact.at_tokens, 50_000);
+    assert_eq!(tuned.agents["a"].compact.keep, 8, "unset fields keep their defaults");
+    assert_ne!(tuned.agent_id("a"), on.agent_id("a"));
+    let off = with_compact("compact {\n    enabled = false\n  }").unwrap();
+    let a = &off.agents["a"];
+    assert_eq!(a.compact.spec(&a.executor), None);
+    assert!(with_compact("compact {\n    keep = 0\n  }").unwrap_err().to_string().contains("compact"));
+}

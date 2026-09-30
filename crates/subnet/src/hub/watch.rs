@@ -25,7 +25,10 @@ impl Hub {
         let timeout = a.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let after = match a.after {
             None => return Ok(render(t, len.saturating_sub(a.tail.unwrap_or(20)), cap)),
-            Some(n) => n.min(len),
+            // Past the end: the transcript was compacted (it shrank), so
+            // start over from the top of what's left.
+            Some(n) if n > len => 0,
+            Some(n) => n,
         };
         if len > after || timeout == 0 {
             return Ok(render(t, after, cap));

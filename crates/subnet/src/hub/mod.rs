@@ -197,6 +197,8 @@ fn node_event(e: &Event) -> bool {
             | Event::LlmFailed { .. }
             | Event::ToolResult { .. }
             | Event::ToolAborted { .. }
+            | Event::Compacted { .. }
+            | Event::CompactFailed { .. }
     )
 }
 
@@ -1060,7 +1062,8 @@ impl Hub {
             }
             None => (def.budget.clone(), 0),
         };
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy };
+        let compact = def.compact.spec(&def.executor);
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact };
         Ok((spec, reserved))
     }
 
@@ -1209,6 +1212,7 @@ fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
         usage: r.a.usage,
         budget: r.a.spec.budget.clone(),
         reserved: r.a.reserved,
+        compactions: r.a.compactions,
         seq: r.seq,
         awaiting_approval,
         last: r

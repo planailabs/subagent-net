@@ -35,6 +35,9 @@ pub struct AgentSummary {
     pub budget: subnet_core::agent::Budget,
     /// Tokens handed to children.
     pub reserved: u64,
+    /// How often its conversation was compacted.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub compactions: u32,
     /// Number of committed events.
     pub seq: u64,
     /// The tool call waiting for approval, if any.
@@ -632,4 +635,8 @@ mod tests {
             }
         }
     }
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }

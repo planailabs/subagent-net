@@ -464,6 +464,11 @@ impl Runner {
                     let abort = self.inflight.child_token();
                     tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, self.proposer(), abort));
                 }
+                Effect::Compact { upto } => {
+                    let msgs = self.a.compaction_request(&self.rt.system, upto);
+                    let abort = self.inflight.child_token();
+                    tokio::spawn(compact_call(self.rt.clone(), upto, msgs, self.proposer(), abort));
+                }
                 Effect::CallTool { call, retry } => {
                     let t = ToolTask {
                         spec: self.a.spec.clone(),
@@ -568,6 +573,36 @@ async fn llm_call(
             _ = flush.tick() => p.propose(take_delta(&mut buf).into_iter().collect()),
         }
     }
+}
+
+/// Writes a compaction's summary: one model call without tools. A failure
+/// is reported (`CompactFailed`) and the agent goes on uncompacted.
+async fn compact_call(rt: Arc<AgentRt>, upto: usize, msgs: Vec<Message>, p: Proposer, abort: CancellationToken) {
+    let Brain::Llm(c) = &rt.brain else {
+        return p.propose(vec![Event::CompactFailed { error: "external executors don't compact".into() }]);
+    };
+    let summarise = async {
+        let mut s = c.stream(&msgs, &[]).await.map_err(|e| e.to_string())?;
+        let (mut text, mut usage) = (String::new(), None);
+        while let Some(d) = s.next().await {
+            let d = d.map_err(|e| e.to_string())?;
+            text.push_str(d.content.as_deref().unwrap_or_default());
+            usage = d.usage.or(usage);
+        }
+        Ok::<_, String>((text, usage))
+    };
+    let ev = tokio::select! {
+        r = summarise => match r {
+            Ok((summary, usage)) if !summary.trim().is_empty() => Event::Compacted { upto, summary, usage },
+            Ok(_) => Event::CompactFailed { error: "the summary came back empty".into() },
+            Err(error) => Event::CompactFailed { error },
+        },
+        _ = abort.cancelled() => Event::LlmAborted,
+    };
+    if let Event::CompactFailed { error } = &ev {
+        tracing::warn!(agent = %p.agent, %error, "compaction failed; going on without");
+    }
+    p.propose(vec![ev]);
 }
 
 struct ToolTask {
