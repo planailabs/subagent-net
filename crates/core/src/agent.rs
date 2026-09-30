@@ -644,12 +644,30 @@ impl Agent {
                     return;
                 }
                 Phase::Tools { calls } => {
+                    // load_tools first, so the other calls of the same message
+                    // can use what it loads.
+                    let load_tools: Vec<ToolCall> = calls
+                        .iter()
+                        .filter(|c| c.call.function.name == LOAD_TOOLS && matches!(c.state, CallState::Queued { .. }))
+                        .map(|c| c.call.clone())
+                        .collect();
+                    if !load_tools.is_empty() {
+                        for call in load_tools {
+                            let result = self.load_call(&call);
+                            self.finish_call(&call.id, result);
+                        }
+                        continue;
+                    }
                     // Start every call that can start; they run in parallel.
+                    // Every call is judged against what was loaded before any
+                    // of them (two calls of one unloaded tool both get its schema).
+                    let loaded = self.loaded.clone();
                     let mut errors = vec![];
                     let mut loads = vec![];
+                    let Phase::Tools { calls } = &mut self.phase else { unreachable!() };
                     for c in calls.iter_mut() {
                         // What actually runs: call_tool becomes the tool it names.
-                        let run = match translate(&self.spec, &self.loaded, &c.call) {
+                        let run = match translate(&self.spec, &loaded, &c.call) {
                             Dispatch::Run(call) => call,
                             Dispatch::Load(_) if matches!(c.state, CallState::Queued { .. }) => {
                                 loads.push(c.call.clone());
@@ -673,7 +691,6 @@ impl Agent {
                                 }
                                 let _ = retry;
                             }
-                            CallState::Queued { .. } if c.call.function.name == LOAD_TOOLS => loads.push(c.call.clone()),
                             CallState::Queued { retry: false } if self.spec.approve.contains(&run.function.name) => {
                                 c.state = CallState::Approval;
                                 fx.push(Effect::RequestApproval { call: run });
@@ -689,17 +706,14 @@ impl Agent {
                         self.finish_call(&id, e);
                     }
                     for call in loads {
-                        let result = match translate(&self.spec, &self.loaded, &call) {
-                            _ if call.function.name == LOAD_TOOLS => self.load_call(&call),
-                            Dispatch::Load(name) => {
-                                self.load(std::slice::from_ref(&name));
-                                format!(
-                                    "error: {name} wasn't loaded, so it didn't run. Here is its schema; call it again with call_tool {{\"name\", \"arguments\"}}:\n{}",
-                                    self.schemas(std::slice::from_ref(&name))
-                                )
-                            }
-                            _ => unreachable!("only loads are collected"),
+                        let Dispatch::Load(name) = translate(&self.spec, &loaded, &call) else {
+                            unreachable!("judged against the same snapshot")
                         };
+                        self.load(std::slice::from_ref(&name));
+                        let result = format!(
+                            "error: {name} wasn't loaded, so it didn't run. Here is its schema; call it again with call_tool {{\"name\", \"arguments\"}}:\n{}",
+                            self.schemas(std::slice::from_ref(&name))
+                        );
                         self.finish_call(&call.id, result);
                     }
                     self.finish_waits();

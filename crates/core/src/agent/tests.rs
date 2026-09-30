@@ -757,3 +757,29 @@ fn cached_prompt_tokens_count_at_their_weight() {
     assert_eq!(h.a.usage.cached_prompt_tokens, 900);
     assert_eq!(h.a.remaining_tokens(), Some(1000 - 240), "900 cached tokens count as 90");
 }
+
+#[test]
+fn load_tools_and_its_use_in_one_message() {
+    // The model loads a tool and calls it in the same message: load_tools
+    // goes first, so the call runs.
+    let mut h = H::new(lazy_spec());
+    h.user("go");
+    h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web.search"]}"#);
+    h.call(1, "c2", CALL_TOOL, r#"{"name":"web.search","arguments":{"q":"x"}}"#);
+    let fx = h.done();
+    assert_eq!(tool_effect(&fx).function.name, "web.search");
+    h.result("c2", "hits");
+    h.crash();
+}
+
+#[test]
+fn two_calls_of_one_unloaded_tool() {
+    // Both get the schema (judged against the same snapshot), neither runs.
+    let mut h = H::new(lazy_spec());
+    h.user("go");
+    h.call(0, "c1", "web.search", r#"{"q":"a"}"#);
+    h.call(1, "c2", CALL_TOOL, r#"{"name":"web.search","arguments":{"q":"b"}}"#);
+    assert_eq!(h.done(), vec![Effect::CallLlm]);
+    assert_eq!(h.contents().iter().filter(|(_, c)| c.contains("web.search wasn't loaded")).count(), 2);
+    h.crash();
+}
