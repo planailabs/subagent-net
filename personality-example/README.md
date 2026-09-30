@@ -14,7 +14,8 @@ herself, everyone she meets, and the room.
 nix develop .#personality                         # Rust, Postgres, node, Piper
 (cd personality-example/web && npm install && npm run build)
 cargo run -p personality -- adduser alice         # asks for a password
-DEEPSEEK_API_KEY=… FIRECRAWL_API_KEY=… cargo run -p personality -- up
+cp personality-example/.env.example .env           # fill in DEEPSEEK_API_KEY, FIRECRAWL_API_KEY
+cargo run -p personality -- up
 ```
 
 Open the room at http://127.0.0.1:8700. The subnet hub UI at

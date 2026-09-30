@@ -14,6 +14,11 @@ use vesper_room::users::Users;
 struct Cli {
     #[arg(long, global = true, default_value = "vesper-data")]
     data: PathBuf,
+    /// Load environment variables (DEEPSEEK_API_KEY, FIRECRAWL_API_KEY, …)
+    /// from this file (repeatable; `./.env` is read too). Variables already
+    /// set win.
+    #[arg(long, global = true)]
+    env_file: Vec<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -54,10 +59,18 @@ enum Cmd {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Before parsing (flags have env defaults) and before any thread exists.
+    subnet::envfile::load(&std::env::args().collect::<Vec<_>>())?;
     let cli = Cli::parse();
-    if matches!(cli.cmd, Cmd::Up { .. }) && std::env::var_os("ROOM_MCP_TOKEN").is_none() {
+    if matches!(cli.cmd, Cmd::Up { .. }) {
         // SAFETY: still single-threaded; the runtime starts below.
-        unsafe { std::env::set_var("ROOM_MCP_TOKEN", uuid::Uuid::new_v4().simple().to_string()) };
+        if std::env::var_os("ROOM_MCP_TOKEN").is_none() {
+            unsafe { std::env::set_var("ROOM_MCP_TOKEN", uuid::Uuid::new_v4().simple().to_string()) };
+        }
+        // The hub's tool router shares the memory server's e5 download.
+        if std::env::var_os("SUBNET_MODELS").is_none() {
+            unsafe { std::env::set_var("SUBNET_MODELS", std::path::absolute(cli.data.join("models"))?) };
+        }
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli))
 }

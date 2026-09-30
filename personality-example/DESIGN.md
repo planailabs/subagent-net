@@ -86,7 +86,7 @@ Modelled in Blender by Python scripts in [blender/](blender/): `python3 blender/
 
 ## The web
 
-The `web` MCP server is Firecrawl's own (`firecrawl-mcp` from npm, pinned), started by the node with `FIRECRAWL_API_KEY` from its environment; `FIRECRAWL_API_URL` (inherited) points it at a self-hosted Firecrawl. A spawn needs every MCP server of its mixture live, so without a key the launcher takes `web` out of the mixture and warns: Vesper runs, just without the web.
+`world` and `memory` are eager (`lazy = false`): she uses them every turn. `web` is lazy: she sees its tool names in `load_tools`' catalogue, and her mixture's `router { top_k = 2 }` pre-loads the web tools that match what someone said (the hub's e5 shares `vesper-data/models` with the memory server). The `web` MCP server is Firecrawl's own (`firecrawl-mcp` from npm, pinned), started by the node with `FIRECRAWL_API_KEY` from its environment; `FIRECRAWL_API_URL` (inherited) points it at a self-hosted Firecrawl. A spawn needs every MCP server of its mixture live, so without a key the launcher takes `web` out of the mixture and warns: Vesper runs, just without the web.
 
 ## Voice in and out
 
@@ -109,7 +109,7 @@ A Rust port of self-learning-model's store. It's one SQLite file:
 - `person:<name>`: one per user she's met
 - `world`: the room, its things, what happened
 
-The system prompt makes her recall about a speaker before answering, and write down what matters.
+Memory comes first in her system prompt: she has no memory beyond this store. She recalls about the speaker and the topic before answering, writes in the same turn after every exchange that taught her anything, and keeps memories current by reading the old version and writing back a merged one (same title replaces). There's one main memory per person, titled with their name, with linked details.
 
 ## Users
 
@@ -131,6 +131,7 @@ The room server keeps users in `<data>/users.json` (`vesper-room adduser <name>`
 
 - `personality up` starts, in one process: a Postgres (private, in `vesper-data/pg`, stopped on Ctrl-C; or `--database`/`$DATABASE_URL`), the subnet hub (`127.0.0.1:8780`, with a fresh admin token it prints), the room server (`127.0.0.1:8700`), the cluster applied, the node `room` in-process and its webhooks (`127.0.0.1:8790`). It sets `ROOM_MCP_TOKEN` to a random token unless given. `DEEPSEEK_API_KEY` is needed for Vesper to think; `--llm-url` uses another OpenAI-compatible endpoint; `--silent` skips Piper.
 - `personality adduser <name>` adds a login.
+- Every command reads `--env-file PATH` (repeatable) and `./.env` first; variables already set win. [.env.example](.env.example) lists what's used.
 - `personality memory <db>` and `personality stt …` are the memory MCP server and the stt stage the cluster file starts. (`vesper-memory` and `vesper-stt` are the same as standalone binaries.)
 
 Before applying [cluster.hcl](cluster.hcl), the launcher fills in this run's details: command heads `"personality"` become its own path, `vesper-data/` its data directory, `127.0.0.1:8700` the room's address, and the DeepSeek URL `--llm-url`.

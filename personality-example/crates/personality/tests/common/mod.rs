@@ -72,6 +72,8 @@ pub fn with_env(name: &str, env: &[(&str, &str)], f: impl AsyncFnOnce(&std::path
         for (k, v) in env {
             std::env::set_var(k, v);
         }
+        // The hub's router model, kept between runs.
+        std::env::set_var("SUBNET_MODELS", std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("models"));
     }
     let data = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vesper-{name}-{}", std::process::id()));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();

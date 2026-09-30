@@ -17,6 +17,8 @@ fn script(message: &str) -> Vec<(&'static str, Value)> {
         vec![("world.look_around", json!({}))]
     } else if message.contains("who wrote carmilla") {
         vec![
+            // Web tools are lazy: load their schemas first.
+            ("load_tools", json!({"names": ["web.firecrawl_search"]})),
             ("web.firecrawl_search", json!({"query": "who wrote Carmilla", "limit": 3})),
             ("world.say", json!({"text": "Sheridan Le Fanu, in 1872. Wikipedia says so, anyway.", "to": "alice"})),
         ]
