@@ -85,7 +85,7 @@ Modelled in Blender by Python scripts in [blender/](blender/): `python3 blender/
 
 ## Voice in and out
 
-- **Out:** `say` runs Piper (`piper` from nixpkgs; a voice model is downloaded once) to WAV, computes a loudness envelope (per 40 ms), and sends both to all browsers. Tests use a silent TTS.
+- **Out:** `say` runs Piper (`piper` from nixpkgs; the voice, `en_GB-jenny_dioco-medium` by default, is downloaded from Hugging Face into `<data>/voices` once) to WAV, computes a loudness envelope (RMS per 40 ms, normalised), and sends both to all browsers; the tool returns when she's done speaking. Without Piper on PATH (`--tts auto`), or with `--tts silent` (tests), speech is silent, 0.3 s per word, and her mouth still moves.
 - **In:** push-to-talk in the browser records 16 kHz mono PCM. The room server wraps each utterance as a WAV blob and posts `{from, audio: {"$blob": …}}` to the `voice` webhook. The `stt` stage (crates/stt, whisper.cpp via whisper-rs, model downloaded once) turns it into `{from, text}`. Route `heard` sends it to Vesper. The speaker's identity travels with the utterance.
 
 ## Memory
@@ -108,7 +108,15 @@ The system prompt makes her recall about a speaker before answering, and write d
 
 ## Users
 
-The room server keeps users (`room adduser <name>` prompts for a password; argon2), a session cookie, and presence. It talks to the hub as one principal (`client:room`) and to the node's webhooks; speakers are named inside the messages.
+The room server keeps users in `<data>/users.json` (`vesper-room adduser <name>` prompts for a password; argon2), an HttpOnly session cookie, and presence (a person is in the room while they have a connection open; coming and leaving are world events). It needs no hub principal: it only posts to the node's webhooks, and speakers are named inside the messages. The world MCP takes a bearer token (`ROOM_MCP_TOKEN`), which the cluster's `mcp "world"` block sends as a credential.
+
+### Room server interface
+
+- `POST /api/login {name, password}` sets the cookie; `POST /api/logout`; `GET /api/me`.
+- `GET /ws` (cookie): the server sends `hello {you, chat}` (recent chat), `state {t, vesper, objects, people}` every 100 ms, `chat {from, text, to?, voice?}` (from `null` for arrivals), and `speech {id, url, secs, frame, envelope, text}`. The browser sends `chat {text}`, and push-to-talk as `voice_start`, binary 16 kHz mono s16le frames, `voice_end` (or `voice_cancel`). Utterances under 0.25 s are dropped; the limit is 30 s.
+- `GET /speech/<id>.wav` (cookie): the last 32 speeches.
+- `/mcp`: the world MCP. `/assets/*`: the .glb files. Everything else: the web app.
+- Webhooks out: `<hooks>/chat {from, text}`, `<hooks>/voice {from, audio: {$blob}}`, `<hooks>/world {event: joined|left|coffee_ready, who?, text}`.
 
 ## Running
 
@@ -138,5 +146,6 @@ Implemented:
 - memory: `vesper-memory` stdio MCP server (crates/memory) with tests
 - world simulation: `vesper_room::world` (pure) with tests
 - assets: Blender scripts and the three .glb files, checked by `crates/room/tests/assets.rs`
+- room server: `vesper-room` (login, WebSocket, world MCP, Piper/silent TTS, webhooks) with tests
 
-Not yet: room server, web client, stt stage, cluster file and launcher, end-to-end tests.
+Not yet: web client, stt stage, cluster file and launcher, end-to-end tests.
