@@ -239,12 +239,13 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
   | `spawn_agent(type, prompt)` | `type` is a mixture (or bare agent type) the parent's `spawns` allows; non-blocking |
   | `send_message(to, content)` | any address |
   | `wait_for(ids)` | blocks until each child has reported |
-  | `load_tools(names)` | loads lazy tools' schemas (see [Lazy tools](#lazy-tools)); offered while any are unloaded |
+  | `load_tools(names)`, `call_tool(name, arguments)` | load lazy tools' schemas and call them (see [Lazy tools](#lazy-tools)); offered when a mixture has lazy tools |
   | `mailbox_take(name, max)` / `mailbox_peek(name, max)` | mailboxes the mixture lists |
   | `blob_get(ref)` | fetch a blob as text/base64 |
   | `list_agents`, `list_types` | |
   | `pause_agent`, `resume_agent`, `cancel_agent` | descendants only |
 
+- **Token usage** counts prompt and completion tokens, and the prompt tokens the provider served from its cache (`cached_prompt_tokens`, read from `prompt_tokens_details.cached_tokens` or DeepSeek's `prompt_cache_hit_tokens`). An agent type's `budget { cached_percent = 10 }` counts cached tokens at that percentage towards `max_tokens` (unset: 100), so budgets can track cost; cached input costs about a tenth.
 - **Budgets:** a child's token budget is carved out of the parent's (`ChildSpawned.reserved`). A child whose type has no limit gets half of what the parent has left. Depth shrinks per level; `max_children` is per agent.
 - **Placement:** an agent needs an executor only while it has work. Dormant agents keep their slot until it's needed, and are placed again when an event gives them work. Placement picks the least-loaded live node offering the exact type hash.
 
@@ -262,14 +263,17 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
 
 MCP tools are **lazy** by default: the model sees only their names until it loads them, which keeps big servers (dozens of tools) out of every prompt. `lazy = false` on an `mcp` block offers its full schemas from the start.
 
+The tools offered to the model **never change** during an agent's life. Providers cache the prompt prefix (DeepSeek and OpenAI put the tool list before the conversation), so changing the tools would make every later call re-read the whole conversation uncached. Measured on DeepSeek: 8,064 of 8,293 prompt tokens cached on a repeat; 128 after adding one tool. So:
+
+- Each LLM call offers the built-ins, the eager tools and, if there are lazy tools, `load_tools` and `call_tool`. `load_tools`' description is a fixed catalogue of every lazy tool (`- web.search: <first sentence>`).
+- `load_tools { names }` takes tool names or a server name (all its tools). The state machine resolves it itself, like `wait_for`: no node round trip. The result (`loaded …`, one JSON schema per line, `unknown: …`) goes into the conversation, where the model reads the schemas.
+- `call_tool { name, arguments }` calls a loaded tool. The state machine turns it into the call of the tool it names (same call id) when the call is dispatched. Approvals, idempotent retries and crash recovery all see the real tool. Calling a loaded lazy tool by its own name works too.
+- A lazy tool called before it's loaded doesn't run: it gets loaded, and the result is its schema and a request to call again.
 - The spec lists the lazy tool names (`Spec.lazy`); the agent's state keeps what's loaded (`Agent.loaded`), so replay, resume and forks keep it.
-- Each LLM call offers the built-ins, eager tools and loaded tools, plus `load_tools` while anything is left. `load_tools`' description is the catalogue of what's not loaded (`- web.search: <first sentence>`).
-- `load_tools { names }` takes tool names or a server name (all its tools). The state machine resolves it itself, like `wait_for`: no node round trip, and the result (`loaded: …; unknown: …`) goes into the transcript.
-- A call to a lazy tool that isn't loaded doesn't run: it gets loaded and the model is told to call again, now with the schema.
 
 ### The tool router (optional)
 
-A mixture with a `router { top_k = 3, min_score = 0.78 }` block gets matching lazy tools pre-loaded for every message the hub delivers to its agents (`send`, route deliveries, a spawn's prompt; not reports). The hub embeds the message and each unloaded tool's name and description and appends `ToolsLoaded { names }` right before the `Inbox` event, so the model sees their schemas on its first call.
+A mixture with a `router { top_k = 3, min_score = 0.78 }` block gets matching lazy tools pre-loaded for every message the hub delivers to its agents (`send`, route deliveries, a spawn's prompt; not reports). The hub embeds the message and each unloaded tool's name and description and appends `ToolsLoaded { names }` right before the `Inbox` event. The loaded schemas become a note in the conversation just before the message, so the model has them on its first call and the tool list stays the same.
 
 - Similarity is cosine over multilingual e5-small embeddings (fastembed, downloaded into `$SUBNET_MODELS`, default `subnet-models/`, on first use; the `router` cargo feature). Tool embeddings are cached. e5 puts scores in a narrow band, so `min_score` is a coarse filter: a wrong pre-load costs a few schema tokens, and a missed one is still a `load_tools` away.
 - Without a model (download failed, feature off) the router logs a warning and pre-loads nothing.

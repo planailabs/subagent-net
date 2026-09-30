@@ -356,23 +356,24 @@ fn offered(body: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn lazy_tools_are_loaded_on_demand() {
+async fn lazy_tools_are_loaded_and_called_through_call_tool() {
     let e = Env::custom(&["s", "s2"], &[], "", "").await;
     e.node("s").await;
     e.llm.push(SYS, |_| tool_call("c1", "load_tools", json!({"names": ["t.echo"]})));
-    e.llm.push(SYS, |_| tool_call("c2", "t.echo", json!({"text": "hi"})));
+    e.llm.push(SYS, |_| tool_call("c2", "call_tool", json!({"name": "t.echo", "arguments": {"text": "hi"}})));
     e.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
     e.spawn().await;
     assert_eq!(e.mail().await["content"], "echo: hi");
     let r = e.llm.requests();
     let first = offered(&r[0]);
-    assert!(!first.contains(&"t__echo".to_string()) && first.contains(&"load_tools".to_string()), "{first:?}");
+    assert!(first.contains(&"load_tools".to_string()) && first.contains(&"call_tool".to_string()) && !first.contains(&"t__echo".to_string()), "{first:?}");
     let load = r[0]["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "load_tools").unwrap();
     assert!(load["function"]["description"].as_str().unwrap().contains("- t.echo: "), "the catalogue lists it");
-    assert!(offered(&r[1]).contains(&"t__echo".to_string()), "loaded for the next call");
-    let load = r[1]["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "load_tools").unwrap();
-    let catalogue = load["function"]["description"].as_str().unwrap();
-    assert!(!catalogue.contains("t.echo") && catalogue.contains("- t.slow: "), "{catalogue}");
+    // The tool list stays byte-identical (the provider's prompt cache covers it), and the schema is in the conversation.
+    assert_eq!(r[1]["tools"], r[0]["tools"]);
+    assert_eq!(r[2]["tools"], r[0]["tools"]);
+    let loaded = r[1]["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap().to_string();
+    assert!(loaded.contains(r#""name":"t.echo""#) && loaded.contains("parameters"), "{loaded}");
 }
 
 /// Similar texts share words (hashed into a few dimensions).
@@ -402,8 +403,12 @@ async fn the_router_preloads_matching_tools() {
     // "echo" matches the echo tool's name and description; nothing else does.
     let id = e.net.spawn("tooler", "please echo this text back").await;
     e.mail().await;
-    let first = offered(&e.llm.requests()[0]);
-    assert!(first.contains(&"t__echo".to_string()), "{first:?}");
-    assert!(!first.contains(&"t__slow".to_string()), "only the top match: {first:?}");
+    let r = &e.llm.requests()[0];
+    // The matching tool's schema comes as a note before the message; the tool list doesn't change.
+    let note = r["messages"].as_array().unwrap().iter().find(|m| m["content"].as_str().is_some_and(|c| c.starts_with("[tools loaded"))).expect("a note");
+    let note = note["content"].as_str().unwrap();
+    assert!(note.contains(r#""name":"t.echo""#), "{note}");
+    assert!(!note.contains("t.slow"), "only the top match: {note}");
+    assert!(!offered(r).contains(&"t__echo".to_string()));
     let _ = id;
 }

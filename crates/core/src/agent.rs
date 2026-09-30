@@ -16,6 +16,8 @@ use crate::chat::{Accumulator, Delta, Message, ToolCall, ToolDef, Usage};
 pub const WAIT_FOR: &str = "wait_for";
 /// Loads lazy tools' schemas; resolved by the state machine itself.
 pub const LOAD_TOOLS: &str = "load_tools";
+/// Calls a lazy tool; its schema came into the conversation when it was loaded.
+pub const CALL_TOOL: &str = "call_tool";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Budget {
@@ -27,6 +29,17 @@ pub struct Budget {
     pub max_depth: u32,
     #[serde(default)]
     pub max_children: u32,
+    /// How much a prompt token served from the provider's cache counts
+    /// towards `max_tokens`, in percent (unset: 100). Cached input costs a
+    /// fraction (DeepSeek: about a tenth), so 10 makes budgets track cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_percent: Option<u32>,
+}
+
+impl Budget {
+    pub fn used(&self, u: &Usage) -> u64 {
+        u.weighted(self.cached_percent.unwrap_or(100))
+    }
 }
 
 /// What an agent is, fixed when it is created (stored beside the log).
@@ -252,6 +265,9 @@ pub struct Agent {
     /// Lazy tools whose schemas the model has been given.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub loaded: BTreeSet<String>,
+    /// Schemas the router loaded, shown to the model with the next message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl Agent {
@@ -270,6 +286,7 @@ impl Agent {
             usage: Usage::default(),
             reserved: 0,
             loaded: BTreeSet::new(),
+            notes: vec![],
         }
     }
 
@@ -315,17 +332,24 @@ impl Agent {
         }
     }
 
-    /// Tool calls waiting for approval.
-    pub fn awaiting_approval(&self) -> Vec<&ToolCall> {
+    /// Tool calls waiting for approval (as they'll run: call_tool resolved).
+    pub fn awaiting_approval(&self) -> Vec<ToolCall> {
         match &self.phase {
-            Phase::Tools { calls } => calls.iter().filter(|c| c.state == CallState::Approval).map(|c| &c.call).collect(),
+            Phase::Tools { calls } => calls
+                .iter()
+                .filter(|c| c.state == CallState::Approval)
+                .map(|c| match translate(&self.spec, &self.loaded, &c.call) {
+                    Dispatch::Run(call) => call,
+                    _ => c.call.clone(),
+                })
+                .collect(),
             _ => vec![],
         }
     }
 
     /// Tokens left for this agent and future children; `None` = unlimited.
     pub fn remaining_tokens(&self) -> Option<u64> {
-        self.spec.budget.max_tokens.map(|m| m.saturating_sub(self.usage.total() + self.reserved))
+        self.spec.budget.max_tokens.map(|m| m.saturating_sub(self.spec.budget.used(&self.usage) + self.reserved))
     }
 
     /// True when something is running on the spawner for this agent.
@@ -373,29 +397,37 @@ impl Agent {
         self.spec.tools.iter().filter(|t| self.spec.lazy.contains(&t.name) && !self.loaded.contains(&t.name)).collect()
     }
 
-    /// The tools for the next LLM call: eager and loaded ones, plus
-    /// `load_tools` (with a catalogue of the rest) while any are left.
+    /// The tools offered to the model. They never change during an
+    /// agent's life, so the provider's prompt cache (which covers the tool
+    /// list and then the conversation) stays valid: eager tools, plus
+    /// `load_tools` (a fixed catalogue of every lazy tool) and `call_tool`
+    /// when there are lazy tools. Loaded schemas live in the conversation.
     pub fn offered_tools(&self) -> Vec<ToolDef> {
-        let lazy = self.unloaded();
-        let mut tools: Vec<ToolDef> = self.spec.tools.iter().filter(|t| !lazy.iter().any(|l| l.name == t.name)).cloned().collect();
+        let mut tools: Vec<ToolDef> = self.spec.tools.iter().filter(|t| !self.spec.lazy.contains(&t.name)).cloned().collect();
+        let lazy: Vec<&ToolDef> = self.spec.tools.iter().filter(|t| self.spec.lazy.contains(&t.name)).collect();
         if !lazy.is_empty() {
             let catalogue: Vec<String> = lazy.iter().map(|t| format!("- {}: {}", t.name, first_sentence(&t.description))).collect();
             tools.push(ToolDef {
                 name: LOAD_TOOLS.into(),
                 description: format!(
-                    "Load tools before using them: pass tool names, or a server name for all its tools. Their full descriptions and parameters are then available. Not loaded yet:\n{}",
+                    "Load tools before using them: pass tool names, or a server name for all its tools. You get their full descriptions and parameters; then call them with call_tool. Available:\n{}",
                     catalogue.join("\n")
                 ),
                 parameters: json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"}}},"required":["names"]}),
+            });
+            tools.push(ToolDef {
+                name: CALL_TOOL.into(),
+                description: "Call a tool you loaded with load_tools: its name and its arguments (an object matching the parameters load_tools showed).".into(),
+                parameters: json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"]}),
             });
         }
         tools
     }
 
-    /// Loads lazy tools by name, or a whole server by `<mcp>`; returns what
-    /// was loaded and what's unknown.
+    /// Lazy tools matching names (tool names, or a server name for all its
+    /// tools); returns the matches (loading them) and the unknown names.
     fn load(&mut self, names: &[String]) -> (Vec<String>, Vec<String>) {
-        let (mut loaded, mut unknown) = (vec![], vec![]);
+        let (mut matched, mut unknown) = (vec![], vec![]);
         for n in names {
             let n = &self.canonical(n).replace("__", ".");
             let matching: Vec<String> = self
@@ -412,12 +444,23 @@ impl Agent {
                 continue;
             }
             for t in matching {
-                if self.loaded.insert(t.clone()) {
-                    loaded.push(t);
+                self.loaded.insert(t.clone());
+                if !matched.contains(&t) {
+                    matched.push(t);
                 }
             }
         }
-        (loaded, unknown)
+        (matched, unknown)
+    }
+
+    /// Full schemas of tools, one JSON object per line.
+    fn schemas(&self, names: &[String]) -> String {
+        names
+            .iter()
+            .filter_map(|n| self.spec.tools.iter().find(|t| &t.name == n))
+            .map(|t| json!({"name": t.name, "description": t.description, "parameters": t.parameters}).to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn load_call(&mut self, call: &ToolCall) -> String {
@@ -429,10 +472,14 @@ impl Agent {
             Ok(a) => a,
             Err(e) => return format!("error: bad arguments: {e}"),
         };
-        let (loaded, unknown) = self.load(&args.names);
-        let mut out = if loaded.is_empty() { "nothing new to load".to_string() } else { format!("loaded: {}", loaded.join(", ")) };
+        let (matched, unknown) = self.load(&args.names);
+        let mut out = if matched.is_empty() {
+            "nothing loaded".to_string()
+        } else {
+            format!("loaded {}; call them with call_tool {{\"name\", \"arguments\"}}:\n{}", matched.join(", "), self.schemas(&matched))
+        };
         if !unknown.is_empty() {
-            out.push_str(&format!("; unknown: {}", unknown.join(", ")));
+            out.push_str(&format!("\nunknown: {}", unknown.join(", ")));
         }
         out
     }
@@ -467,6 +514,7 @@ impl Agent {
                 if let Some(u) = self.acc.usage.take() {
                     self.usage.prompt_tokens += u.prompt_tokens;
                     self.usage.completion_tokens += u.completion_tokens;
+                    self.usage.cached_prompt_tokens += u.cached_prompt_tokens;
                 }
                 let mut msg = self.acc.finish();
                 self.acc = Accumulator::default();
@@ -547,7 +595,14 @@ impl Agent {
             }
             Event::Recovered => fx = self.recover(),
             Event::ToolsLoaded { names } => {
-                self.load(names);
+                let fresh: Vec<String> = names.iter().map(|n| self.canonical(n)).filter(|n| self.spec.lazy.contains(n) && !self.loaded.contains(n)).collect();
+                let (matched, _) = self.load(&fresh);
+                if !matched.is_empty() {
+                    self.notes.push(format!(
+                        "[tools loaded for the next message; call them with call_tool {{\"name\", \"arguments\"}}]\n{}",
+                        self.schemas(&matched)
+                    ));
+                }
             }
             Event::Cancelled => {
                 if self.terminal() {
@@ -580,7 +635,7 @@ impl Agent {
                 Phase::Thinking { running: false } => {
                     self.inject_pending();
                     if self.remaining_tokens() == Some(0) {
-                        let used = self.usage.total() + self.reserved;
+                        let used = self.spec.budget.used(&self.usage) + self.reserved;
                         self.fail(format!("token budget exhausted ({used} used or reserved for children)"), fx);
                         return;
                     }
@@ -593,10 +648,23 @@ impl Agent {
                     let mut errors = vec![];
                     let mut loads = vec![];
                     for c in calls.iter_mut() {
+                        // What actually runs: call_tool becomes the tool it names.
+                        let run = match translate(&self.spec, &self.loaded, &c.call) {
+                            Dispatch::Run(call) => call,
+                            Dispatch::Load(_) if matches!(c.state, CallState::Queued { .. }) => {
+                                loads.push(c.call.clone());
+                                continue;
+                            }
+                            Dispatch::Fail(e) if matches!(c.state, CallState::Queued { .. }) => {
+                                errors.push((c.call.id.clone(), e));
+                                continue;
+                            }
+                            _ => continue,
+                        };
                         match c.state.clone() {
                             CallState::Approved => {
                                 c.state = CallState::Running;
-                                fx.push(Effect::CallTool { call: c.call.clone(), retry: false });
+                                fx.push(Effect::CallTool { call: run, retry: false });
                             }
                             CallState::Queued { retry } if c.call.function.name == WAIT_FOR => {
                                 match Self::wait_ids(&self.children, &c.call) {
@@ -606,17 +674,13 @@ impl Agent {
                                 let _ = retry;
                             }
                             CallState::Queued { .. } if c.call.function.name == LOAD_TOOLS => loads.push(c.call.clone()),
-                            // Called without its schema: load it, and have the model call again.
-                            CallState::Queued { .. } if self.spec.lazy.contains(&c.call.function.name) && !self.loaded.contains(&c.call.function.name) => {
-                                loads.push(c.call.clone())
-                            }
-                            CallState::Queued { retry: false } if self.spec.approve.contains(&c.call.function.name) => {
+                            CallState::Queued { retry: false } if self.spec.approve.contains(&run.function.name) => {
                                 c.state = CallState::Approval;
-                                fx.push(Effect::RequestApproval { call: c.call.clone() });
+                                fx.push(Effect::RequestApproval { call: run });
                             }
                             CallState::Queued { retry } => {
                                 c.state = CallState::Running;
-                                fx.push(Effect::CallTool { call: c.call.clone(), retry });
+                                fx.push(Effect::CallTool { call: run, retry });
                             }
                             _ => {}
                         }
@@ -625,11 +689,16 @@ impl Agent {
                         self.finish_call(&id, e);
                     }
                     for call in loads {
-                        let result = if call.function.name == LOAD_TOOLS {
-                            self.load_call(&call)
-                        } else {
-                            self.load(std::slice::from_ref(&call.function.name));
-                            format!("error: {} wasn't loaded, so it didn't run. It is loaded now; call it again with its parameters.", call.function.name)
+                        let result = match translate(&self.spec, &self.loaded, &call) {
+                            _ if call.function.name == LOAD_TOOLS => self.load_call(&call),
+                            Dispatch::Load(name) => {
+                                self.load(std::slice::from_ref(&name));
+                                format!(
+                                    "error: {name} wasn't loaded, so it didn't run. Here is its schema; call it again with call_tool {{\"name\", \"arguments\"}}:\n{}",
+                                    self.schemas(std::slice::from_ref(&name))
+                                )
+                            }
+                            _ => unreachable!("only loads are collected"),
                         };
                         self.finish_call(&call.id, result);
                     }
@@ -713,6 +782,9 @@ impl Agent {
 
     /// Moves queued input into the transcript right before an LLM call.
     fn inject_pending(&mut self) {
+        for note in std::mem::take(&mut self.notes) {
+            self.messages.push(Message::user(note));
+        }
         for Queued { from, content, reply } in std::mem::take(&mut self.inbox) {
             let kind = if reply { "reply" } else { "message" };
             self.messages.push(Message::user(match &from {
@@ -756,6 +828,57 @@ impl Agent {
         }
         fx.push(Effect::Report { to: to.into_iter().collect(), status, content });
     }
+}
+
+/// How a tool call is carried out.
+enum Dispatch {
+    /// Run this call (for call_tool: the call of the tool it names).
+    Run(ToolCall),
+    /// A lazy tool that isn't loaded: load it and show the schema instead.
+    Load(String),
+    Fail(String),
+}
+
+/// Resolves `call_tool` (and direct calls of lazy tools) to what runs. Pure:
+/// replicas resolve the same calls the same way.
+fn translate(spec: &Spec, loaded: &BTreeSet<String>, call: &ToolCall) -> Dispatch {
+    let canonical = |n: &str| -> String {
+        if spec.tools.iter().any(|t| t.name == n) {
+            return n.to_string();
+        }
+        spec.tools.iter().find(|t| t.name.replace('.', "__") == n).map(|t| t.name.clone()).unwrap_or_else(|| n.to_string())
+    };
+    let lazy_or_run = |name: String, arguments: String, id: &str| {
+        if spec.lazy.contains(&name) && !loaded.contains(&name) {
+            Dispatch::Load(name)
+        } else {
+            Dispatch::Run(ToolCall { id: id.to_string(), kind: call.kind.clone(), function: crate::chat::FunctionCall { name, arguments } })
+        }
+    };
+    if call.function.name != CALL_TOOL {
+        return lazy_or_run(canonical(&call.function.name), call.function.arguments.clone(), &call.id);
+    }
+    #[derive(Deserialize)]
+    struct Args {
+        name: String,
+        #[serde(default)]
+        arguments: Value,
+    }
+    let a: Args = match serde_json::from_str(&call.function.arguments) {
+        Ok(a) => a,
+        Err(e) => return Dispatch::Fail(format!("error: bad arguments: {e}")),
+    };
+    let name = canonical(&a.name);
+    if !spec.tools.iter().any(|t| t.name == name) || name == CALL_TOOL || name == LOAD_TOOLS {
+        return Dispatch::Fail(format!("error: there's no tool {:?} to call (load_tools lists them)", a.name));
+    }
+    // Arguments may come as an object or as a JSON string holding one.
+    let args = match a.arguments {
+        Value::Null => "{}".to_string(),
+        Value::String(s) => s,
+        v => v.to_string(),
+    };
+    lazy_or_run(name, args, &call.id)
 }
 
 /// Up to the first sentence end (or 120 characters) of a description.

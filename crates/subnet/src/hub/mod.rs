@@ -1042,6 +1042,7 @@ impl Hub {
                     return bad("token budget exhausted");
                 }
                 let budget = Budget {
+                    cached_percent: def.budget.cached_percent,
                     max_tokens,
                     max_depth: def.budget.max_depth.min(pb.max_depth - 1),
                     max_children: def.budget.max_children,

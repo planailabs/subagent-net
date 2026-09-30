@@ -569,7 +569,7 @@ fn token_budget_fails_the_agent() {
     let mut h = H::new(Spec { budget: Budget { max_tokens: Some(10), ..Default::default() }, ..spec() });
     h.user("x");
     h.ev(Event::LlmDelta {
-        delta: Delta { usage: Some(Usage { prompt_tokens: 8, completion_tokens: 4 }), ..Default::default() },
+        delta: Delta { usage: Some(Usage { prompt_tokens: 8, completion_tokens: 4, ..Default::default() }), ..Default::default() },
     });
     h.call(0, "c1", "a", "{}");
     h.done();
@@ -651,62 +651,109 @@ fn names(tools: &[ToolDef]) -> Vec<&str> {
 }
 
 #[test]
-fn lazy_tools_are_catalogued_until_loaded() {
+fn the_offered_tools_never_change() {
+    // The provider caches the tool list and the conversation after it: any
+    // change to the tools would throw the whole cached conversation away.
     let mut h = H::new(lazy_spec());
-    let offered = h.a.offered_tools();
-    assert_eq!(names(&offered), ["world.say", LOAD_TOOLS]);
-    let load = &offered[1].description;
+    let before = h.a.offered_tools();
+    assert_eq!(names(&before), ["world.say", LOAD_TOOLS, CALL_TOOL]);
+    let load = &before[1].description;
     assert!(load.contains("- web.search: Search the web.") && load.contains("- web.scrape: Read a page."), "{load}");
     h.user("find it");
     h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web.search","nope"]}"#);
-    // Resolved by the state machine itself: straight on to the next LLM call.
-    assert_eq!(h.done(), vec![Effect::CallLlm]);
-    assert_eq!(h.contents().last().unwrap().1, "loaded: web.search; unknown: nope");
-    assert_eq!(names(&h.a.offered_tools()), ["world.say", "web.search", LOAD_TOOLS]);
-    // A whole server at once; then nothing is left to load.
-    h.call(0, "c2", LOAD_TOOLS, r#"{"names":["web"]}"#);
-    h.done();
-    assert_eq!(h.contents().last().unwrap().1, "loaded: web.scrape");
-    assert_eq!(names(&h.a.offered_tools()), ["world.say", "web.search", "web.scrape"]);
+    assert_eq!(h.done(), vec![Effect::CallLlm], "resolved by the state machine itself");
+    let result = h.contents().last().unwrap().1.clone();
+    assert!(result.starts_with("loaded web.search; call them with call_tool"), "{result}");
+    assert!(result.contains(r#""name":"web.search""#) && result.contains(r#""parameters""#), "the schema is in the conversation: {result}");
+    assert!(result.ends_with("unknown: nope"), "{result}");
+    assert_eq!(h.a.offered_tools(), before);
+    h.ev(Event::ToolsLoaded { names: vec!["web.scrape".into()] });
+    assert_eq!(h.a.offered_tools(), before);
     h.crash();
 }
 
 #[test]
-fn calling_an_unloaded_tool_loads_it_and_asks_again() {
+fn call_tool_runs_the_tool_it_names() {
     let mut h = H::new(lazy_spec());
-    h.user("find it");
-    h.call(0, "c1", "web.search", r#"{"q":"x"}"#);
-    h.call(1, "c2", "world.say", r#"{}"#);
+    h.user("go");
+    h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web"]}"#);
+    h.done();
+    assert!(h.a.loaded.contains("web.search") && h.a.loaded.contains("web.scrape"), "a server loads all its tools");
+    h.call(0, "c2", CALL_TOOL, r#"{"name":"web__search","arguments":{"q":"sei"}}"#);
+    let call = tool_effect(&h.done());
+    assert_eq!((call.id.as_str(), call.function.name.as_str(), call.function.arguments.as_str()), ("c2", "web.search", r#"{"q":"sei"}"#));
+    assert_eq!(h.result("c2", "hits"), vec![Effect::CallLlm]);
+    assert_eq!(h.contents().last().unwrap().1, "hits", "the result answers the call_tool call");
+    // Arguments as a JSON string work too; unknown tools are an error.
+    h.call(0, "c3", CALL_TOOL, r#"{"name":"web.scrape","arguments":"{\"url\":\"x\"}"}"#);
+    h.call(1, "c4", CALL_TOOL, r#"{"name":"rm_rf","arguments":{}}"#);
     let fx = h.done();
-    assert_eq!(tool_effect(&fx).function.name, "world.say", "only the loaded tool runs");
-    assert!(h.contents().iter().any(|(_, c)| c.contains("web.search wasn't loaded")));
-    assert!(h.a.loaded.contains("web.search"));
-    assert_eq!(h.result("c2", "ok"), vec![Effect::CallLlm]);
+    assert_eq!(tool_effect(&fx).function.arguments, r#"{"url":"x"}"#);
+    assert!(h.contents().iter().any(|(_, c)| c.contains("there's no tool \"rm_rf\"")));
+    h.crash();
 }
 
 #[test]
-fn the_router_preloads_and_bad_args_are_errors() {
+fn unloaded_tools_answer_with_their_schema() {
+    let mut h = H::new(lazy_spec());
+    h.user("find it");
+    // Through call_tool, and by its own name: neither runs before it's loaded.
+    h.call(0, "c1", CALL_TOOL, r#"{"name":"web.search","arguments":{"q":"x"}}"#);
+    h.call(1, "c2", "world.say", r#"{}"#);
+    let fx = h.done();
+    assert_eq!(tool_effect(&fx).function.name, "world.say", "only the loaded tool runs");
+    let msg = h.contents().iter().find(|(_, c)| c.contains("web.search wasn't loaded")).unwrap().1.clone();
+    assert!(msg.contains(r#""name":"web.search""#), "{msg}");
+    assert!(h.a.loaded.contains("web.search"));
+    h.result("c2", "ok");
+    // Once loaded, calling it by name works as well.
+    h.call(0, "c3", "web__search", r#"{"q":"y"}"#);
+    assert_eq!(tool_effect(&h.done()).function.name, "web.search");
+    h.crash();
+}
+
+#[test]
+fn approvals_see_the_real_tool() {
+    let mut h = H::new(Spec { approve: vec!["web.scrape".into()], ..lazy_spec() });
+    h.user("go");
+    h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web.scrape"]}"#);
+    h.done();
+    h.call(0, "c2", CALL_TOOL, r#"{"name":"web.scrape","arguments":{"url":"u"}}"#);
+    let fx = h.done();
+    assert!(matches!(&fx[..], [Effect::RequestApproval { call }] if call.function.name == "web.scrape"), "{fx:?}");
+    assert_eq!(h.a.awaiting_approval()[0].function.name, "web.scrape");
+    let fx = h.ev(Event::Approval { call_id: "c2".into(), approved: true });
+    assert_eq!(tool_effect(&fx).function.name, "web.scrape");
+}
+
+#[test]
+fn the_router_preloads_with_a_note() {
     let mut h = H::new(lazy_spec());
     assert!(h.ev(Event::ToolsLoaded { names: vec!["web.scrape".into(), "world.say".into(), "bogus".into()] }).is_empty());
     assert_eq!(h.a.loaded, BTreeSet::from(["web.scrape".to_string()]), "only lazy tools count as loaded");
-    h.user("go");
+    h.user("read this page");
+    let msgs = h.contents();
+    assert!(msgs[0].1.starts_with("[tools loaded for the next message") && msgs[0].1.contains(r#""name":"web.scrape""#), "{msgs:?}");
+    assert_eq!(msgs[1].1, "read this page");
+    // Loading it again adds no second note.
+    h.ev(Event::ToolsLoaded { names: vec!["web.scrape".into()] });
+    assert!(h.a.notes.is_empty());
     h.call(0, "c1", LOAD_TOOLS, "not json");
     h.done();
     assert!(h.contents().last().unwrap().1.starts_with("error: bad arguments"));
     h.crash();
-    // Nothing lazy: no load_tools.
-    assert!(!names(&H::new(spec()).a.offered_tools()).contains(&LOAD_TOOLS));
+    assert!(!names(&H::new(spec()).a.offered_tools()).contains(&LOAD_TOOLS), "nothing lazy: no load_tools");
 }
 
 #[test]
-fn wire_names_are_understood() {
-    let mut h = H::new(lazy_spec());
-    h.user("go");
-    // load_tools by wire name, then the tool called by its wire name.
-    h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web__search"]}"#);
+fn cached_prompt_tokens_count_at_their_weight() {
+    let u = Usage { prompt_tokens: 1000, completion_tokens: 50, cached_prompt_tokens: 900 };
+    assert_eq!(u.weighted(100), 1050);
+    assert_eq!(u.weighted(10), 100 + 90 + 50);
+    let mut h = H::new(Spec { budget: Budget { max_tokens: Some(1000), cached_percent: Some(10), ..Default::default() }, ..spec() });
+    h.user("hi");
+    h.ev(Event::LlmDelta { delta: Delta { content: Some("ok".into()), usage: Some(u), ..Default::default() } });
     h.done();
-    assert_eq!(h.contents().last().unwrap().1, "loaded: web.search");
-    h.call(0, "c2", "web__search", r#"{}"#);
-    assert_eq!(tool_effect(&h.done()).function.name, "web.search");
-    h.crash();
+    assert_eq!(h.a.usage.cached_prompt_tokens, 900);
+    assert_eq!(h.a.remaining_tokens(), Some(1000 - 240), "900 cached tokens count as 90");
 }

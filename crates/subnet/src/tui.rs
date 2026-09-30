@@ -260,7 +260,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         ]));
         let pause = s.pause.map(|p| format!(" · pause {p:?}").to_lowercase()).unwrap_or_default();
         lines.push(Line::styled(
-            format!("{}{pause} · node {} · {} tokens", s.phase, s.node.as_deref().unwrap_or("–"), s.usage.total()),
+            format!(
+                "{}{pause} · node {} · {} tokens{}",
+                s.phase,
+                s.node.as_deref().unwrap_or("–"),
+                s.usage.total(),
+                if s.usage.cached_prompt_tokens > 0 { format!(" ({} cached)", s.usage.cached_prompt_tokens) } else { String::new() }
+            ),
             dim,
         ));
         if let Some(c) = &s.awaiting_approval {
@@ -420,8 +426,8 @@ mod tests {
             pause: None,
             paused: false,
             node: None,
-            usage: Usage { prompt_tokens: 30, completion_tokens: 20 },
-            budget: Budget { max_tokens: Some(100), max_depth: 0, max_children: 0 },
+            usage: Usage { prompt_tokens: 30, completion_tokens: 20, ..Default::default() },
+            budget: Budget { max_tokens: Some(100), ..Default::default() },
             reserved: 0,
             seq: 1,
             awaiting_approval: None,

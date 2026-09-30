@@ -180,9 +180,18 @@ struct Chunk {
     #[serde(default)]
     choices: Vec<Choice>,
     #[serde(default)]
-    usage: Option<Usage>,
+    usage: Option<Value>,
     #[serde(default)]
     error: Option<Value>,
+}
+
+/// Token usage, with the prompt tokens served from the provider's cache:
+/// OpenAI reports `prompt_tokens_details.cached_tokens`, DeepSeek also
+/// `prompt_cache_hit_tokens`.
+fn usage(u: &Value) -> Usage {
+    let n = |v: &Value| v.as_u64().unwrap_or(0);
+    let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64().or_else(|| u["prompt_cache_hit_tokens"].as_u64()).unwrap_or(0);
+    Usage { prompt_tokens: n(&u["prompt_tokens"]), completion_tokens: n(&u["completion_tokens"]), cached_prompt_tokens: cached }
 }
 
 #[derive(Deserialize)]
@@ -231,7 +240,7 @@ pub fn parse_chunk(data: &str) -> Result<Delta, Error> {
     if let Some(e) = c.error {
         return Err(Error::Provider(e));
     }
-    let mut d = Delta { usage: c.usage, ..Default::default() };
+    let mut d = Delta { usage: c.usage.as_ref().filter(|u| u.is_object()).map(usage), ..Default::default() };
     if let Some(ch) = c.choices.into_iter().next() {
         d.content = ch.delta.content.filter(|s| !s.is_empty());
         d.finish_reason = ch.finish_reason;
@@ -282,7 +291,18 @@ mod tests {
     fn parses_usage_only_chunk() {
         let d = parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#)
             .unwrap();
-        assert_eq!(d.usage, Some(Usage { prompt_tokens: 5, completion_tokens: 2 }));
+        assert_eq!(d.usage, Some(Usage { prompt_tokens: 5, completion_tokens: 2, ..Default::default() }));
+    }
+
+    #[test]
+    fn cached_prompt_tokens_are_read() {
+        // DeepSeek's shape (both fields), and OpenAI's.
+        let d = parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":8293,"completion_tokens":1,"prompt_cache_hit_tokens":8064,"prompt_cache_miss_tokens":229,"prompt_tokens_details":{"cached_tokens":8064}}}"#).unwrap();
+        assert_eq!(d.usage.unwrap().cached_prompt_tokens, 8064);
+        let d = parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":1536}}}"#).unwrap();
+        assert_eq!(d.usage.unwrap().cached_prompt_tokens, 1536);
+        let d = parse_chunk(r#"{"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":10,"prompt_cache_hit_tokens":0}}"#).unwrap();
+        assert_eq!(d.usage.unwrap().cached_prompt_tokens, 0);
     }
 
     #[test]

@@ -102,11 +102,25 @@ pub struct Usage {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    /// Prompt tokens the provider served from its cache (part of
+    /// `prompt_tokens`, billed much cheaper).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cached_prompt_tokens: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl Usage {
     pub fn total(&self) -> u64 {
         self.prompt_tokens + self.completion_tokens
+    }
+
+    /// Tokens with cached prompt tokens counted at `cached_percent` %.
+    pub fn weighted(&self, cached_percent: u32) -> u64 {
+        let cached = self.cached_prompt_tokens.min(self.prompt_tokens);
+        self.prompt_tokens - cached + (cached * cached_percent as u64).div_ceil(100) + self.completion_tokens
     }
 }
 
@@ -279,7 +293,7 @@ mod tests {
     #[test]
     fn keeps_last_usage() {
         let mut a = Accumulator::default();
-        a.push(&Delta { usage: Some(Usage { prompt_tokens: 3, completion_tokens: 4 }), ..Default::default() });
+        a.push(&Delta { usage: Some(Usage { prompt_tokens: 3, completion_tokens: 4, ..Default::default() }), ..Default::default() });
         assert_eq!(a.usage.unwrap().total(), 7);
     }
 
