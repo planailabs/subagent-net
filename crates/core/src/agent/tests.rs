@@ -783,3 +783,18 @@ fn two_calls_of_one_unloaded_tool() {
     assert_eq!(h.contents().iter().filter(|(_, c)| c.contains("web.search wasn't loaded")).count(), 2);
     h.crash();
 }
+
+#[test]
+fn a_panic_while_applying_fails_only_that_agent() {
+    let mut h = H::new(spec());
+    h.user("hi");
+    h.text("partial");
+    let fx = h.user("\u{0}panic");
+    assert!(matches!(&h.a.phase, Phase::Failed { error } if error.contains("internal error applying a inbox event: test panic")), "{:?}", h.a.phase);
+    assert!(matches!(&fx[..], [Effect::AbortInflight, Effect::Report { status: Status::Failed, .. }]), "{fx:?}");
+    assert!(!in_guarded_apply(), "the guard is released");
+    // Replaying the same log fails the same way, and the agent can be resumed.
+    let replayed = Agent::replay(h.a.id, h.a.spec.clone(), &h.log);
+    assert_eq!(replayed.phase, h.a.phase);
+    assert_eq!(h.resume(), vec![Effect::CallLlm]);
+}

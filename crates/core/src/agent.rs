@@ -497,7 +497,41 @@ impl Agent {
         matches!(self.phase, Phase::Failed { .. } | Phase::Cancelled)
     }
 
+    /// Folds one event into the state and returns the effects it calls for.
+    ///
+    /// A panic here is a bug. It must not take the hub or a node down with
+    /// it (every agent there shares the process), so it's caught: the agent
+    /// fails with an internal error, its askers hear about it, and anything
+    /// in flight is aborted. Replicas run the same code, so they fail the
+    /// same way. The state isn't copied beforehand (that would cost a copy
+    /// of the transcript per streamed delta); a failed agent can be resumed.
     pub fn apply(&mut self, ev: &Event) -> Vec<Effect> {
+        GUARDED.with(|g| g.set(g.get() + 1));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.apply_inner(ev)));
+        GUARDED.with(|g| g.set(g.get() - 1));
+        match r {
+            Ok(fx) => fx,
+            Err(payload) => {
+                let msg = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "?".into());
+                let kind = serde_json::to_value(ev).ok().and_then(|v| v["type"].as_str().map(String::from)).unwrap_or_default();
+                let mut fx = vec![];
+                if self.inflight() {
+                    fx.push(Effect::AbortInflight);
+                }
+                self.acc.tool_calls.clear();
+                self.fail(format!("internal error applying a {kind} event: {msg} (a bug in subnet)"), &mut fx);
+                fx
+            }
+        }
+    }
+
+    fn apply_inner(&mut self, ev: &Event) -> Vec<Effect> {
+        #[cfg(test)]
+        if let Event::Inbox { content, .. } = ev
+            && content == "\u{0}panic"
+        {
+            panic!("test panic");
+        }
         let mut fx = vec![];
         let thinking = matches!(self.phase, Phase::Thinking { .. });
         match ev {
@@ -842,6 +876,16 @@ impl Agent {
         }
         fx.push(Effect::Report { to: to.into_iter().collect(), status, content });
     }
+}
+
+thread_local! {
+    static GUARDED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread is inside `Agent::apply`, whose panics are caught
+/// (for panic hooks that stop the process on uncaught panics).
+pub fn in_guarded_apply() -> bool {
+    GUARDED.with(|g| g.get() > 0)
 }
 
 /// How a tool call is carried out.

@@ -245,6 +245,7 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
   | `list_agents`, `list_types` | |
   | `pause_agent`, `resume_agent`, `cancel_agent` | descendants only |
 
+- **Bugs in the state machine stay contained:** a panic in `Agent::apply` is caught. That agent fails with an internal error (its askers get the failure, in-flight work is aborted), and the hub, the node and every other agent carry on. Replicas and replays run the same code, so they fail the same way; the agent can be resumed. `subnet_core::agent::in_guarded_apply()` lets a process-wide panic hook tell these apart from uncaught panics.
 - **Token usage** counts prompt and completion tokens, and the prompt tokens the provider served from its cache (`cached_prompt_tokens`, read from `prompt_tokens_details.cached_tokens` or DeepSeek's `prompt_cache_hit_tokens`). An agent type's `budget { cached_percent = 10 }` counts cached tokens at that percentage towards `max_tokens` (unset: 100), so budgets can track cost; cached input costs about a tenth.
 - **Budgets:** a child's token budget is carved out of the parent's (`ChildSpawned.reserved`). A child whose type has no limit gets half of what the parent has left. Depth shrinks per level; `max_children` is per agent.
 - **Placement:** an agent needs an executor only while it has work. Dormant agents keep their slot until it's needed, and are placed again when an event gives them work. Placement picks the least-loaded live node offering the exact type hash.
