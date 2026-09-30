@@ -77,6 +77,7 @@ impl Client {
     }
 
     /// Request body. A trailing assistant message is a partial answer to continue.
+    /// Tool names go out in their wire form (see [`wire_name`]).
     pub fn body(&self, messages: &[Message], tools: &[ToolDef]) -> Value {
         let mut messages = messages.to_vec();
         let mut body = self.cfg.params.clone();
@@ -93,13 +94,21 @@ impl Client {
             }
         }
         body.insert("model".into(), json!(self.cfg.model));
-        body.insert("messages".into(), json!(messages));
+        let mut messages = json!(messages);
+        for m in messages.as_array_mut().into_iter().flatten() {
+            for c in m.get_mut("tool_calls").and_then(Value::as_array_mut).into_iter().flatten() {
+                if let Some(Value::String(n)) = c.pointer_mut("/function/name") {
+                    *n = wire_name(n);
+                }
+            }
+        }
+        body.insert("messages".into(), messages);
         body.insert("stream".into(), json!(true));
         body.insert("stream_options".into(), json!({"include_usage": true}));
         if !tools.is_empty() {
             let tools: Vec<Value> = tools
                 .iter()
-                .map(|t| json!({"type":"function","function":{"name":t.name,"description":t.description,"parameters":t.parameters}}))
+                .map(|t| json!({"type":"function","function":{"name":wire_name(&t.name),"description":t.description,"parameters":t.parameters}}))
                 .collect();
             body.insert("tools".into(), json!(tools));
         }
@@ -111,6 +120,9 @@ impl Client {
     /// caller keeps the partial and decides).
     pub async fn stream(&self, messages: &[Message], tools: &[ToolDef]) -> Result<DeltaStream, Error> {
         let body = self.body(messages, tools);
+        // The model answers with wire names; map them back.
+        let names: std::sync::Arc<std::collections::HashMap<String, String>> =
+            std::sync::Arc::new(tools.iter().map(|t| (wire_name(&t.name), t.name.clone())).collect());
         let url = format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'));
         let mut attempt = 0;
         let resp = loop {
@@ -134,6 +146,16 @@ impl Client {
                     Ok(e) if e.data.trim().is_empty() => None,
                     Ok(e) => Some(parse_chunk(&e.data)),
                 }
+            })
+            .map(move |d| {
+                d.map(|mut d| {
+                    for c in &mut d.tool_calls {
+                        if let Some(n) = c.name.as_mut().and_then(|n| names.get(n.as_str()).map(|real| (n, real))) {
+                            *n.0 = n.1.clone();
+                        }
+                    }
+                    d
+                })
             })
             .boxed())
     }
@@ -195,6 +217,13 @@ struct WireFunctionDelta {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+}
+
+/// A tool name as OpenAI-compatible APIs accept it (`^[a-zA-Z0-9_-]+$`):
+/// subnet's `<mcp>.<tool>` becomes `<mcp>__<tool>`, anything else outside
+/// the set becomes `_`.
+pub fn wire_name(name: &str) -> String {
+    name.replace('.', "__").chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
 pub fn parse_chunk(data: &str) -> Result<Delta, Error> {
@@ -259,6 +288,19 @@ mod tests {
     #[test]
     fn provider_error_in_stream() {
         assert!(matches!(parse_chunk(r#"{"error":{"message":"overloaded"}}"#), Err(Error::Provider(_))));
+    }
+
+    #[test]
+    fn tool_names_go_out_in_wire_form() {
+        let tools = [ToolDef { name: "world.say".into(), description: "d".into(), parameters: json!({"type":"object"}) }];
+        use subnet_core::chat::{FunctionCall, ToolCall};
+        let call = ToolCall { id: "c1".into(), kind: "function".into(), function: FunctionCall { name: "world.say".into(), arguments: "{}".into() } };
+        let mut m = Message::assistant("");
+        m.tool_calls = vec![call];
+        let b = Client::new(cfg(false), None).body(&[Message::user("hi"), m, Message::tool("c1", "ok")], &tools);
+        assert_eq!(b["tools"][0]["function"]["name"], "world__say");
+        assert_eq!(b["messages"][1]["tool_calls"][0]["function"]["name"], "world__say");
+        assert_eq!(wire_name("a b/c"), "a_b_c");
     }
 
     #[test]

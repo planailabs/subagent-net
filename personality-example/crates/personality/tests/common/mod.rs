@@ -54,7 +54,7 @@ pub fn tool_result(log: &Log, name: &str) -> Option<String> {
     for body in log.lock().unwrap().iter().rev() {
         let msgs = body["messages"].as_array().unwrap();
         for (i, m) in msgs.iter().enumerate() {
-            if let Some(call) = m["tool_calls"].as_array().and_then(|c| c.iter().find(|c| c["function"]["name"] == name)) {
+            if let Some(call) = m["tool_calls"].as_array().and_then(|c| c.iter().find(|c| c["function"]["name"] == subnet_llm::wire_name(name))) {
                 if let Some(r) = msgs[i..].iter().find(|r| r["role"] == "tool" && r["tool_call_id"] == call["id"]) {
                     return Some(r["content"].as_str().unwrap_or_default().to_string());
                 }

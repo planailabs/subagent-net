@@ -52,3 +52,11 @@ sha2 = "0.11"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Keep target/ small: line tables for our code, no debug info for
+# dependencies (onnxruntime, whisper.cpp and fastembed are large).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

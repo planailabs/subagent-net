@@ -149,7 +149,8 @@ async fn mcp_tools_are_offered_prefixed_and_called() {
     e.spawn().await;
     assert_eq!(e.mail().await["content"], "echo: hi");
     let tools = e.llm.requests()[0]["tools"].clone();
-    let echo = tools.as_array().unwrap().iter().find(|t| t["function"]["name"] == "t.echo").unwrap();
+    // On the wire, `<mcp>.<tool>` is `<mcp>__<tool>` (OpenAI-compatible names).
+    let echo = tools.as_array().unwrap().iter().find(|t| t["function"]["name"] == "t__echo").unwrap();
     assert_eq!(echo["function"]["parameters"]["properties"]["text"]["type"], "string");
     assert!(tools.as_array().unwrap().iter().any(|t| t["function"]["name"] == "spawn_agent"));
 }
@@ -173,7 +174,7 @@ async fn bare_agent_type_has_no_mcp_tools() {
     e.net.spawn("base", "go").await;
     let c = e.mail().await["content"].as_str().unwrap().to_string();
     assert!(c.contains("unknown tool"), "{c}");
-    assert!(!e.llm.requests()[0]["tools"].to_string().contains("t.echo"));
+    assert!(!e.llm.requests()[0]["tools"].to_string().contains("t__echo"));
 }
 
 #[tokio::test]
@@ -365,10 +366,10 @@ async fn lazy_tools_are_loaded_on_demand() {
     assert_eq!(e.mail().await["content"], "echo: hi");
     let r = e.llm.requests();
     let first = offered(&r[0]);
-    assert!(!first.contains(&"t.echo".to_string()) && first.contains(&"load_tools".to_string()), "{first:?}");
+    assert!(!first.contains(&"t__echo".to_string()) && first.contains(&"load_tools".to_string()), "{first:?}");
     let load = r[0]["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "load_tools").unwrap();
     assert!(load["function"]["description"].as_str().unwrap().contains("- t.echo: "), "the catalogue lists it");
-    assert!(offered(&r[1]).contains(&"t.echo".to_string()), "loaded for the next call");
+    assert!(offered(&r[1]).contains(&"t__echo".to_string()), "loaded for the next call");
     let load = r[1]["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "load_tools").unwrap();
     let catalogue = load["function"]["description"].as_str().unwrap();
     assert!(!catalogue.contains("t.echo") && catalogue.contains("- t.slow: "), "{catalogue}");
@@ -402,7 +403,7 @@ async fn the_router_preloads_matching_tools() {
     let id = e.net.spawn("tooler", "please echo this text back").await;
     e.mail().await;
     let first = offered(&e.llm.requests()[0]);
-    assert!(first.contains(&"t.echo".to_string()), "{first:?}");
-    assert!(!first.contains(&"t.slow".to_string()), "only the top match: {first:?}");
+    assert!(first.contains(&"t__echo".to_string()), "{first:?}");
+    assert!(!first.contains(&"t__slow".to_string()), "only the top match: {first:?}");
     let _ = id;
 }

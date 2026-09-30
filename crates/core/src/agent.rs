@@ -356,6 +356,18 @@ impl Agent {
         m
     }
 
+    /// A tool's name as the spec has it: models may use the wire form
+    /// (`world__say` for `world.say`, as OpenAI-compatible APIs require).
+    fn canonical(&self, name: &str) -> String {
+        if self.spec.tools.iter().any(|t| t.name == name) {
+            return name.to_string();
+        }
+        match self.spec.tools.iter().find(|t| t.name.replace('.', "__") == name) {
+            Some(t) => t.name.clone(),
+            None => name.to_string(),
+        }
+    }
+
     /// Lazy tools not loaded yet.
     pub fn unloaded(&self) -> Vec<&ToolDef> {
         self.spec.tools.iter().filter(|t| self.spec.lazy.contains(&t.name) && !self.loaded.contains(&t.name)).collect()
@@ -385,6 +397,7 @@ impl Agent {
     fn load(&mut self, names: &[String]) -> (Vec<String>, Vec<String>) {
         let (mut loaded, mut unknown) = (vec![], vec![]);
         for n in names {
+            let n = &self.canonical(n).replace("__", ".");
             let matching: Vec<String> = self
                 .spec
                 .lazy
@@ -455,8 +468,11 @@ impl Agent {
                     self.usage.prompt_tokens += u.prompt_tokens;
                     self.usage.completion_tokens += u.completion_tokens;
                 }
-                let msg = self.acc.finish();
+                let mut msg = self.acc.finish();
                 self.acc = Accumulator::default();
+                for c in &mut msg.tool_calls {
+                    c.function.name = self.canonical(&c.function.name);
+                }
                 let calls: Vec<_> = msg
                     .tool_calls
                     .iter()

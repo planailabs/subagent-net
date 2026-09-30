@@ -20,6 +20,7 @@ vesper-room = { path = "../room" }
 vesper-stt = { path = "../stt" }
 
 [dev-dependencies]
+subnet-llm.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true

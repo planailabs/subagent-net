@@ -2748,6 +2748,7 @@ dependencies = [
  "serde_json",
  "subnet",
  "subnet-core",
+ "subnet-llm",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",

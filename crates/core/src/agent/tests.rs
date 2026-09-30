@@ -697,3 +697,16 @@ fn the_router_preloads_and_bad_args_are_errors() {
     // Nothing lazy: no load_tools.
     assert!(!names(&H::new(spec()).a.offered_tools()).contains(&LOAD_TOOLS));
 }
+
+#[test]
+fn wire_names_are_understood() {
+    let mut h = H::new(lazy_spec());
+    h.user("go");
+    // load_tools by wire name, then the tool called by its wire name.
+    h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web__search"]}"#);
+    h.done();
+    assert_eq!(h.contents().last().unwrap().1, "loaded: web.search");
+    h.call(0, "c2", "web__search", r#"{}"#);
+    assert_eq!(tool_effect(&h.done()).function.name, "web.search");
+    h.crash();
+}

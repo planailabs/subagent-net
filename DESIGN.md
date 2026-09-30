@@ -251,7 +251,7 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
 ## MCP servers and the MCP switchboard
 
 - An `mcp` block declares an MCP type and the nodes that run it. On connect, a node starts its MCP servers (stdio or HTTP) and reports each type's tool list to the hub.
-- A **mixture** binds an agent type to MCP types. A spawned agent's tool list is the built-ins plus the tools of its mixture's MCP types, named `<mcp>.<tool>` (e.g. `memory.store`). The list is fixed in the spec when the agent is created, so replays are stable.
+- A **mixture** binds an agent type to MCP types. A spawned agent's tool list is the built-ins plus the tools of its mixture's MCP types, named `<mcp>.<tool>` (e.g. `memory.store`). The list is fixed in the spec when the agent is created, so replays are stable. On the wire to the model, names are `<mcp>__<tool>` (OpenAI-compatible APIs only accept `[a-zA-Z0-9_-]`); the LLM client translates both ways, and the state machine accepts either form in tool calls and `load_tools`.
 - **Routing a tool call:**
   - If the agent's node runs that MCP type, the call is local.
   - Otherwise the node sends `McpCall { call_id, agent, epoch, mcp, tool, args }` to the hub. The hub checks that the agent's mixture includes that MCP type and forwards the call to the least-loaded node running it. The result comes back the same way.
