@@ -14,6 +14,8 @@ use crate::chat::{Accumulator, Delta, Message, ToolCall, ToolDef, Usage};
 
 /// Name of the one built-in tool the state machine handles itself.
 pub const WAIT_FOR: &str = "wait_for";
+/// Loads lazy tools' schemas; resolved by the state machine itself.
+pub const LOAD_TOOLS: &str = "load_tools";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Budget {
@@ -51,6 +53,10 @@ pub struct Spec {
     /// Tools safe to re-run after a crash (`<mcp>.<tool>`).
     #[serde(default)]
     pub idempotent: Vec<String>,
+    /// Tools of `tools` that are lazy: the model only sees their names (in
+    /// `load_tools`' description) until they're loaded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lazy: Vec<String>,
 }
 
 impl Spec {
@@ -65,6 +71,7 @@ impl Spec {
             mcp: BTreeMap::new(),
             tools: vec![],
             idempotent: vec![],
+            lazy: vec![],
         }
     }
 }
@@ -140,6 +147,10 @@ pub enum Event {
     /// The agent was (re)placed on a spawner: whatever was in flight before is
     /// gone. Logged so every replica folds the same state.
     Recovered,
+    /// Lazy tools loaded ahead of a message (the hub's router).
+    ToolsLoaded {
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +249,9 @@ pub struct Agent {
     pub usage: Usage,
     /// Tokens handed to children.
     pub reserved: u64,
+    /// Lazy tools whose schemas the model has been given.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub loaded: BTreeSet<String>,
 }
 
 impl Agent {
@@ -255,6 +269,7 @@ impl Agent {
             children: BTreeMap::new(),
             usage: Usage::default(),
             reserved: 0,
+            loaded: BTreeSet::new(),
         }
     }
 
@@ -339,6 +354,74 @@ impl Agent {
             m.push(self.acc.partial());
         }
         m
+    }
+
+    /// Lazy tools not loaded yet.
+    pub fn unloaded(&self) -> Vec<&ToolDef> {
+        self.spec.tools.iter().filter(|t| self.spec.lazy.contains(&t.name) && !self.loaded.contains(&t.name)).collect()
+    }
+
+    /// The tools for the next LLM call: eager and loaded ones, plus
+    /// `load_tools` (with a catalogue of the rest) while any are left.
+    pub fn offered_tools(&self) -> Vec<ToolDef> {
+        let lazy = self.unloaded();
+        let mut tools: Vec<ToolDef> = self.spec.tools.iter().filter(|t| !lazy.iter().any(|l| l.name == t.name)).cloned().collect();
+        if !lazy.is_empty() {
+            let catalogue: Vec<String> = lazy.iter().map(|t| format!("- {}: {}", t.name, first_sentence(&t.description))).collect();
+            tools.push(ToolDef {
+                name: LOAD_TOOLS.into(),
+                description: format!(
+                    "Load tools before using them: pass tool names, or a server name for all its tools. Their full descriptions and parameters are then available. Not loaded yet:\n{}",
+                    catalogue.join("\n")
+                ),
+                parameters: json!({"type":"object","properties":{"names":{"type":"array","items":{"type":"string"}}},"required":["names"]}),
+            });
+        }
+        tools
+    }
+
+    /// Loads lazy tools by name, or a whole server by `<mcp>`; returns what
+    /// was loaded and what's unknown.
+    fn load(&mut self, names: &[String]) -> (Vec<String>, Vec<String>) {
+        let (mut loaded, mut unknown) = (vec![], vec![]);
+        for n in names {
+            let matching: Vec<String> = self
+                .spec
+                .lazy
+                .iter()
+                .filter(|t| *t == n || t.split_once('.').is_some_and(|(server, _)| server == n))
+                .cloned()
+                .collect();
+            if matching.is_empty() {
+                if !self.spec.tools.iter().any(|t| &t.name == n) {
+                    unknown.push(n.clone());
+                }
+                continue;
+            }
+            for t in matching {
+                if self.loaded.insert(t.clone()) {
+                    loaded.push(t);
+                }
+            }
+        }
+        (loaded, unknown)
+    }
+
+    fn load_call(&mut self, call: &ToolCall) -> String {
+        #[derive(Deserialize)]
+        struct Args {
+            names: Vec<String>,
+        }
+        let args: Args = match serde_json::from_str(&call.function.arguments) {
+            Ok(a) => a,
+            Err(e) => return format!("error: bad arguments: {e}"),
+        };
+        let (loaded, unknown) = self.load(&args.names);
+        let mut out = if loaded.is_empty() { "nothing new to load".to_string() } else { format!("loaded: {}", loaded.join(", ")) };
+        if !unknown.is_empty() {
+            out.push_str(&format!("; unknown: {}", unknown.join(", ")));
+        }
+        out
     }
 
     /// May new work start? `Safe` only blocks starting a new turn.
@@ -447,6 +530,9 @@ impl Agent {
                 self.advance(&mut fx);
             }
             Event::Recovered => fx = self.recover(),
+            Event::ToolsLoaded { names } => {
+                self.load(names);
+            }
             Event::Cancelled => {
                 if self.terminal() {
                     return fx;
@@ -489,6 +575,7 @@ impl Agent {
                 Phase::Tools { calls } => {
                     // Start every call that can start; they run in parallel.
                     let mut errors = vec![];
+                    let mut loads = vec![];
                     for c in calls.iter_mut() {
                         match c.state.clone() {
                             CallState::Approved => {
@@ -501,6 +588,11 @@ impl Agent {
                                     Err(e) => errors.push((c.call.id.clone(), e)),
                                 }
                                 let _ = retry;
+                            }
+                            CallState::Queued { .. } if c.call.function.name == LOAD_TOOLS => loads.push(c.call.clone()),
+                            // Called without its schema: load it, and have the model call again.
+                            CallState::Queued { .. } if self.spec.lazy.contains(&c.call.function.name) && !self.loaded.contains(&c.call.function.name) => {
+                                loads.push(c.call.clone())
                             }
                             CallState::Queued { retry: false } if self.spec.approve.contains(&c.call.function.name) => {
                                 c.state = CallState::Approval;
@@ -515,6 +607,15 @@ impl Agent {
                     }
                     for (id, e) in errors {
                         self.finish_call(&id, e);
+                    }
+                    for call in loads {
+                        let result = if call.function.name == LOAD_TOOLS {
+                            self.load_call(&call)
+                        } else {
+                            self.load(std::slice::from_ref(&call.function.name));
+                            format!("error: {} wasn't loaded, so it didn't run. It is loaded now; call it again with its parameters.", call.function.name)
+                        };
+                        self.finish_call(&call.id, result);
                     }
                     self.finish_waits();
                     let Phase::Tools { calls } = &self.phase else { unreachable!() };
@@ -639,6 +740,14 @@ impl Agent {
         }
         fx.push(Effect::Report { to: to.into_iter().collect(), status, content });
     }
+}
+
+/// Up to the first sentence end (or 120 characters) of a description.
+fn first_sentence(s: &str) -> String {
+    let s = s.trim();
+    let end = s.find(". ").map(|i| i + 1).unwrap_or(s.len());
+    let cut: String = s[..end].chars().take(120).collect();
+    if cut.len() < s[..end].len() { format!("{cut}…") } else { cut }
 }
 
 #[cfg(test)]

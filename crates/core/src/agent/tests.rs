@@ -633,3 +633,67 @@ fn replay_of_long_session_matches_live_state() {
     h.crash(); // asserts replay == live
     h.crash(); // including the Recovered event
 }
+
+fn tool(name: &str, description: &str) -> ToolDef {
+    ToolDef { name: name.into(), description: description.into(), parameters: json!({"type":"object","properties":{}}) }
+}
+
+fn lazy_spec() -> Spec {
+    Spec {
+        tools: vec![tool("world.say", "Say it. Out loud."), tool("web.search", "Search the web."), tool("web.scrape", "Read a page.")],
+        lazy: vec!["web.search".into(), "web.scrape".into()],
+        ..spec()
+    }
+}
+
+fn names(tools: &[ToolDef]) -> Vec<&str> {
+    tools.iter().map(|t| t.name.as_str()).collect()
+}
+
+#[test]
+fn lazy_tools_are_catalogued_until_loaded() {
+    let mut h = H::new(lazy_spec());
+    let offered = h.a.offered_tools();
+    assert_eq!(names(&offered), ["world.say", LOAD_TOOLS]);
+    let load = &offered[1].description;
+    assert!(load.contains("- web.search: Search the web.") && load.contains("- web.scrape: Read a page."), "{load}");
+    h.user("find it");
+    h.call(0, "c1", LOAD_TOOLS, r#"{"names":["web.search","nope"]}"#);
+    // Resolved by the state machine itself: straight on to the next LLM call.
+    assert_eq!(h.done(), vec![Effect::CallLlm]);
+    assert_eq!(h.contents().last().unwrap().1, "loaded: web.search; unknown: nope");
+    assert_eq!(names(&h.a.offered_tools()), ["world.say", "web.search", LOAD_TOOLS]);
+    // A whole server at once; then nothing is left to load.
+    h.call(0, "c2", LOAD_TOOLS, r#"{"names":["web"]}"#);
+    h.done();
+    assert_eq!(h.contents().last().unwrap().1, "loaded: web.scrape");
+    assert_eq!(names(&h.a.offered_tools()), ["world.say", "web.search", "web.scrape"]);
+    h.crash();
+}
+
+#[test]
+fn calling_an_unloaded_tool_loads_it_and_asks_again() {
+    let mut h = H::new(lazy_spec());
+    h.user("find it");
+    h.call(0, "c1", "web.search", r#"{"q":"x"}"#);
+    h.call(1, "c2", "world.say", r#"{}"#);
+    let fx = h.done();
+    assert_eq!(tool_effect(&fx).function.name, "world.say", "only the loaded tool runs");
+    assert!(h.contents().iter().any(|(_, c)| c.contains("web.search wasn't loaded")));
+    assert!(h.a.loaded.contains("web.search"));
+    assert_eq!(h.result("c2", "ok"), vec![Effect::CallLlm]);
+}
+
+#[test]
+fn the_router_preloads_and_bad_args_are_errors() {
+    let mut h = H::new(lazy_spec());
+    assert!(h.ev(Event::ToolsLoaded { names: vec!["web.scrape".into(), "world.say".into(), "bogus".into()] }).is_empty());
+    assert_eq!(h.a.loaded, BTreeSet::from(["web.scrape".to_string()]), "only lazy tools count as loaded");
+    h.user("go");
+    h.call(0, "c1", LOAD_TOOLS, "not json");
+    h.done();
+    assert!(h.contents().last().unwrap().1.starts_with("error: bad arguments"));
+    h.crash();
+    // Nothing lazy: no load_tools.
+    assert!(!names(&H::new(spec()).a.offered_tools()).contains(&LOAD_TOOLS));
+}
