@@ -375,7 +375,7 @@ The web UI and the TUI use the same API.
 
 ## Web UI
 
-Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo feature `webui`, on by default) and served at `/` (unknown paths get the app). `npm run build` writes `webui/dist`; without it the build embeds a page saying so. Sign-in: `POST /v1/login {token}` sets an HttpOnly, SameSite=Strict session cookie that the API, MCP and event stream accept (`EventSource` can't send headers); `POST /v1/logout` clears it. Pure logic (park layout, notice folding) lives in `webui/src/lib` and is tested with `node --test`.
+Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo feature `webui`, on by default) and served at `/` (unknown paths get the app). The build embeds `webui/dist` if you've built it (`npm run build`). Otherwise, as in a git dependency's checkout, the build script builds the UI into cargo's `OUT_DIR` when npm is on PATH (`SUBNET_WEBUI_BUILD=0` skips that). Without npm it embeds a page saying the UI isn't built; the Rust build never needs node. Sign-in: `POST /v1/login {token}` sets an HttpOnly, SameSite=Strict session cookie that the API, MCP and event stream accept (`EventSource` can't send headers); `POST /v1/logout` clears it. Pure logic (park layout, notice folding) lives in `webui/src/lib` and is tested with `node --test`.
 
 - **Design:** monochrome and dark. Black background, white/grey text, no colour. State is shown by glyph and pattern: `●` thinking, `▣` tools, `○` idle, `‖` paused, `✕` failed, `·` cancelled. Monospace type throughout.
 - **Views:**
