@@ -317,6 +317,22 @@ async fn unlimited_child_type_gets_half_of_parent_budget() {
 }
 
 #[tokio::test]
+async fn children_leave_the_parent_half_of_what_is_left() {
+    // A why-agent spawning two researchers with its own budget's worth of
+    // caps must still have tokens to read their answers.
+    let hub = hub().await;
+    let mut w = worker();
+    w.budget.0 = Some(800);
+    let _sp = spawner(&hub, "s", vec![boss(), w], 8).await;
+    let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
+    spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    assert_eq!(transcript(&hub, boss_id).await["reserved"], 500);
+    spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    let t = transcript(&hub, boss_id).await;
+    assert_eq!(t["reserved"], 750, "250 left for the boss itself");
+}
+
+#[tokio::test]
 async fn wait_inbox_wakes_on_new_mail() {
     let hub = hub().await;
     let c = Addr::Client("sess".into());
@@ -369,8 +385,12 @@ async fn token_reservation_limits_children() {
     b.budget.2 = 5;
     let _sp = spawner(&hub, "s", vec![b, worker()], 16).await;
     let boss_id = spawn(&hub, &Addr::root(), "boss").await.unwrap();
-    spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap(); // reserves 400
-    spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap(); // reserves the last 100
+    // Each child gets at most half of what is left: 250, 125, 62, then 31
+    // is less than a tenth of a worker's 400.
+    for _ in 0..3 {
+        spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    }
+    assert_eq!(transcript(&hub, boss_id).await["reserved"], 437);
     assert!(spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap_err().contains("token budget"));
 }
 

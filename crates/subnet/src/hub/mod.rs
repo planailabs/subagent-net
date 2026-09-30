@@ -1031,15 +1031,22 @@ impl Hub {
                 if r.a.children.len() as u32 >= pb.max_children {
                     return bad(format!("child budget exhausted ({} children)", pb.max_children));
                 }
-                // An unlimited type under a limited parent gets half of what is left,
-                // so the parent is never starved by its first child.
+                // A child under a limited parent gets at most half of what is
+                // left (an unlimited type exactly that), so the parent is never
+                // starved by its children: it still has to read their answers.
                 let max_tokens = match (def.budget.max_tokens, r.a.remaining_tokens()) {
-                    (Some(t), Some(left)) => Some(t.min(left)),
+                    (Some(t), Some(left)) => Some(t.min(left / 2)),
                     (t, None) => t,
                     (None, Some(left)) => Some(left / 2),
                 };
                 if max_tokens == Some(0) {
                     return bad("token budget exhausted");
+                }
+                // Halving never reaches zero: refuse children too small to be useful.
+                if let (Some(t), Some(got)) = (def.budget.max_tokens, max_tokens)
+                    && got < t / 10
+                {
+                    return bad(format!("token budget exhausted: a {name} would get {got} tokens (it needs at least {}); work with what you have", t / 10));
                 }
                 let budget = Budget {
                     cached_percent: def.budget.cached_percent,
