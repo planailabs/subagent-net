@@ -23,6 +23,7 @@ subnet tail                      # live tokens and events
 subnet pause <id> --mode hard    # or safe / quick; --tree for descendants
 subnet resume <id>
 subnet tui                       # the agent park in the terminal
+subnet watch <agent-id>          # one agent's transcript, live
 ```
 
 Open http://127.0.0.1:7700 for the web UI: the agent park, live transcripts with pause/resume/approve, senses, the switchboard's routes and deliveries, and the cluster spec.

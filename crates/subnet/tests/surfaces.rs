@@ -158,7 +158,7 @@ async fn hub_mcp_endpoint_serves_the_same_operations() {
     let cfg = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).auth_header(claude);
     let mcp = ().serve(StreamableHttpClientTransport::from_config(cfg)).await.unwrap();
     let tools: Vec<String> = mcp.list_all_tools().await.unwrap().into_iter().map(|t| t.name.to_string()).collect();
-    for t in ["spawn", "send", "wait_inbox", "pause", "resume", "cancel", "approve", "fork", "transcript", "list_agents", "list_types"] {
+    for t in ["spawn", "send", "wait_inbox", "pause", "resume", "cancel", "approve", "fork", "transcript", "watch_agent", "list_agents", "list_types"] {
         assert!(tools.contains(&t.to_string()), "missing {t}: {tools:?}");
     }
     assert!(!tools.contains(&"apply_cluster".to_string()), "an operator sees no admin tools");
@@ -289,4 +289,49 @@ async fn web_ui_is_served_and_cookie_login_works() {
     assert_eq!(c.get(format!("{base}/v1/events")).send().await.unwrap().status(), 200);
     c.post(format!("{base}/v1/logout")).send().await.unwrap();
     assert_eq!(c.post(format!("{base}/v1/ops/whoami")).send().await.unwrap().status(), 401);
+}
+
+async fn watch(base: &str, args: Value) -> reqwest::Response {
+    reqwest::Client::new().post(format!("{base}/v1/ops/watch_agent")).json(&args).send().await.unwrap()
+}
+
+#[tokio::test]
+async fn watch_agent_follows_an_agent_live() {
+    let (base, llm) = setup(None).await;
+    llm.set_gap(Duration::from_millis(120));
+    llm.say(SYS, &["Hel", "lo ", "there", "."]);
+    let r: Value = reqwest::Client::new().post(format!("{base}/v1/agents")).json(&json!({"type": "helper", "prompt": "hi"})).send().await.unwrap().json().await.unwrap();
+    let id = r["id"].as_str().unwrap().to_string();
+
+    // Without a cursor: at once, with the history so far.
+    let w: Value = watch(&base, json!({"id": id})).await.json().await.unwrap();
+    assert_eq!(w["entries"][0]["role"], "user");
+    let mut next = w["next"].as_u64().unwrap();
+    // Then long-poll: the answer streams in, then lands as an entry.
+    let (mut partials, mut answer) = (vec![], None);
+    for _ in 0..50 {
+        let w: Value = watch(&base, json!({"id": id, "after": next, "timeout_ms": 5000})).await.json().await.unwrap();
+        if let Some(p) = w["partial"].as_str() {
+            partials.push(p.to_string());
+        }
+        if let Some(e) = w["entries"].as_array().unwrap().iter().find(|e| e["role"] == "assistant") {
+            answer = Some((e["content"].clone(), w["phase"].clone()));
+            break;
+        }
+        next = w["next"].as_u64().unwrap();
+    }
+    assert_eq!(answer, Some((json!("Hello there."), json!("idle"))));
+    assert!(partials.iter().any(|p| p.len() < "Hello there.".len() && "Hello there.".starts_with(p.as_str())), "saw it stream: {partials:?}");
+
+    // Nothing new: the wait ends at the timeout, empty.
+    let w: Value = watch(&base, json!({"id": id, "after": 2, "timeout_ms": 300})).await.json().await.unwrap();
+    assert_eq!((w["entries"].as_array().unwrap().len(), w["next"].as_u64()), (0, Some(2)));
+    // Long texts are cut; unknown agents are 404.
+    let w: Value = watch(&base, json!({"id": id, "after": 1, "max_chars": 4})).await.json().await.unwrap();
+    assert_eq!((w["entries"][0]["content"].clone(), w["entries"][0]["truncated"].clone()), (json!("Hell…"), json!(true)));
+    let r = watch(&base, json!({"id": uuid::Uuid::nil()})).await;
+    assert_eq!(r.status(), 404);
+    // The REST route is the same op.
+    let w: Value = reqwest::get(format!("{base}/v1/agents/{id}/watch?after=0&timeout_ms=0")).await.unwrap().json().await.unwrap();
+    assert_eq!(w["entries"].as_array().unwrap().len(), 2);
 }

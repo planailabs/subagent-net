@@ -9,6 +9,7 @@ pub mod ha;
 pub mod http;
 pub mod relay;
 pub mod router;
+mod watch;
 pub mod switchboard;
 
 use std::collections::{HashMap, HashSet, VecDeque};

@@ -78,6 +78,14 @@ enum Cmd {
         #[arg(long, requires = "id")]
         tree: bool,
     },
+    /// Follow one agent's transcript live: messages, tool calls, results
+    /// and its answer as it streams.
+    Watch {
+        id: AgentId,
+        /// Entries of history to show first.
+        #[arg(long, default_value_t = 20)]
+        tail: u64,
+    },
     /// The agent park and an agent pane in the terminal.
     Tui,
     /// Apply cluster files (HCL) to the hub.
@@ -206,7 +214,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
     let m = cli().get_matches();
     let (name, sub) = m.subcommand().expect("subcommand required");
-    let builtin = matches!(name, "hub" | "node" | "dev" | "tail" | "apply" | "tui");
+    let builtin = matches!(name, "hub" | "node" | "dev" | "tail" | "watch" | "apply" | "tui");
     // Servers log their work; client commands only problems.
     let default = if matches!(name, "hub" | "node" | "dev") { "info,rmcp=warn" } else { "warn" };
     tracing_subscriber::fmt()
@@ -249,6 +257,11 @@ async fn run() -> anyhow::Result<()> {
             std::future::pending::<()>().await;
         }
         Cmd::Tail { id, tree } => tail(&cli.hub, cli.token.as_deref(), id, tree, show_event).await?,
+        Cmd::Watch { id, tail } => {
+            use std::io::IsTerminal;
+            let color = std::io::stdout().is_terminal();
+            subnet::watch::watch(&Client::new(&cli.hub, cli.token), id, tail, std::io::stdout(), color).await?
+        }
         Cmd::Tui => subnet::tui::run(Client::new(&cli.hub, cli.token.clone()), cli.hub.clone(), cli.token).await?,
         Cmd::Apply { files, dry_run } => {
             let files = read_files(&files)?;

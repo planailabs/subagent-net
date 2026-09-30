@@ -29,7 +29,7 @@ A distributed network of LLM agents. Every agent is a resumable state machine: i
 
 - **Hub**: the control plane. All state lives in Postgres; schema changes go through `sqlx migrate`. Several hubs can run against one database: one leader serves, the rest stand by (see [High availability](#high-availability)).
 - **Node**: a worker process started with a hub URL, a node name and a token. It connects out to the hub (NAT-friendly), receives its part of the cluster spec, and runs the agent types, MCP servers and senses assigned to it. Credentials are resolved on the node and never leave it.
-- **One binary**, `subnet`: `hub`, `node`, `dev` (hub and node in one process), `tui`, and every API operation as a CLI command.
+- **One binary**, `subnet`: `hub`, `node`, `dev` (hub and node in one process), `tui`, `watch <id>` (one agent's transcript, live and readable), and every API operation as a CLI command.
 - **Environment files:** before parsing its flags (several read env defaults: `DATABASE_URL`, `SUBNET_HUB`, `SUBNET_TOKEN`, …), `subnet` loads `--env-file PATH` (repeatable) and then `./.env`. A variable that is already set is never overwritten: the real environment wins, then earlier files. Nodes resolve credentials (`$VAR`) from the result, so API keys can live in a node's `.env`.
 
 ## Cluster files (orchestration)
@@ -339,6 +339,8 @@ Every operation is defined once in the `ops` crate's typed registry: name, summa
 - **MCP** (`/mcp`): every op a principal's role allows is a tool.
 - **CLI:** every op is a `subnet` subcommand (`list_agents` → `subnet list-agents`). Path parameters are positional; an op without path parameters takes its required scalar fields positionally (`subnet spawn <type> <prompt>`). Other fields are flags, and `--json` passes a whole argument object. The CLI calls the REST/RPC API.
 - **Events:** `GET /v1/events` (SSE) and `/v1/events/ws` (WebSocket), filtered by `agent`, `tree` (an agent and its descendants), `sense`, `route`, or `agents=true|false`. Each notice has a `kind`: `agent` (`agent`, `ancestors`, `seq`, `event`), `sense` (`sense`, `node`, `id`, `at`, `data`) or `delivery` (`route`, `payload`, `outcomes`). A slow subscriber gets `{"kind":"lagged","missed":n}` instead of blocking the hub.
+
+- **Watching an agent** (`watch_agent`, `GET /v1/agents/{id}/watch`, the MCP tool of the same name): a cursor long-poll for callers that can't hold a stream open. It takes `after`, the cursor from the last call. It returns the transcript entries from there (role, content, tool calls with arguments, the call a result answers), the streamed partial, the agent's state and queued-message count, and `next`. With nothing new it waits (`timeout_ms`, default 25 s, max 120 s) until any event of the agent (a streamed delta included) and then 150 ms more to batch a burst. Without a cursor it answers at once with the last `tail` (default 20) entries. Texts and arguments longer than `max_chars` (default 2000, 0 = no cap) are cut and marked `truncated`. It subscribes to notices before reading, so nothing between the read and the wait is missed. `subnet watch <id>` is built on it: user messages, the answer as it streams, tool calls (→) and results (←), and state changes (·), coloured on a terminal.
 
 The web UI and the TUI use the same API.
 

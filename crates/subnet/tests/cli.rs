@@ -70,3 +70,34 @@ async fn cli_reports_errors() {
         .unwrap();
     assert!(!out.status.success());
 }
+
+#[tokio::test]
+async fn watch_prints_the_transcript_live() {
+    use tokio::io::AsyncReadExt;
+    let (base, llm) = setup().await;
+    llm.set_gap(std::time::Duration::from_millis(100));
+    llm.say("sys", &["watch ", "me ", "stream"]);
+    let (ok, out, err) = subnet(&base, &["spawn", "helper", "go"]).await;
+    assert!(ok, "{err}");
+    let id = serde_json::from_str::<serde_json::Value>(&out).unwrap()["id"].as_str().unwrap().to_string();
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_subnet"))
+        .args(["watch", &id])
+        .env("SUBNET_HUB", &base)
+        .env("SUBNET_TOKEN", "t0k")
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !seen.contains("· idle") || !seen.contains("watch me stream") {
+        let mut buf = [0u8; 1024];
+        let n = tokio::time::timeout_at(deadline, stdout.read(&mut buf)).await.unwrap_or_else(|_| panic!("got only: {seen:?}")).unwrap();
+        assert!(n > 0, "watch exited: {seen:?}");
+        seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+    assert!(seen.contains("▸ ") && seen.contains("go"), "the user message: {seen:?}");
+    assert_eq!(seen.matches("watch me stream").count(), 1, "streamed text isn't repeated: {seen:?}");
+    assert!(!seen.contains("\x1b["), "no colour when piped");
+}

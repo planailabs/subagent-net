@@ -54,6 +54,47 @@ pub struct Transcript {
     pub inbox: Vec<Queued>,
 }
 
+/// One transcript entry for watchers; long texts are cut to `max_chars`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchEntry {
+    /// Position in the transcript (the cursor counts entries).
+    pub index: u64,
+    /// user, assistant or tool.
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<WatchCall>,
+    /// For tool results: the call they answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Something here was cut.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WatchCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// What changed in an agent since a cursor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Watch {
+    #[serde(flatten)]
+    pub summary: AgentSummary,
+    /// Transcript entries from the cursor on.
+    pub entries: Vec<WatchEntry>,
+    /// Cursor for the next call (`after`).
+    pub next: u64,
+    /// The answer being streamed right now (or cut off by a pause).
+    pub partial: Option<String>,
+    /// Messages queued for its next LLM call.
+    pub queued: u64,
+}
+
 /// Something that can be spawned: a mixture or a bare agent type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TypeSummary {
@@ -140,6 +181,27 @@ impl From<HubError> for OpError {
 pub struct IdArgs {
     /// Agent id.
     pub id: AgentId,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WatchArgs {
+    /// Agent id.
+    pub id: AgentId,
+    /// Cursor from the last call (`next`). Without one, the call returns at
+    /// once with the last `tail` entries.
+    #[serde(default)]
+    pub after: Option<u64>,
+    /// Entries to start with when there's no cursor (default 20).
+    #[serde(default)]
+    pub tail: Option<u64>,
+    /// How long to wait for something new, in ms (default 25000, max 120000;
+    /// 0 = don't wait). Any event of the agent ends the wait, streamed text
+    /// included.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Cut texts and tool arguments longer than this (default 2000; 0 = no cap).
+    #[serde(default)]
+    pub max_chars: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -328,6 +390,7 @@ op!(ListTypes, "list_types", Viewer, Some((Method::Get, "/v1/types")), NoArgs, V
 op!(ListNodes, "list_nodes", Viewer, Some((Method::Get, "/v1/nodes")), NoArgs, Vec<NodeSummary>, "List connected nodes and what they run.");
 op!(ListAgents, "list_agents", Viewer, Some((Method::Get, "/v1/agents")), NoArgs, Vec<AgentSummary>, "List all agents with phase, pause state, node and usage.");
 op!(GetAgent, "transcript", Viewer, Some((Method::Get, "/v1/agents/{id}")), IdArgs, Transcript, "An agent's transcript, partial output, queued inbox and state.");
+op!(WatchAgent, "watch_agent", Viewer, Some((Method::Get, "/v1/agents/{id}/watch")), WatchArgs, Watch, "Follow an agent live: what's new in its transcript after a cursor (waiting for it if nothing is), its streamed partial and state, and the next cursor.");
 op!(Spawn, "spawn", Operator, Some((Method::Post, "/v1/agents")), SpawnArgs, Spawned, "Spawn an agent with a task. Its answer arrives in your inbox.");
 op!(Send, "send", Operator, Some((Method::Post, "/v1/messages")), SendArgs, Done, "Send a message to an agent (it answers into your inbox), a user or a client.");
 op!(WaitInbox, "wait_inbox", Viewer, Some((Method::Get, "/v1/inbox")), InboxArgs, Vec<Mail>, "Take the messages addressed to you, waiting for some if there are none.");
@@ -358,6 +421,7 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<ListNodes>(),
         OpMeta::of::<ListAgents>(),
         OpMeta::of::<GetAgent>(),
+        OpMeta::of::<WatchAgent>(),
         OpMeta::of::<Spawn>(),
         OpMeta::of::<Send>(),
         OpMeta::of::<WaitInbox>(),
@@ -404,6 +468,11 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<GetAgent, _, _>(move |_, a| {
         let h = h.clone();
         async move { Ok(h.transcript(a.id).await?) }
+    });
+    let h = hub.clone();
+    r.add::<WatchAgent, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(h.watch(a).await?) }
     });
     let h = hub.clone();
     r.add::<Spawn, _, _>(move |c, a| {
