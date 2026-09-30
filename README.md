@@ -34,6 +34,10 @@ A real deployment:
 3. Issue tokens: `subnet issue-token node gpu-1`, `subnet issue-token client claude`, …
 4. On every machine: `subnet node --name gpu-1` with `SUBNET_HUB` and `SUBNET_TOKEN`. The node pulls its part of the cluster; secrets (API keys) are read from its own environment.
 
+## Example: a virtual personality
+
+[personality-example/](personality-example/) runs Vesper, a resident agent with a body in a 3D room. People talk to her by chat or microphone, and she answers aloud, walks around, makes coffee and remembers people. It exercises senses (webhooks, an stt stage, a timer), routes, residents, MCP servers over stdio and HTTP, and blobs. `cargo run -p personality -- up`; see its [README](personality-example/README.md).
+
 ## Driving it from another agent
 
 Add the hub as an HTTP MCP server, e.g. for Claude Code:

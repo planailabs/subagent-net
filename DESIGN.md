@@ -380,6 +380,8 @@ State and key handling (`tui::App`) are pure and tested; rendering is tested aga
 | `switchboard` | CEL evaluation, flow control and route state. No I/O. |
 | `subnet` | hub, node (executors, MCP hosting, senses, streams), API/ops wiring, CLI, TUI, embedded web UI. |
 
+[personality-example/](personality-example/) is a worked example built on these crates: Vesper, a virtual personality in a 3D room, with its own [DESIGN.md](personality-example/DESIGN.md). Its crates share this workspace.
+
 ## Not in scope yet
 
 - **Sharded active-active hubs** (the structure is prepared, see HA).
