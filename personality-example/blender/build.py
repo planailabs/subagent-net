@@ -171,6 +171,13 @@ class Builder:
         bmesh.ops.recalc_face_normals(bm, faces=list({f for ring in grid for v in ring for f in v.link_faces}))
         return self.add([v for ring in grid for v in ring], mat, bone, weigh)
 
+    def merge(self, other, mat, bone=None):
+        """Copies another bmesh's faces in."""
+        vmap = {v: self.bm.verts.new(v.co) for v in other.verts}
+        for f in other.faces:
+            self.bm.faces.new([vmap[v] for v in f.verts])
+        return self.add(list(vmap.values()), mat, bone)
+
     def surface(self, x, z, verts):
         """Where a ray from the front (-Y) at (x, z) hits the given part."""
         from mathutils.bvhtree import BVHTree

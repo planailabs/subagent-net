@@ -76,11 +76,11 @@ A counter (kitchen) and a side table (reading corner) are furniture: in the way,
 
 Modelled in Blender by Python scripts in [blender/](blender/): `python3 blender/live.py blender/build.py assets [--preview DIR]` runs them in the open Blender through the Blender MCP add-on (port 9876) and renders previews; `blender --background --factory-startup --python blender/build.py -- assets` is the reproducible build. They build into their own scenes (`Vesper`, `Room`) and export, all committed:
 
-- `assets/vesper.glb`: one skinned mesh `vesper` (rigid parts; the skirt blends into the thighs), the armature, the clips and the shape key.
+- `assets/vesper.glb`: one skinned mesh `vesper`, the armature, the clips and the shape key.
 - `assets/props.glb`: one top-level node per world object id, origin at the centre of its footprint on the surface it stands on, front towards +z. Parts the browser changes are child nodes: `pot`, `coffee`, `led` (coffee maker), `mug_fill`, `platter`, `shade`, `flame` (the candle), `glass`.
 - `assets/room.glb`: floor, walls with the window opening, rug, a picture, and `sky` behind the window (tinted by time of day).
 
-- **Vesper:** stylized low-poly woman: proportioned body; face with eyes, brows and dark lips; a blue bob with bangs; black dress, fishnet-ish tights (texture), boots, a choker. An armature with clips `idle`, `walk`, `talk`, `wave`, `reach`, `sit`, `think`, `nod`, `shrug`. A `mouth_open` shape key follows her speech loudness.
+- **Vesper:** sculpted, not assembled from primitives. The body is one continuous mesh grown from a skin-modifier skeleton, subdivided, shaped with sculpt-style brushes (bust, hips, waist, calves, collarbones) and heat-weighted to the rig. The head is a dense mesh sculpted the same way (jaw, chin, cheekbones, eye sockets, nose, lips), with textured eyes, winged liner and brows. The mouth is cut along a straight line so it can open onto a dark mouth. She wears a blue bob with blunt bangs and strand grooves (a solidified shell), an off-shoulder black dress with a sweetheart neckline and long sleeves with flared cuffs (shells lifted off the body), a folded skirt with a violet hem and sash (following the thighs lower down), fishnet tights, platform boots with a buckle strap, and a choker. The armature has clips `idle`, `walk`, `talk`, `wave`, `reach`, `sit`, `think`, `nod`, `shrug`. A `mouth_open` shape key drops the jaw about a hinge and follows her speech loudness. The brushes are plain functions in `blender/vesper.py`, so the sculpt rebuilds identically.
 - **Objects:** coffee maker (with a pot), mug, floor lamp, record player, armchair, bookshelf with books, window, plus the room shell.
 
 ## Voice in and out
