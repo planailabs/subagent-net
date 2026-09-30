@@ -73,7 +73,7 @@ async fn logout() -> Response {
 
 #[cfg(feature = "webui")]
 #[derive(rust_embed::RustEmbed)]
-#[folder = "../../webui/dist"]
+#[folder = "$SUBNET_WEBUI_DIST"]
 struct WebUi;
 
 /// The web UI; unknown paths get index.html (the app routes by hash).
