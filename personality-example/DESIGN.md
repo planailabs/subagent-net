@@ -68,7 +68,9 @@ A 8 m × 6 m room: kitchen corner, reading corner, a window.
 
 Rules live in the pure `world` module of the room server: distances, what needs what (`pour` needs `ready` coffee and the mug in hand, `drink` needs coffee in the mug), and what each action changes. Things that happen later (coffee ready) are **world events**: the room server posts them to the `world` webhook and they reach Vesper through the switchboard.
 
-Walking: a 0.25 m grid over the floor, furniture footprints blocked, A* path, 1.2 m/s.
+Walking: a 0.25 m grid over the floor, cells within her radius (0.25 m) of walls and furniture blocked, shortest grid path (Dijkstra to the nearest cell within 0.9 m of a thing), straightened where she can see past waypoints, 1.2 m/s. Sent to a thing, she ends up facing it. Walking off the armchair stands her up.
+
+A counter (kitchen) and a side table (reading corner) are furniture: in the way, and surfaces. `put_down` puts the mug on the nearest surface in reach, else on the floor. Looking at a person turns her to the viewers at the open front.
 
 ## The character and objects
 
@@ -130,5 +132,6 @@ Then it prints the URL. `DEEPSEEK_API_KEY` is needed for Vesper to think.
 Implemented:
 
 - memory: `vesper-memory` stdio MCP server (crates/memory) with tests
+- world simulation: `vesper_room::world` (pure) with tests
 
-Not yet: world simulation, assets, room server, web client, stt stage, cluster file and launcher, end-to-end tests.
+Not yet: assets, room server, web client, stt stage, cluster file and launcher, end-to-end tests.

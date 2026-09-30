@@ -4905,6 +4905,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-room"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "vtparse"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
