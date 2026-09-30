@@ -1,0 +1,6 @@
+{
+  "/api": { "target": "http://127.0.0.1:8700" },
+  "/ws": { "target": "ws://127.0.0.1:8700", "ws": true },
+  "/assets": { "target": "http://127.0.0.1:8700" },
+  "/speech": { "target": "http://127.0.0.1:8700" }
+}

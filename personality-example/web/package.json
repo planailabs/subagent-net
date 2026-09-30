@@ -1,0 +1,19 @@
+{
+  "name": "vesper-web",
+  "private": true,
+  "type": "module",
+  "source": "src/index.html",
+  "scripts": {
+    "build": "parcel build src/index.html --dist-dir dist --public-url / --no-source-maps",
+    "dev": "parcel src/index.html",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "three": "^0.186.1",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@parcel/transformer-vue": "^2.16.4",
+    "parcel": "^2.16.4"
+  }
+}
