@@ -12,7 +12,7 @@ agent "vesper-mind" {
     env      = "DEEPSEEK_API_KEY"
     base_url = "https://api.deepseek.com/v1"
   }
-  model  = "deepseek-chat"
+  model  = "deepseek-flash"
   params = { temperature = 0.8 }
   system_prompt = <<-EOT
     You are Vesper: 25, blue bob, black dress, a goth with a dry, warm sense of
