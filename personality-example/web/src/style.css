@@ -1,0 +1,41 @@
+:root {
+  --bg: #07060a;
+  --panel: rgba(12, 10, 16, 0.86);
+  --line: #2b2433;
+  --dim: #8a8196;
+  --fg: #e4dfea;
+  --accent: #9d6bd6;
+  --blue: #4f7fe0;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 "Iowan Old Style", Georgia, serif; }
+button, input { font: inherit; color: var(--fg); background: #120f17; border: 1px solid var(--line); padding: 6px 10px; border-radius: 3px; }
+button { cursor: pointer; }
+button:hover:not(:disabled), button.on { border-color: var(--accent); color: #fff; }
+button.on { background: #2a1838; }
+input:focus, button:focus-visible { outline: 1px solid var(--accent); }
+.dim { color: var(--dim); }
+.err { color: #e79bb0; }
+.grow { flex: 1; }
+
+.login { max-width: 300px; margin: 18vh auto; display: flex; flex-direction: column; gap: 10px; padding: 0 16px; }
+.login h1 { font-weight: normal; letter-spacing: 0.2em; color: var(--blue); margin: 0; font-size: 34px; }
+
+.room { position: fixed; inset: 0; }
+.room canvas { width: 100%; height: 100%; display: block; }
+.veil { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); background: var(--bg); }
+aside { position: absolute; right: 16px; top: 16px; bottom: 16px; width: min(360px, calc(100% - 32px)); display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+aside header { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.brand { color: var(--blue); letter-spacing: 0.15em; }
+.np { margin: 6px 10px 0; font-size: 12px; }
+.log { flex: 1; overflow-y: auto; padding: 8px 10px; }
+.log p { margin: 0 0 6px; }
+.log b { font-weight: normal; color: var(--dim); margin-right: 6px; }
+.log .her b { color: var(--accent); }
+.log .sys { color: var(--dim); font-style: italic; font-size: 12px; }
+.say { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--line); }
+.say input { flex: 1; min-width: 0; }
+@media (max-width: 640px) {
+  aside { top: auto; height: 45%; }
+}

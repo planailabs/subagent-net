@@ -147,5 +147,6 @@ Implemented:
 - world simulation: `vesper_room::world` (pure) with tests
 - assets: Blender scripts and the three .glb files, checked by `crates/room/tests/assets.rs`
 - room server: `vesper-room` (login, WebSocket, world MCP, Piper/silent TTS, webhooks) with tests
+- web client (`web/`, Vue + Parcel + three.js): login, the 3D room following the state, clip blending (the pose's legs under an action's upper body), lip sync from the speech envelope, chat, push-to-talk (button or space; resampled to 16 kHz in the browser); `npm test` covers the pure logic
 
-Not yet: web client, stt stage, cluster file and launcher, end-to-end tests.
+Not yet: stt stage, cluster file and launcher, end-to-end tests.
