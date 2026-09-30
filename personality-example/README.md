@@ -14,7 +14,7 @@ herself, everyone she meets, and the room.
 nix develop .#personality                         # Rust, Postgres, node, Piper
 (cd personality-example/web && npm install && npm run build)
 cargo run -p personality -- adduser alice         # asks for a password
-DEEPSEEK_API_KEY=… cargo run -p personality -- up
+DEEPSEEK_API_KEY=… FIRECRAWL_API_KEY=… cargo run -p personality -- up
 ```
 
 Open the room at http://127.0.0.1:8700. The subnet hub UI at
@@ -23,6 +23,7 @@ her tool calls and the switchboard.
 
 - The first run downloads a Piper voice, the whisper model (`base.en`) and
   the e5 embedding model into `vesper-data/`.
+- `FIRECRAWL_API_KEY` gives her web search and scraping (Firecrawl's MCP server, run with npx). Without it she's offline.
 - `--silent` skips Piper (her mouth still moves). `--llm-url` points her
   mind at any OpenAI-compatible endpoint. `--database` (or `DATABASE_URL`)
   uses your Postgres instead of a private one in `vesper-data/pg`.

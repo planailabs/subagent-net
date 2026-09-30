@@ -4,11 +4,13 @@
 //! kitchen, brews, waits for the coffee maker, pours, brings it over, says
 //! so (Alice's browser gets the speech) and remembers who asked.
 
-use std::sync::{Arc, Mutex};
+mod common;
+
 use std::time::Duration;
 
+use common::{brain, launch, tool_result, wait, with_env};
 use futures::{SinkExt, StreamExt};
-use personality::{CLUSTER, Opts, stop_postgres, up};
+use personality::CLUSTER;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
@@ -36,97 +38,17 @@ fn script(message: &str) -> Vec<(&'static str, Value)> {
     }
 }
 
-type Log = Arc<Mutex<Vec<Value>>>;
-
-/// An OpenAI-compatible endpoint answering with the script.
-async fn brain() -> (String, Log) {
-    let log: Log = Arc::default();
-    let l2 = log.clone();
-    let app = axum::Router::new().route(
-        "/v1/chat/completions",
-        axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
-            let log = l2.clone();
-            async move {
-                log.lock().unwrap().push(body.clone());
-                let msgs = body["messages"].as_array().unwrap();
-                let last_user = msgs.iter().rposition(|m| m["role"] == "user").unwrap();
-                let done = msgs[last_user..].iter().filter(|m| m["role"] == "tool").count();
-                let steps = script(msgs[last_user]["content"].as_str().unwrap_or_default());
-                let chunks: Vec<String> = match steps.get(done) {
-                    Some((name, args)) => vec![
-                        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("c{}", msgs.len()),"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}]}).to_string(),
-                        json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}).to_string(),
-                    ],
-                    None => vec![
-                        json!({"choices":[{"delta":{"content":"done"}}]}).to_string(),
-                        json!({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1}}).to_string(),
-                    ],
-                };
-                let sse: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect::<String>() + "data: [DONE]\n\n";
-                ([("content-type", "text/event-stream")], sse)
-            }
-        }),
-    );
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/v1", l.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    (url, log)
-}
-
-/// The tool result that answered a call, from the brain's requests.
-fn tool_result(log: &Log, name: &str) -> Option<String> {
-    for body in log.lock().unwrap().iter().rev() {
-        let msgs = body["messages"].as_array().unwrap();
-        for (i, m) in msgs.iter().enumerate() {
-            if let Some(call) = m["tool_calls"].as_array().and_then(|c| c.iter().find(|c| c["function"]["name"] == name)) {
-                if let Some(r) = msgs[i..].iter().find(|r| r["role"] == "tool" && r["tool_call_id"] == call["id"]) {
-                    return Some(r["content"].as_str().unwrap_or_default().to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
 #[test]
 fn make_me_a_coffee() {
-    // SAFETY: before any other thread exists in this test binary's only test.
-    unsafe {
-        std::env::set_var("ROOM_MCP_TOKEN", "e2e-token");
-        std::env::set_var("SUBJECT_MEMORY_EMBEDDINGS", "off");
-        std::env::set_var("DEEPSEEK_API_KEY", "scripted");
-    }
-    let data = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vesper-e2e-{}", std::process::id()));
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(scenario(&data))));
-    stop_postgres(&data.join("pg"));
-    let _ = std::fs::remove_dir_all(&data);
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
+    // No FIRECRAWL_API_KEY: the web MCP server is unavailable, and she
+    // manages without it.
+    with_env("e2e", &[("ROOM_MCP_TOKEN", "e2e-token"), ("SUBJECT_MEMORY_EMBEDDINGS", "off"), ("DEEPSEEK_API_KEY", "scripted")], scenario);
 }
 
 async fn scenario(data: &std::path::Path) {
-    let (llm, log) = brain().await;
+    let (llm, log) = brain(script).await;
     let cluster = CLUSTER.replace("\"stt\", \"--models\"", "\"stt\", \"--fake\", \"could you make me a coffee\", \"--models\"");
-    let any = "127.0.0.1:0".parse().unwrap();
-    let r = up(
-        Opts {
-            data: data.to_path_buf(),
-            database: None,
-            room: any,
-            hub: any,
-            webhooks: any,
-            llm_url: Some(llm),
-            exe: env!("CARGO_BIN_EXE_personality").into(),
-            tts: vesper_room::tts::Tts::Silent,
-            time_scale: 10.0,
-            mcp_token: "e2e-token".into(),
-        },
-        &cluster,
-    )
-    .await
-    .unwrap();
+    let r = launch(data, llm, &cluster).await;
     r.room.users.set("alice", "wonderland").unwrap();
 
     // She wakes up and looks around.
@@ -170,14 +92,4 @@ async fn scenario(data: &std::path::Path) {
     assert!(tool_result(&log, "world.interact").is_some());
     wait("the memory about alice", || tool_result(&log, "memory.remember").is_some_and(|t| t.contains("person:alice"))).await;
     r.hub.shutdown();
-}
-
-async fn wait(what: &str, f: impl Fn() -> bool) {
-    for _ in 0..600 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
 }

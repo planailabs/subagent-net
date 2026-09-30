@@ -30,7 +30,7 @@ memory MCP (Rust, crates/memory, stdio) ◄────────────�
 world MCP (the room server) ◄───────────────────────────┘
 ```
 
-Vesper is the resident `vesper` of mixture `vesper` (agent type `vesper-mind` on DeepSeek, MCP servers `world` and `memory`), declared in [cluster.hcl](cluster.hcl). The resident's first message is a `woke_up` event.
+Vesper is the resident `vesper` of mixture `vesper` (agent type `vesper-mind` on DeepSeek, MCP servers `world`, `memory` and `web`), declared in [cluster.hcl](cluster.hcl). The resident's first message is a `woke_up` event.
 
 ## One shared room
 
@@ -51,6 +51,7 @@ Her plain answers are never shown. She acts only through tools, so every action 
 | `memory.remember(title, body, about)` | writes a memory about `self`, `person:<name>` or `world`; `[[links]]` connect memories. |
 | `memory.recall(query, about?, k?)` | hybrid search: BM25 and embedding similarity. |
 | `memory.read(title)` / `memory.forget(title)` / `memory.list(about?)` | |
+| `web.firecrawl_search(query)`, `web.firecrawl_scrape(url)`, … | Firecrawl's MCP server (`npx firecrawl-mcp@3.26.0`, stdio): she looks things up when asked about something she doesn't know or something current, and says where it came from. |
 
 ## The room and its things
 
@@ -82,6 +83,10 @@ Modelled in Blender by Python scripts in [blender/](blender/): `python3 blender/
 
 - **Vesper:** sculpted, not assembled from primitives. The body is one continuous mesh grown from a skin-modifier skeleton, subdivided, shaped with sculpt-style brushes (bust, hips, waist, calves, collarbones) and heat-weighted to the rig. The head is a dense mesh sculpted the same way (jaw, chin, cheekbones, eye sockets, nose, lips), with textured eyes, winged liner and brows. The mouth is cut along a straight line so it can open onto a dark mouth. She wears a blue bob with blunt bangs and strand grooves (a solidified shell), an off-shoulder black dress with a sweetheart neckline and long sleeves with flared cuffs (shells lifted off the body), a folded skirt with a violet hem and sash (following the thighs lower down), fishnet tights, platform boots with a buckle strap, and a choker. The armature has clips `idle`, `walk`, `talk`, `wave`, `reach`, `sit`, `think`, `nod`, `shrug`. A `mouth_open` shape key drops the jaw about a hinge and follows her speech loudness. The brushes are plain functions in `blender/vesper.py`, so the sculpt rebuilds identically.
 - **Objects:** coffee maker (with a pot), mug, floor lamp, record player, armchair, bookshelf with books, window, plus the room shell.
+
+## The web
+
+The `web` MCP server is Firecrawl's own (`firecrawl-mcp` from npm, pinned), started by the node with `FIRECRAWL_API_KEY` from its environment; `FIRECRAWL_API_URL` (inherited) points it at a self-hosted Firecrawl. A spawn needs every MCP server of its mixture live, so without a key the launcher takes `web` out of the mixture and warns: Vesper runs, just without the web.
 
 ## Voice in and out
 
@@ -150,6 +155,7 @@ Implemented:
 - room server: `vesper-room` (login, WebSocket, world MCP, Piper/silent TTS, webhooks) with tests
 - stt stage: `vesper-stt` with tests (a real Piper → whisper round trip is `--ignored`)
 - launcher and end-to-end test: `personality`, `cluster.hcl`
+- web: Firecrawl MCP; `tests/web.rs` (`--ignored`: npx) runs the real `firecrawl-mcp` against a stand-in Firecrawl API, and Vesper answers from the search
 - web client (`web/`, Vue + Parcel + three.js): login, the 3D room following the state, clip blending (the pose's legs under an action's upper body), lip sync from the speech envelope, chat, push-to-talk (button or space; resampled to 16 kHz in the browser); `npm test` covers the pure logic
 
 Everything described here is implemented.

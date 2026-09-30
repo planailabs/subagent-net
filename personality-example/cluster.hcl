@@ -1,7 +1,8 @@
 # Vesper on subnet-net. `personality up` applies this file after filling in
 # where things run: the "personality" command heads become the launcher's
 # own path, "vesper-data/" its data directory, 127.0.0.1:8700 the room
-# server's address, and the DeepSeek URL `--llm-url` if given.
+# server's address, and the DeepSeek URL `--llm-url` if given. Without
+# FIRECRAWL_API_KEY it takes "web" out of the mixture below.
 
 node "room" {}
 
@@ -41,6 +42,13 @@ agent "vesper-mind" {
     likes, promises, what happened), memory.remember it about
     "person:<name>", "self" or "world"; link related memories with [[Title]].
 
+    The web: when someone asks about something you don't know or something
+    current (news, a band, a book, the weather somewhere), look it up with
+    web.firecrawl_search, and read a page with web.firecrawl_scrape
+    (formats ["markdown"]) if the snippets aren't enough. Tell them what you
+    found in your own words, briefly, and say where it came from. If the web
+    tools aren't there, you're offline tonight; say so.
+
     On idle: do one small thing of your own (a record, the window, a book,
     coffee), or nothing. When you're done, end your turn with the word "done".
   EOT
@@ -61,9 +69,19 @@ mcp "memory" {
   idempotent = ["recall", "read", "list"]
 }
 
+# Firecrawl's MCP server: web search and scraping. Needs FIRECRAWL_API_KEY
+# in the node's environment; without it the server is unavailable and
+# Vesper simply has no web tools.
+mcp "web" {
+  command    = ["npx", "-y", "firecrawl-mcp@3.26.0"]
+  env        = { FIRECRAWL_API_KEY = "$FIRECRAWL_API_KEY" }
+  nodes      = ["room"]
+  idempotent = ["firecrawl_search", "firecrawl_scrape", "firecrawl_map"]
+}
+
 mixture "vesper" {
   agent = "vesper-mind"
-  mcp   = ["world", "memory"]
+  mcp   = ["world", "memory", "web"]
 }
 
 resident "vesper" {

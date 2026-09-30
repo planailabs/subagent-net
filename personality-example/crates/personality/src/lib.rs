@@ -35,10 +35,18 @@ pub struct Opts {
     pub mcp_token: String,
 }
 
-/// The cluster file with this run's paths and addresses filled in.
+/// The cluster file with this run's paths and addresses filled in, and
+/// without the web (Firecrawl) MCP server in her mixture when there's no
+/// `FIRECRAWL_API_KEY`: a spawn needs every server of its mixture live.
 pub fn render_cluster(text: &str, o: &Opts, room: SocketAddr) -> String {
     let quoted = |p: &Path| format!("{:?}", p.display().to_string());
     let data = format!("{}/", o.data.display());
+    let text = if std::env::var_os("FIRECRAWL_API_KEY").is_some() {
+        text.to_string()
+    } else {
+        tracing::warn!("FIRECRAWL_API_KEY isn't set: Vesper has no web search");
+        text.replace(r#"mcp   = ["world", "memory", "web"]"#, r#"mcp   = ["world", "memory"]"#)
+    };
     text.replace("[\"personality\",", &format!("[{},", quoted(&o.exe)))
         .replace("vesper-data/", &data)
         .replace(ROOM_DEFAULT, &room.to_string())
