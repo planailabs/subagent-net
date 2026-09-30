@@ -86,7 +86,7 @@ Modelled in Blender by Python scripts in [blender/](blender/): `python3 blender/
 ## Voice in and out
 
 - **Out:** `say` runs Piper (`piper` from nixpkgs; the voice, `en_GB-jenny_dioco-medium` by default, is downloaded from Hugging Face into `<data>/voices` once) to WAV, computes a loudness envelope (RMS per 40 ms, normalised), and sends both to all browsers; the tool returns when she's done speaking. Without Piper on PATH (`--tts auto`), or with `--tts silent` (tests), speech is silent, 0.3 s per word, and her mouth still moves.
-- **In:** push-to-talk in the browser records 16 kHz mono PCM. The room server wraps each utterance as a WAV blob and posts `{from, audio: {"$blob": …}}` to the `voice` webhook. The `stt` stage (crates/stt, whisper.cpp via whisper-rs, model downloaded once) turns it into `{from, text}`. Route `heard` sends it to Vesper. The speaker's identity travels with the utterance.
+- **In:** push-to-talk in the browser records 16 kHz mono PCM. The room server wraps each utterance as a WAV blob and posts `{from, audio: {"$blob": …}}` to the `voice` webhook. The `stt` stage (`vesper-stt`, crates/stt: whisper.cpp via whisper-rs, `ggml-base.en` downloaded into `vesper-data/models` once) gets each event as a JSON line and turns it into `{from, text}`. It drops the audio, so it never reaches the blob store; silence and annotations like `[BLANK_AUDIO]` give no event; `--fake TEXT` hears the same words every time (tests). Route `heard` sends it to Vesper. The speaker's identity travels with the utterance.
 
 ## Memory
 
@@ -120,7 +120,7 @@ The room server keeps users in `<data>/users.json` (`vesper-room adduser <name>`
 
 ## Running
 
-`nix develop` has everything (Rust, Postgres, node, piper, whisper.cpp, Blender for the asset build). `cargo run -p personality -- up` starts, in one process:
+`nix develop` builds everything (Rust, Postgres, node, cmake and libclang for whisper.cpp); `nix develop .#personality` adds Piper, and `nix develop .#assets` has Blender for the headless asset build. `cargo run -p personality -- up` starts, in one process:
 
 - a Postgres (throwaway, like the tests, or `$DATABASE_URL`)
 - the subnet hub and node
@@ -147,6 +147,7 @@ Implemented:
 - world simulation: `vesper_room::world` (pure) with tests
 - assets: Blender scripts and the three .glb files, checked by `crates/room/tests/assets.rs`
 - room server: `vesper-room` (login, WebSocket, world MCP, Piper/silent TTS, webhooks) with tests
+- stt stage: `vesper-stt` with tests (a real Piper → whisper round trip is `--ignored`)
 - web client (`web/`, Vue + Parcel + three.js): login, the 3D room following the state, clip blending (the pose's legs under an action's upper body), lip sync from the speech envelope, chat, push-to-talk (button or space; resampled to 16 kHz in the browser); `npm test` covers the pure logic
 
-Not yet: stt stage, cluster file and launcher, end-to-end tests.
+Not yet: cluster file and launcher, end-to-end tests.

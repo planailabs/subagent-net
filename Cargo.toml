@@ -29,6 +29,7 @@ rpassword = "7"
 tower-http = { version = "0.6", features = ["fs"] }
 gltf = "1"
 hound = "3"
+whisper-rs = "0.16"
 mime_guess = "2"
 ratatui = "0.30"
 cel-interpreter = { version = "0.10", features = ["json"] }
