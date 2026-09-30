@@ -8,6 +8,7 @@ pub mod db;
 pub mod ha;
 pub mod http;
 pub mod relay;
+pub mod router;
 pub mod switchboard;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -181,6 +182,8 @@ pub struct Hub {
     fenced: std::sync::atomic::AtomicBool,
     /// Cancelled by `shutdown`: background tasks end, leadership is released.
     stop: tokio_util::sync::CancellationToken,
+    /// Pre-loads lazy tools for mixtures with a `router`.
+    router: std::sync::RwLock<Arc<router::Router>>,
 }
 
 /// Events only a node may propose; everything else originates at the hub.
@@ -231,6 +234,7 @@ impl Hub {
             leader_changed: Notify::new(),
             fenced: Default::default(),
             stop: Default::default(),
+            router: std::sync::RwLock::new(Arc::new(router::Router::default_e5())),
         });
         tokio::spawn(hub.clone().elect(db_url.to_string(), advertise.to_string()));
         tokio::spawn(hub.clone().board_timers());
@@ -800,12 +804,38 @@ impl Hub {
         let mut st = self.st.lock().await;
         match &to {
             Addr::Agent(id) if st.agents.contains_key(id) => {
-                self.commit(&mut st, *id, vec![Event::Inbox { from: caller.clone(), content, reply: false }]).await?
+                let mut events = self.route_tools(&st.agents[id].a, &content).await;
+                events.push(Event::Inbox { from: caller.clone(), content, reply: false });
+                self.commit(&mut st, *id, events).await?
             }
             Addr::Agent(id) => return no_agent(*id),
             other => self.put_mail(other, &Mail { from: caller.clone(), content, status: None }).await?,
         }
         Ok(Done::OK)
+    }
+
+    /// Replaces the tool router (another embedder, tests).
+    pub fn set_router(&self, r: router::Router) {
+        *self.router.write().unwrap() = Arc::new(r);
+    }
+
+    /// `ToolsLoaded` for the lazy tools matching a message, if the agent's
+    /// mixture has a router.
+    // ponytail: embeds under the hub lock (one short query per message, tools are cached); move out if it shows up in latency.
+    async fn route_tools(&self, a: &Agent, text: &str) -> Vec<Event> {
+        let def = {
+            let c = self.cluster.read().unwrap();
+            a.spec.mixture.as_ref().and_then(|m| c.spec.mixtures.get(m)).and_then(|m| m.router.clone())
+        };
+        let Some(def) = def else { return vec![] };
+        let tools: Vec<ToolDef> = a.unloaded().into_iter().cloned().collect();
+        let router = self.router.read().unwrap().clone();
+        let names = router.pick(&def, tools, text.to_string()).await;
+        if names.is_empty() {
+            return vec![];
+        }
+        tracing::debug!(agent = %a.id, tools = ?names, "router pre-loads");
+        vec![Event::ToolsLoaded { names }]
     }
 
     /// `resident:<name>` → the resident's agent; other addresses unchanged.
@@ -972,12 +1002,16 @@ impl Hub {
         let mut tools = subnet_core::tools::builtin_tools();
         let mut mcp = std::collections::BTreeMap::new();
         let mut idempotent = vec![];
+        let mut lazy = vec![];
         for m in &mcps {
             let id = c.mcp_id(m).unwrap();
             let Some(listed) = st.nodes.values().find_map(|n| n.mcps.get(&id)) else {
                 return bad(format!("no live node runs mcp {m:?}, needed by {name:?}"));
             };
             tools.extend(listed.iter().map(|t| ToolDef { name: format!("{m}.{}", t.name), ..t.clone() }));
+            if c.mcps[m].lazy {
+                lazy.extend(listed.iter().map(|t| format!("{m}.{}", t.name)));
+            }
             idempotent.extend(c.mcps[m].idempotent.iter().map(|t| format!("{m}.{t}")));
             mcp.insert(m.clone(), id);
         }
@@ -1017,7 +1051,7 @@ impl Hub {
             }
             None => (def.budget.clone(), 0),
         };
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy };
         Ok((spec, reserved))
     }
 
@@ -1034,7 +1068,9 @@ impl Hub {
         if let Some(p) = parent {
             self.commit(st, p, vec![Event::ChildSpawned { id, reserved }]).await?;
         }
-        self.commit(st, id, vec![Event::Inbox { from: caller.clone(), content: prompt, reply: false }]).await?;
+        let mut events = self.route_tools(&st.agents[&id].a, &prompt).await;
+        events.push(Event::Inbox { from: caller.clone(), content: prompt, reply: false });
+        self.commit(st, id, events).await?;
         Ok(Spawned { id, ty })
     }
 

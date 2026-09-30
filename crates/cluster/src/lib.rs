@@ -153,6 +153,39 @@ pub struct McpDef {
     /// Tools safe to re-run after a crash interrupted them.
     #[serde(default)]
     pub idempotent: Vec<String>,
+    /// Agents see only this server's tool names until they load them
+    /// (`load_tools`, or a mixture's router). `false`: full schemas always.
+    #[serde(default = "yes")]
+    pub lazy: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Pre-loads lazy tools that match a message (embedding similarity between
+/// the message and the tools' names and descriptions).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouterDef {
+    /// At most this many tools per message.
+    #[serde(default = "RouterDef::default_top_k")]
+    pub top_k: usize,
+    /// Cosine similarity a tool needs. e5 squeezes scores into a narrow high
+    /// band (unrelated ≈ 0.75, related ≈ 0.8), so this is a coarse filter:
+    /// a wrong pre-load costs a few schema tokens, a missed one is still a
+    /// `load_tools` away.
+    #[serde(default = "RouterDef::default_min_score")]
+    pub min_score: f32,
+}
+
+impl RouterDef {
+    fn default_top_k() -> usize {
+        3
+    }
+    fn default_min_score() -> f32 {
+        0.78
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -166,6 +199,9 @@ pub struct MixtureDef {
     /// Mailboxes agents of this mixture may read.
     #[serde(default)]
     pub mailboxes: Vec<String>,
+    /// Pre-load matching lazy tools for every message sent to its agents.
+    #[serde(default)]
+    pub router: Option<RouterDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -493,6 +529,11 @@ impl Cluster {
                 if !self.mcps.contains_key(m) {
                     return invalid(format!("{ctx}: unknown mcp {m:?}"));
                 }
+            }
+            if let Some(r) = &x.router
+                && (r.top_k == 0 || !(-1.0..=1.0).contains(&r.min_score))
+            {
+                return invalid(format!("{ctx}: router needs top_k >= 1 and min_score in -1..1"));
             }
         }
         for (name, r) in &self.residents {

@@ -87,10 +87,11 @@ async fn mcp_server(stats: Arc<Stats>) -> String {
 const SYS: &str = "tool user";
 
 /// Agent type `base` on nodes s and s2; MCP type `t` (the test server) on
-/// `mcp_nodes`; mixture `tooler` binds them.
-fn cluster(mcp_url: &str, mcp_nodes: &[&str], idempotent: &[&str]) -> String {
+/// `mcp_nodes`; mixture `tooler` binds them. `mcp_extra` and `mix_extra` go
+/// into the `mcp` and `mixture` blocks.
+fn cluster(mcp_url: &str, mcp_nodes: &[&str], idempotent: &[&str], mcp_extra: &str, mix_extra: &str) -> String {
     format!(
-        "node \"s\" {{}}\nnode \"s2\" {{}}\nnode \"m\" {{}}\n{}\nmcp \"t\" {{\n  url = {mcp_url:?}\n  nodes = {mcp_nodes:?}\n  idempotent = {idempotent:?}\n}}\nmixture \"tooler\" {{\n  agent = \"base\"\n  mcp = [\"t\"]\n}}\n",
+        "node \"s\" {{}}\nnode \"s2\" {{}}\nnode \"m\" {{}}\n{}\nmcp \"t\" {{\n  url = {mcp_url:?}\n  nodes = {mcp_nodes:?}\n  idempotent = {idempotent:?}\n  {mcp_extra}\n}}\nmixture \"tooler\" {{\n  agent = \"base\"\n  mcp = [\"t\"]\n  {mix_extra}\n}}\n",
         agent("base", SYS, "{llm}", &["s", "s2"], ""),
     )
 }
@@ -113,10 +114,15 @@ impl Env {
         Self::with(&["s", "s2"], idempotent).await
     }
 
+    /// Eager tools, like before lazy loading.
     async fn with(mcp_nodes: &[&str], idempotent: &[&str]) -> Self {
+        Self::custom(mcp_nodes, idempotent, "lazy = false", "").await
+    }
+
+    async fn custom(mcp_nodes: &[&str], idempotent: &[&str], mcp_extra: &str, mix_extra: &str) -> Self {
         let stats = Arc::new(Stats::default());
         let url = mcp_server(stats.clone()).await;
-        Self { net: Net::new(&cluster(&url, mcp_nodes, idempotent)).await, stats }
+        Self { net: Net::new(&cluster(&url, mcp_nodes, idempotent, mcp_extra, mix_extra)).await, stats }
     }
 
     async fn spawn(&self) -> AgentId {
@@ -276,7 +282,7 @@ async fn stdio_mcp_server_with_env() {
     // SAFETY: tests in this binary don't otherwise read or write this variable.
     unsafe { std::env::set_var("SUBNET_TEST_GREETING", "hello from env") };
     let cluster = format!(
-        "node \"s\" {{}}\n{}\nmcp \"echo\" {{\n  command = [{:?}]\n  env = {{ GREETING = \"$SUBNET_TEST_GREETING\", PLAIN = \"lit\" }}\n  nodes = [\"s\"]\n}}\nmixture \"tooler\" {{\n  agent = \"base\"\n  mcp = [\"echo\"]\n}}\n",
+        "node \"s\" {{}}\n{}\nmcp \"echo\" {{\n  command = [{:?}]\n  env = {{ GREETING = \"$SUBNET_TEST_GREETING\", PLAIN = \"lit\" }}\n  nodes = [\"s\"]\n  lazy = false\n}}\nmixture \"tooler\" {{\n  agent = \"base\"\n  mcp = [\"echo\"]\n}}\n",
         agent("base", SYS, "{llm}", &["s"], ""),
         echo_server()
     );
@@ -342,4 +348,61 @@ async fn hard_pause_cancels_every_parallel_call() {
     e.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
     e.until("both cancelled", || stats.slow_dropped.load(Ordering::SeqCst) == 2).await;
     e.net.until(id, "paused", |t| t["paused"] == true).await;
+}
+
+fn offered(body: &Value) -> Vec<String> {
+    body["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
+}
+
+#[tokio::test]
+async fn lazy_tools_are_loaded_on_demand() {
+    let e = Env::custom(&["s", "s2"], &[], "", "").await;
+    e.node("s").await;
+    e.llm.push(SYS, |_| tool_call("c1", "load_tools", json!({"names": ["t.echo"]})));
+    e.llm.push(SYS, |_| tool_call("c2", "t.echo", json!({"text": "hi"})));
+    e.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
+    e.spawn().await;
+    assert_eq!(e.mail().await["content"], "echo: hi");
+    let r = e.llm.requests();
+    let first = offered(&r[0]);
+    assert!(!first.contains(&"t.echo".to_string()) && first.contains(&"load_tools".to_string()), "{first:?}");
+    let load = r[0]["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "load_tools").unwrap();
+    assert!(load["function"]["description"].as_str().unwrap().contains("- t.echo: "), "the catalogue lists it");
+    assert!(offered(&r[1]).contains(&"t.echo".to_string()), "loaded for the next call");
+    let load = r[1]["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "load_tools").unwrap();
+    let catalogue = load["function"]["description"].as_str().unwrap();
+    assert!(!catalogue.contains("t.echo") && catalogue.contains("- t.slow: "), "{catalogue}");
+}
+
+/// Similar texts share words (hashed into a few dimensions).
+struct Words;
+impl subnet::hub::router::Embed for Words {
+    fn embed(&self, texts: &[String], _: bool) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let mut v = vec![0f32; 64];
+                for w in t.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 2) {
+                    v[w.bytes().fold(7usize, |h, b| h.wrapping_mul(31) ^ b as usize) % 64] += 1.0;
+                }
+                v
+            })
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn the_router_preloads_matching_tools() {
+    let e = Env::custom(&["s", "s2"], &[], "", "router {\n    top_k = 1\n    min_score = 0.2\n  }").await;
+    e.hub.set_router(subnet::hub::router::Router::with(Arc::new(Words)));
+    e.node("s").await;
+    e.llm.push(SYS, |_| text(&["ok"]));
+    e.llm.push(SYS, |_| text(&["ok"]));
+    // "echo" matches the echo tool's name and description; nothing else does.
+    let id = e.net.spawn("tooler", "please echo this text back").await;
+    e.mail().await;
+    let first = offered(&e.llm.requests()[0]);
+    assert!(first.contains(&"t.echo".to_string()), "{first:?}");
+    assert!(!first.contains(&"t.slow".to_string()), "only the top match: {first:?}");
+    let _ = id;
 }

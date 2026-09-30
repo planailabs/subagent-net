@@ -4319,6 +4319,8 @@ dependencies = [
  "chrono",
  "clap",
  "croner",
+ "dotenvy",
+ "fastembed",
  "futures",
  "globset",
  "indexmap",

@@ -460,7 +460,7 @@ impl Runner {
                 Effect::CallLlm => {
                     let mut msgs = vec![Message::system(self.rt.system.clone())];
                     msgs.extend(self.a.llm_messages());
-                    let tools = self.a.spec.tools.clone();
+                    let tools = self.a.offered_tools();
                     let abort = self.inflight.child_token();
                     tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, self.proposer(), abort));
                 }

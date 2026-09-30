@@ -32,6 +32,7 @@ mcp "memory" {
   env        = { LOG = "warn", TOKEN = "$MEMORY_TOKEN" }  # $VAR = node env
   nodes      = ["gpu-1"]
   idempotent = ["search"]
+  lazy       = false                                      # schemas always offered
 }
 mcp "web" {
   url = "https://mcp.example.com/mcp"                     # streamable HTTP
@@ -44,6 +45,7 @@ mixture "researcher" {
   agent     = "deepseek-flash"
   mcp       = ["memory", "web"]
   mailboxes = ["door-events"]                # readable via mailbox_take
+  router { top_k = 3 }                       # pre-load matching lazy tools
 }
 
 # --- residents: long-lived named agents --------------------------------------

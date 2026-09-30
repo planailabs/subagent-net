@@ -26,6 +26,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 fastembed = { version = "7", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls"] }
 argon2 = "0.5"
 rpassword = "7"
+dotenvy = "0.15"
 tower-http = { version = "0.6", features = ["fs"] }
 gltf = "1"
 hound = "3"

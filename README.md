@@ -27,6 +27,8 @@ subnet tui                       # the agent park in the terminal
 
 Open http://127.0.0.1:7700 for the web UI: the agent park, live transcripts with pause/resume/approve, senses, the switchboard's routes and deliveries, and the cluster spec.
 
+Every `subnet` command reads `./.env` and `--env-file PATH` before anything else (the real environment wins), so `DATABASE_URL`, `SUBNET_TOKEN` or API keys can live there.
+
 A real deployment:
 
 1. Run `subnet hub` (with `DATABASE_URL` and `SUBNET_ADMIN_TOKEN`); several hubs can share the database.

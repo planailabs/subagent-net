@@ -21,6 +21,10 @@ struct Cli {
     /// Your token for the hub.
     #[arg(long, global = true, env = "SUBNET_TOKEN", hide_env_values = true)]
     token: Option<String>,
+    /// Load environment variables from this file (repeatable; `./.env` is
+    /// read too). Variables already set win.
+    #[arg(long, global = true)]
+    env_file: Vec<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -193,8 +197,13 @@ async fn run_op(name: &str, sub: &ArgMatches, c: &Client) -> anyhow::Result<()> 
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Before parsing (flags have env defaults) and before any thread exists.
+    subnet::envfile::load(&std::env::args().collect::<Vec<_>>())?;
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     let m = cli().get_matches();
     let (name, sub) = m.subcommand().expect("subcommand required");
     let builtin = matches!(name, "hub" | "node" | "dev" | "tail" | "apply" | "tui");

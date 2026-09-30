@@ -22,6 +22,8 @@ globset.workspace = true
 notify.workspace = true
 schemars.workspace = true
 anyhow.workspace = true
+dotenvy.workspace = true
+fastembed = { workspace = true, optional = true }
 clap.workspace = true
 axum.workspace = true
 futures.workspace = true
@@ -40,9 +42,11 @@ uuid.workspace = true
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "json", "migrate", "macros"] }
 
 [features]
-default = ["webui"]
+default = ["webui", "router"]
 # Serve the web UI (webui/dist, built with `npm run build`) from the hub.
 webui = ["dep:rust-embed", "dep:mime_guess"]
+# The tool router's default embedder (e5 via fastembed, downloaded on first use).
+router = ["dep:fastembed"]
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["cookies"] }

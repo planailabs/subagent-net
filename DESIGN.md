@@ -30,6 +30,7 @@ A distributed network of LLM agents. Every agent is a resumable state machine: i
 - **Hub**: the control plane. All state lives in Postgres; schema changes go through `sqlx migrate`. Several hubs can run against one database: one leader serves, the rest stand by (see [High availability](#high-availability)).
 - **Node**: a worker process started with a hub URL, a node name and a token. It connects out to the hub (NAT-friendly), receives its part of the cluster spec, and runs the agent types, MCP servers and senses assigned to it. Credentials are resolved on the node and never leave it.
 - **One binary**, `subnet`: `hub`, `node`, `dev` (hub and node in one process), `tui`, and every API operation as a CLI command.
+- **Environment files:** before parsing its flags (several read env defaults: `DATABASE_URL`, `SUBNET_HUB`, `SUBNET_TOKEN`, …), `subnet` loads `--env-file PATH` (repeatable) and then `./.env`. A variable that is already set is never overwritten: the real environment wins, then earlier files. Nodes resolve credentials (`$VAR`) from the result, so API keys can live in a node's `.env`.
 
 ## Cluster files (orchestration)
 
@@ -69,6 +70,7 @@ mcp "memory" {
   env        = { LOG = "warn", TOKEN = "$MEMORY_TOKEN" }  # $VAR = node env
   nodes      = ["gpu-1"]
   idempotent = ["search"]
+  lazy       = false                                      # schemas always offered
 }
 mcp "web" {
   url = "https://mcp.example.com/mcp"                     # streamable HTTP
@@ -81,6 +83,7 @@ mixture "researcher" {
   agent     = "deepseek-flash"
   mcp       = ["memory", "web"]
   mailboxes = ["door-events"]                # readable via mailbox_take
+  router { top_k = 3 }                       # pre-load matching lazy tools
 }
 
 # --- residents: long-lived named agents --------------------------------------
@@ -236,6 +239,7 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
   | `spawn_agent(type, prompt)` | `type` is a mixture (or bare agent type) the parent's `spawns` allows; non-blocking |
   | `send_message(to, content)` | any address |
   | `wait_for(ids)` | blocks until each child has reported |
+  | `load_tools(names)` | loads lazy tools' schemas (see [Lazy tools](#lazy-tools)); offered while any are unloaded |
   | `mailbox_take(name, max)` / `mailbox_peek(name, max)` | mailboxes the mixture lists |
   | `blob_get(ref)` | fetch a blob as text/base64 |
   | `list_agents`, `list_types` | |
@@ -253,6 +257,22 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
   - Otherwise the node sends `McpCall { call_id, agent, epoch, mcp, tool, args }` to the hub. The hub checks that the agent's mixture includes that MCP type and forwards the call to the least-loaded node running it. The result comes back the same way.
   - Hard pause turns into `McpCancel`, which reaches the server as `notifications/cancelled`.
 - Routes can call MCP tools directly with event data (`deliver { mcp { … } }`). The hub performs these calls like any other, with retries for idempotent tools.
+
+### Lazy tools
+
+MCP tools are **lazy** by default: the model sees only their names until it loads them, which keeps big servers (dozens of tools) out of every prompt. `lazy = false` on an `mcp` block offers its full schemas from the start.
+
+- The spec lists the lazy tool names (`Spec.lazy`); the agent's state keeps what's loaded (`Agent.loaded`), so replay, resume and forks keep it.
+- Each LLM call offers the built-ins, eager tools and loaded tools, plus `load_tools` while anything is left. `load_tools`' description is the catalogue of what's not loaded (`- web.search: <first sentence>`).
+- `load_tools { names }` takes tool names or a server name (all its tools). The state machine resolves it itself, like `wait_for`: no node round trip, and the result (`loaded: …; unknown: …`) goes into the transcript.
+- A call to a lazy tool that isn't loaded doesn't run: it gets loaded and the model is told to call again, now with the schema.
+
+### The tool router (optional)
+
+A mixture with a `router { top_k = 3, min_score = 0.78 }` block gets matching lazy tools pre-loaded for every message the hub delivers to its agents (`send`, route deliveries, a spawn's prompt; not reports). The hub embeds the message and each unloaded tool's name and description and appends `ToolsLoaded { names }` right before the `Inbox` event, so the model sees their schemas on its first call.
+
+- Similarity is cosine over multilingual e5-small embeddings (fastembed, downloaded into `$SUBNET_MODELS`, default `subnet-models/`, on first use; the `router` cargo feature). Tool embeddings are cached. e5 puts scores in a narrow band, so `min_score` is a coarse filter: a wrong pre-load costs a few schema tokens, and a missed one is still a `load_tools` away.
+- Without a model (download failed, feature off) the router logs a warning and pre-loads nothing.
 
 ## Senses, streams and the switchboard
 

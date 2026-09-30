@@ -184,3 +184,36 @@ fn every_example_file_is_valid() {
     }
     assert!(n >= 2);
 }
+
+#[test]
+fn mcp_servers_are_lazy_unless_told_and_mixtures_may_route() {
+    let c = with(
+        r#"
+mcp "web" {
+  command = ["web-mcp"]
+  nodes   = ["n1"]
+}
+mcp "world" {
+  url   = "http://w/mcp"
+  nodes = ["n1"]
+  lazy  = false
+}
+mixture "m" {
+  agent  = "a"
+  mcp    = ["web", "world"]
+  router {
+    top_k = 5
+  }
+}
+mixture "plain" {
+  agent = "a"
+}
+"#,
+    )
+    .unwrap();
+    assert!(c.mcps["web"].lazy);
+    assert!(!c.mcps["world"].lazy);
+    assert_eq!(c.mixtures["m"].router, Some(RouterDef { top_k: 5, min_score: 0.78 }));
+    assert_eq!(c.mixtures["plain"].router, None);
+    assert!(err("mixture \"m\" {\n agent = \"a\"\n router { top_k = 0 }\n}").contains("top_k"));
+}
