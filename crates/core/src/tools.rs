@@ -118,7 +118,7 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
     }
     let a = &call.function.arguments;
     Some(match call.function.name.as_str() {
-        "spawn_agent" => parse::<Spawn>(a).map(|s| Op::Spawn { ty: s.ty, prompt: s.prompt }),
+        "spawn_agent" => parse::<Spawn>(a).map(|s| Op::Spawn { ty: s.ty, prompt: s.prompt, tenant: None }),
         "send_message" => parse::<Send>(a).map(|s| Op::Send { to: s.to, content: s.content }),
         "list_agents" => Ok(Op::ListAgents),
         "list_types" => Ok(Op::ListTypes),
@@ -159,7 +159,7 @@ mod tests {
     fn spawn_args() {
         assert_eq!(
             builtin_op(&call("spawn_agent", r#"{"type":"coder","prompt":"go"}"#)).unwrap().unwrap(),
-            Op::Spawn { ty: "coder".into(), prompt: "go".into() }
+            Op::Spawn { ty: "coder".into(), prompt: "go".into(), tenant: None }
         );
     }
 

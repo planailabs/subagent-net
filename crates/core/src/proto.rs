@@ -13,6 +13,9 @@ pub enum Op {
     Spawn {
         ty: String,
         prompt: String,
+        /// Only from outside the cluster; agents' children inherit theirs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant: Option<String>,
     },
     Send {
         to: Addr,

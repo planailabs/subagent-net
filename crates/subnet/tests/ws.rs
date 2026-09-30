@@ -65,7 +65,7 @@ async fn raw_node_protocol_and_reassignment_on_disconnect() {
     send(&mut ws, &ready).await;
     wait_configured(&hub, "remote").await;
 
-    let spawned = hub.op(&Addr::root(), Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap();
+    let spawned = hub.op(&Addr::root(), Op::Spawn { ty: "worker".into(), prompt: "hi".into(), tenant: None }).await.unwrap();
     let id = common::id_of(&spawned);
     let ToNode::Assign { agent, epoch, .. } = next(&mut ws).await else { panic!() };
     assert_eq!(agent, id);
@@ -123,7 +123,7 @@ async fn real_node_over_websocket_answers() {
     let hubs = format!("http://127.0.0.1:1,{base}");
     let task = tokio::spawn(async move { subnet::node::ws::run(node, &hubs).await });
     wait_configured(&hub, "w").await;
-    hub.op(&Addr::root(), Op::Spawn { ty: "worker".into(), prompt: "hi".into() }).await.unwrap();
+    hub.op(&Addr::root(), Op::Spawn { ty: "worker".into(), prompt: "hi".into(), tenant: None }).await.unwrap();
     let mail = hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(5000) }).await.unwrap();
     assert_eq!(mail[0]["content"], "over the wire");
     task.abort();

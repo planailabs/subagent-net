@@ -48,7 +48,7 @@ async fn deposed_leader_is_fenced_off() {
         .await
         .unwrap();
     common::net::node_ready(&a, "s").await;
-    let id = common::id_of(&a.op(&Addr::root(), Op::Spawn { ty: "w".into(), prompt: "x".into() }).await.unwrap());
+    let id = common::id_of(&a.op(&Addr::root(), Op::Spawn { ty: "w".into(), prompt: "x".into(), tenant: None }).await.unwrap());
     // Another hub became leader behind a's back (e.g. a partition): the term moved on.
     let pool = sqlx::PgPool::connect(&db).await.unwrap();
     sqlx::query("update hub_leader set term = term + 1").execute(&pool).await.unwrap();

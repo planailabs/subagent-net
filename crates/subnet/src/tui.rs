@@ -430,6 +430,7 @@ mod tests {
             budget: Budget { max_tokens: Some(100), ..Default::default() },
             reserved: 0,
             compactions: 0,
+            tenant: None,
             seq: 1,
             awaiting_approval: None,
             last: Some("all done".into()),

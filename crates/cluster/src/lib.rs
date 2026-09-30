@@ -188,6 +188,14 @@ pub struct McpDef {
     /// (`load_tools`, or a mixture's router). `false`: full schemas always.
     #[serde(default = "yes")]
     pub lazy: bool,
+    /// One server per tenant (a stdio command): `${TENANT}` in `env` is the
+    /// tenant of the agent calling. Started on first use, stopped when idle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_tenant: bool,
+    /// The tenant of the instance that lists the tools and serves agents
+    /// without a tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tenant: Option<String>,
 }
 
 fn yes() -> bool {
@@ -543,6 +551,15 @@ impl Cluster {
             }
             if m.credential.is_some() && m.url.is_none() {
                 return invalid(format!("{ctx}: credential is for url servers; use env for stdio"));
+            }
+            if m.per_tenant && m.command.is_none() {
+                return invalid(format!("{ctx}: per_tenant needs a command (each tenant gets its own process)"));
+            }
+            if m.per_tenant && m.default_tenant.is_none() {
+                return invalid(format!("{ctx}: per_tenant needs a default_tenant (its instance lists the tools and serves agents without a tenant)"));
+            }
+            if m.default_tenant.is_some() && !m.per_tenant {
+                return invalid(format!("{ctx}: default_tenant only applies with per_tenant"));
             }
             if m.nodes.is_empty() {
                 return invalid(format!("{ctx}: nodes must not be empty"));

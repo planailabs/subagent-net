@@ -421,9 +421,10 @@ impl Hub {
                         let hub_id = st.next_mcp;
                         st.next_mcp += 1;
                         st.mcp_pending.insert(hub_id, McpPending { from: Some(conn), from_id: id, exec });
+                        let tenant = st.agents[&agent].a.spec.tenant.clone();
                         let n = st.nodes.get_mut(&exec).unwrap();
                         n.mcp_load += 1;
-                        let _ = n.tx.send(ToNode::McpInvoke { id: hub_id, mcp, tool, args });
+                        let _ = n.tx.send(ToNode::McpInvoke { id: hub_id, mcp, tool, args, tenant });
                     }
                 }
                 Ok(())
@@ -715,7 +716,7 @@ impl Hub {
             st.mcp_waiters.insert(id, tx);
             let n = st.nodes.get_mut(&exec).unwrap();
             n.mcp_load += 1;
-            let _ = n.tx.send(ToNode::McpInvoke { id, mcp: mcp.into(), tool: tool.into(), args });
+            let _ = n.tx.send(ToNode::McpInvoke { id, mcp: mcp.into(), tool: tool.into(), args, tenant: None });
             rx
         };
         rx.await.unwrap_or_else(|_| Err("mcp call dropped".into()))
@@ -736,7 +737,7 @@ impl Hub {
             r.map(|v| serde_json::to_value(v).unwrap()).map_err(|e| e.to_string())
         }
         match op {
-            Op::Spawn { ty, prompt } => j(self.spawn(caller, &ty, prompt).await),
+            Op::Spawn { ty, prompt, tenant } => j(self.spawn_for(caller, &ty, prompt, tenant).await),
             Op::Send { to, content } => j(self.send(caller, to, content).await),
             Op::ListAgents => j(Ok(self.list_agents().await)),
             Op::ListTypes => j(Ok(self.list_types().await)),
@@ -984,13 +985,22 @@ impl Hub {
     }
 
     pub async fn spawn(&self, caller: &Addr, ty: &str, prompt: String) -> Result<Spawned, HubError> {
+        self.spawn_for(caller, ty, prompt, None).await
+    }
+
+    /// Spawns for a tenant (whose per-tenant MCP servers the agent and its
+    /// descendants use). Agents can't pick one: their children inherit theirs.
+    pub async fn spawn_for(&self, caller: &Addr, ty: &str, prompt: String, tenant: Option<String>) -> Result<Spawned, HubError> {
+        if tenant.is_some() && matches!(caller, Addr::Agent(_)) {
+            return Err(HubError::Forbidden("agents' children inherit their tenant".into()));
+        }
         let mut st = self.st.lock().await;
-        self.spawn_in(&mut st, caller, ty, prompt).await
+        self.spawn_in(&mut st, caller, ty, prompt, tenant).await
     }
 
     /// Builds the spec for spawning `name` (a mixture or a bare agent type)
     /// under `parent`, fixing its tools from the MCP servers nodes run now.
-    fn spec_for(&self, st: &State, name: &str, parent: Option<AgentId>) -> Result<(Spec, u64), HubError> {
+    fn spec_for(&self, st: &State, name: &str, parent: Option<AgentId>, tenant: Option<String>) -> Result<(Spec, u64), HubError> {
         let c = self.cluster.read().unwrap().spec.clone();
         let (agent, mixture, mcps) = match (c.mixtures.get(name), c.agents.get(name)) {
             (Some(m), _) => (m.agent.clone(), Some(name.to_string()), m.mcp.clone()),
@@ -1063,16 +1073,20 @@ impl Hub {
             None => (def.budget.clone(), 0),
         };
         let compact = def.compact.spec(&def.executor);
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact };
+        let tenant = match parent {
+            Some(p) => st.agents[&p].a.spec.tenant.clone(),
+            None => tenant,
+        };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant };
         Ok((spec, reserved))
     }
 
-    async fn spawn_in(&self, st: &mut State, caller: &Addr, name: &str, prompt: String) -> Result<Spawned, HubError> {
+    async fn spawn_in(&self, st: &mut State, caller: &Addr, name: &str, prompt: String, tenant: Option<String>) -> Result<Spawned, HubError> {
         let parent = match caller {
             Addr::Agent(p) => Some(*p),
             _ => None,
         };
-        let (spec, reserved) = self.spec_for(st, name, parent)?;
+        let (spec, reserved) = self.spec_for(st, name, parent, tenant)?;
         let ty = spec.ty.clone();
         let id = Uuid::new_v4();
         self.db.create_agent(id, &spec).await?;
@@ -1213,6 +1227,7 @@ fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
         budget: r.a.spec.budget.clone(),
         reserved: r.a.reserved,
         compactions: r.a.compactions,
+        tenant: r.a.spec.tenant.clone(),
         seq: r.seq,
         awaiting_approval,
         last: r

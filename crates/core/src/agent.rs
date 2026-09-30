@@ -91,6 +91,10 @@ pub struct Spec {
     /// Compaction; `None` = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact: Option<Compact>,
+    /// Whose work this is (set when spawned from outside, inherited by
+    /// children). Per-tenant MCP servers run once per tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 impl Spec {
@@ -107,6 +111,7 @@ impl Spec {
             idempotent: vec![],
             lazy: vec![],
             compact: None,
+            tenant: None,
         }
     }
 }

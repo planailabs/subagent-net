@@ -69,7 +69,7 @@ impl Net {
     }
 
     pub async fn spawn(&self, ty: &str, prompt: &str) -> AgentId {
-        let v = self.hub.op(&Addr::root(), Op::Spawn { ty: ty.into(), prompt: prompt.into() }).await.unwrap();
+        let v = self.hub.op(&Addr::root(), Op::Spawn { ty: ty.into(), prompt: prompt.into(), tenant: None }).await.unwrap();
         super::id_of(&v)
     }
 

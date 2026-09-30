@@ -233,3 +233,16 @@ fn compaction_is_on_unless_turned_off() {
     assert_eq!(a.compact.spec(&a.executor), None);
     assert!(with_compact("compact {\n    keep = 0\n  }").unwrap_err().to_string().contains("compact"));
 }
+
+#[test]
+fn per_tenant_servers_need_a_command_and_a_default() {
+    let mcp = |extra: &str| format!("mcp \"m\" {{\n  command = [\"x\"]\n  nodes = [\"n1\"]\n  {extra}\n}}");
+    assert!(with(&mcp("per_tenant = true\n  default_tenant = \"base\"")).is_ok());
+    assert!(err(&mcp("per_tenant = true")).contains("default_tenant"));
+    assert!(err(&mcp("default_tenant = \"base\"")).contains("only applies"));
+    let url = "mcp \"m\" {\n  url = \"http://x\"\n  nodes = [\"n1\"]\n  per_tenant = true\n  default_tenant = \"b\"\n}";
+    assert!(err(url).contains("needs a command"));
+    // Servers that aren't per-tenant keep their identity.
+    let plain = with(&mcp("")).unwrap();
+    assert!(!serde_json::to_string(&plain.mcps["m"]).unwrap().contains("tenant"));
+}

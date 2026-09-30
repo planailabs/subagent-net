@@ -103,6 +103,9 @@ pub struct Node {
     pub name: String,
     pub token: Option<String>,
     rt: RwLock<Rt>,
+    /// Per-tenant MCP servers' instances.
+    pub tenants: Arc<mcp::Tenants>,
+    sweeping: std::sync::Once,
     pub senses: Arc<senses::Senses>,
     /// Sense output, forwarded to whichever hub connection is up.
     sense_rx: tokio::sync::Mutex<mpsc::Receiver<senses::SenseOut>>,
@@ -174,6 +177,8 @@ impl Node {
             name: name.to_string(),
             token,
             rt: RwLock::new(Rt::default()),
+            tenants: Default::default(),
+            sweeping: std::sync::Once::new(),
             senses: senses::Senses::new(tx),
             sense_rx: tokio::sync::Mutex::new(rx),
             relay_link: Default::default(),
@@ -221,6 +226,16 @@ impl Node {
         rt.agents.retain(|id, _| cfg.agents.iter().any(|a| &a.id == id));
         rt.mcps.retain(|id, _| cfg.mcps.iter().any(|m| &m.id == id));
         rt.errors.clear();
+        self.tenants.configure(&cfg.mcps).await;
+        let tenants = self.tenants.clone();
+        self.sweeping.call_once(|| {
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    tenants.sweep(mcp::TENANT_IDLE).await;
+                }
+            });
+        });
         for a in &cfg.agents {
             if rt.agents.contains_key(&a.id) {
                 continue;
@@ -239,7 +254,7 @@ impl Node {
             if rt.mcps.contains_key(&m.id) {
                 continue;
             }
-            match McpHost::connect(&m.name, &m.id, &m.def).await {
+            match McpHost::connect(&m.name, &m.id, &m.def, m.def.default_tenant.as_deref()).await {
                 Ok(h) => {
                     rt.mcps.insert(m.id.clone(), Arc::new(h));
                 }
@@ -328,7 +343,7 @@ impl Node {
                     let (tx, rx) = mpsc::unbounded_channel();
                     let life = root.child_token();
                     let mcps = self.rt.read().await.mcps.clone();
-                    let runner = Runner::new(agent, epoch, spec, snapshot, &events, rt, mcps, link.clone(), life.clone());
+                    let runner = Runner::new(agent, epoch, spec, snapshot, &events, rt, mcps, self.tenants.clone(), link.clone(), life.clone());
                     tokio::spawn(runner.run(rx));
                     agents.insert(agent, (tx, life));
                 }
@@ -353,16 +368,22 @@ impl Node {
                         let _ = tx.send(result);
                     }
                 }
-                ToNode::McpInvoke { id, mcp, tool, args } => {
+                ToNode::McpInvoke { id, mcp, tool, args, tenant } => {
                     invocations.retain(|_, t| !t.is_cancelled());
                     let abort = root.child_token();
                     invocations.insert(id, abort.clone());
                     let host = self.rt.read().await.mcps.get(&mcp).cloned();
+                    let tenants = self.tenants.clone();
                     let out = out.clone();
                     tokio::spawn(async move {
+                        let host = match tenants.host(&mcp, tenant.as_deref()).await {
+                            Some(h) => h.map(Some),
+                            None => Ok(host),
+                        };
                         let result = match host {
-                            None => Err(format!("this node doesn't run mcp {mcp}")),
-                            Some(h) => h.call(&tool, args, &abort).await.unwrap_or_else(|| Err("aborted".into())),
+                            Err(e) => Err(e),
+                            Ok(None) => Err(format!("this node doesn't run mcp {mcp}")),
+                            Ok(Some(h)) => h.call(&tool, args, &abort).await.unwrap_or_else(|| Err("aborted".into())),
                         };
                         abort.cancel(); // marks the invocation finished
                         let _ = out.send(ToHub::McpResult { id, result });
@@ -386,6 +407,7 @@ struct Runner {
     seq: u64,
     rt: Arc<AgentRt>,
     mcps: HashMap<String, Arc<McpHost>>,
+    tenants: Arc<mcp::Tenants>,
     link: Arc<Link>,
     /// Cancelled on revoke: stop everything and write nothing more.
     life: CancellationToken,
@@ -406,6 +428,7 @@ impl Runner {
         events: &[Event],
         rt: Arc<AgentRt>,
         mcps: HashMap<String, Arc<McpHost>>,
+        tenants: Arc<mcp::Tenants>,
         link: Arc<Link>,
         life: CancellationToken,
     ) -> Self {
@@ -422,7 +445,7 @@ impl Runner {
         let mut a = start.fold(prefix);
         let startup = a.apply(last);
         let inflight = life.child_token();
-        Self { id, epoch, a, seq: base + events.len() as u64, rt, mcps, link, life, inflight, startup }
+        Self { id, epoch, a, seq: base + events.len() as u64, rt, mcps, tenants, link, life, inflight, startup }
     }
 
     async fn run(mut self, mut commits: mpsc::UnboundedReceiver<(u64, Event)>) {
@@ -473,6 +496,7 @@ impl Runner {
                     let t = ToolTask {
                         spec: self.a.spec.clone(),
                         mcps: self.mcps.clone(),
+                        tenants: self.tenants.clone(),
                         link: self.link.clone(),
                         agent: self.id,
                         epoch: self.epoch,
@@ -608,6 +632,7 @@ async fn compact_call(rt: Arc<AgentRt>, upto: usize, msgs: Vec<Message>, p: Prop
 struct ToolTask {
     spec: Spec,
     mcps: HashMap<String, Arc<McpHost>>,
+    tenants: Arc<mcp::Tenants>,
     link: Arc<Link>,
     agent: AgentId,
     epoch: u64,
@@ -649,9 +674,13 @@ impl ToolTask {
             Ok(a) => a,
             Err(e) => return Some(Err(e)),
         };
-        match self.mcps.get(id) {
-            Some(h) => h.call(tool, args, &self.abort).await,
-            None => self.link.mcp_call(self.agent, self.epoch, id, tool, args, &self.abort).await,
+        // A per-tenant server runs here if its base instance does; else the
+        // hub picks a node (and passes the tenant on).
+        match (self.mcps.get(id), self.tenants.host(id, self.spec.tenant.as_deref()).await) {
+            (Some(_), Some(Ok(h))) => h.call(tool, args, &self.abort).await,
+            (Some(_), Some(Err(e))) => Some(Err(e)),
+            (Some(h), None) => h.call(tool, args, &self.abort).await,
+            (None, _) => self.link.mcp_call(self.agent, self.epoch, id, tool, args, &self.abort).await,
         }
     }
 }

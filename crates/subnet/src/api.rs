@@ -38,6 +38,9 @@ pub struct AgentSummary {
     /// How often its conversation was compacted.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub compactions: u32,
+    /// Whose work it is (per-tenant MCP servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
     /// Number of committed events.
     pub seq: u64,
     /// The tool call waiting for approval, if any.
@@ -214,6 +217,10 @@ pub struct SpawnArgs {
     pub ty: String,
     /// The task: the agent's first message.
     pub prompt: String,
+    /// Whose work it is: per-tenant MCP servers run once per tenant. The
+    /// agent's descendants inherit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -480,7 +487,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     let h = hub.clone();
     r.add::<Spawn, _, _>(move |c, a| {
         let h = h.clone();
-        async move { Ok(h.spawn(&c.addr, &a.ty, a.prompt).await?) }
+        async move { Ok(h.spawn_for(&c.addr, &a.ty, a.prompt, a.tenant).await?) }
     });
     let h = hub.clone();
     r.add::<Send, _, _>(move |c, a| {

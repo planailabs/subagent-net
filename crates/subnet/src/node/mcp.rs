@@ -1,6 +1,8 @@
 //! One MCP server (an `mcp` block of the cluster) running on a node.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock, ServerResult, Tool};
@@ -22,23 +24,107 @@ pub struct McpHost {
     tools: HashMap<String, Tool>,
 }
 
-/// `"$VAR"` reads the node's environment; anything else is a literal.
-pub fn env_value(v: &str) -> Result<String, String> {
-    match v.strip_prefix('$') {
-        Some(var) => std::env::var(var).map_err(|e| format!("env {var}: {e}")),
-        None => Ok(v.to_string()),
+/// Per-tenant MCP servers (`per_tenant = true`): one process per tenant,
+/// started on its first call and stopped when idle. The base instance (the
+/// `default_tenant`'s) lists the tools and is kept with the node's others.
+#[derive(Default)]
+pub struct Tenants {
+    defs: std::sync::RwLock<HashMap<String, (String, McpDef)>>,
+    running: tokio::sync::Mutex<HashMap<(String, String), (Arc<McpHost>, Instant)>>,
+}
+
+/// How long an unused tenant instance lives.
+pub const TENANT_IDLE: Duration = Duration::from_secs(600);
+
+impl Tenants {
+    /// Takes the node's MCP servers; instances of servers it no longer runs
+    /// (or that changed) are stopped.
+    pub async fn configure(&self, mcps: &[subnet_cluster::NodeMcp]) {
+        let defs: HashMap<String, (String, McpDef)> = mcps.iter().filter(|m| m.def.per_tenant).map(|m| (m.id.clone(), (m.name.clone(), m.def.clone()))).collect();
+        self.running.lock().await.retain(|(id, _), _| defs.contains_key(id));
+        *self.defs.write().unwrap() = defs;
     }
+
+    /// The instance for `tenant` when `id` is per-tenant and `tenant` isn't
+    /// its default (that one is the base instance); `None` otherwise.
+    pub async fn host(&self, id: &str, tenant: Option<&str>) -> Option<Result<Arc<McpHost>, String>> {
+        let tenant = tenant?;
+        let (name, def) = self.defs.read().unwrap().get(id).cloned()?;
+        if def.default_tenant.as_deref() == Some(tenant) {
+            return None;
+        }
+        let mut running = self.running.lock().await;
+        let key = (id.to_string(), tenant.to_string());
+        if let Some((h, used)) = running.get_mut(&key) {
+            *used = Instant::now();
+            return Some(Ok(h.clone()));
+        }
+        tracing::info!(mcp = %id, %tenant, "starting a tenant's mcp server");
+        Some(match McpHost::connect(&name, id, &def, Some(tenant)).await {
+            Ok(h) => {
+                let h = Arc::new(h);
+                running.insert(key, (h.clone(), Instant::now()));
+                Ok(h)
+            }
+            Err(e) => Err(format!("starting mcp {id} for tenant {tenant}: {e}")),
+        })
+    }
+
+    /// Stops instances nobody used for `idle` (and nobody is calling).
+    pub async fn sweep(&self, idle: Duration) {
+        self.running.lock().await.retain(|(id, tenant), (h, used)| {
+            let keep = used.elapsed() < idle || Arc::strong_count(h) > 1;
+            if !keep {
+                tracing::info!(mcp = %id, %tenant, "stopping an idle tenant's mcp server");
+            }
+            keep
+        });
+    }
+
+    /// Tenant instances running now (for tests and status).
+    pub async fn running(&self) -> Vec<(String, String)> {
+        self.running.lock().await.keys().cloned().collect()
+    }
+}
+
+/// `"$VAR"` reads the node's environment, `${VAR}` inside a string does
+/// too, and `${TENANT}` is the calling agent's tenant (per-tenant servers);
+/// anything else is a literal.
+pub fn env_value(v: &str, tenant: Option<&str>) -> Result<String, String> {
+    let var = |name: &str| -> Result<String, String> {
+        match (name, tenant) {
+            ("TENANT", Some(t)) => Ok(t.to_string()),
+            ("TENANT", None) => Err("${TENANT} needs per_tenant (and a default_tenant for the base instance)".into()),
+            _ => std::env::var(name).map_err(|e| format!("env {name}: {e}")),
+        }
+    };
+    if let Some(name) = v.strip_prefix('$')
+        && !name.starts_with('{')
+    {
+        return var(name);
+    }
+    let mut out = String::new();
+    let mut rest = v;
+    while let Some(i) = rest.find("${") {
+        out.push_str(&rest[..i]);
+        let end = rest[i..].find('}').ok_or_else(|| format!("unclosed ${{ in {v:?}"))? + i;
+        out.push_str(&var(&rest[i + 2..end])?);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 impl McpHost {
     /// Starts (stdio) or connects to (HTTP) the server and lists its tools.
-    pub async fn connect(name: &str, id: &str, def: &McpDef) -> Result<Self, String> {
+    /// `tenant` fills `${TENANT}` (per-tenant servers).
+    pub async fn connect(name: &str, id: &str, def: &McpDef, tenant: Option<&str>) -> Result<Self, String> {
         let client = match (&def.command, &def.url) {
             (Some(cmd), None) => {
                 let (prog, args) = cmd.split_first().ok_or("empty command")?;
                 let mut env = vec![];
                 for (k, v) in &def.env {
-                    env.push((k.clone(), env_value(v)?));
+                    env.push((k.clone(), env_value(v, tenant)?));
                 }
                 let t = TokioChildProcess::new(tokio::process::Command::new(prog).configure(|c| {
                     c.args(args).envs(env).kill_on_drop(true);
@@ -154,8 +240,12 @@ mod tests {
 
     #[test]
     fn env_values() {
-        assert_eq!(env_value("lit").unwrap(), "lit");
-        assert!(env_value("$SUBNET_SURELY_UNSET").is_err());
+        assert_eq!(env_value("lit", None).unwrap(), "lit");
+        assert!(env_value("$SUBNET_SURELY_UNSET", None).is_err());
+        assert_eq!(env_value("agents/${TENANT}/id", Some("acme")).unwrap(), "agents/acme/id");
+        assert!(env_value("${TENANT}", None).is_err(), "no tenant to fill in");
+        assert_eq!(env_value("${PATH}", None).unwrap(), std::env::var("PATH").unwrap());
+        assert!(env_value("${OPEN", None).is_err());
     }
 
     #[test]

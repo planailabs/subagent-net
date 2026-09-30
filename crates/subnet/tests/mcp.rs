@@ -181,7 +181,7 @@ async fn bare_agent_type_has_no_mcp_tools() {
 async fn spawning_needs_the_mixtures_mcp_to_run_somewhere() {
     let e = Env::with(&["m"], &[]).await;
     e.node("s").await;
-    let err = e.hub.op(&Addr::root(), Op::Spawn { ty: "tooler".into(), prompt: "x".into() }).await.unwrap_err();
+    let err = e.hub.op(&Addr::root(), Op::Spawn { ty: "tooler".into(), prompt: "x".into(), tenant: None }).await.unwrap_err();
     assert!(err.contains("no live node runs mcp"), "{err}");
 }
 
@@ -316,7 +316,7 @@ async fn missing_credentials_are_reported_by_the_node() {
     assert!(nodes[0].agents.is_empty());
     let err = nodes[0].errors.values().next().unwrap();
     assert!(err.contains("SUBNET_TEST_SURELY_MISSING_KEY"), "{err}");
-    let e = n.hub.op(&Addr::root(), Op::Spawn { ty: "keyed".into(), prompt: "x".into() }).await.unwrap_err();
+    let e = n.hub.op(&Addr::root(), Op::Spawn { ty: "keyed".into(), prompt: "x".into(), tenant: None }).await.unwrap_err();
     assert!(e.contains("no live node"), "{e}");
 }
 
@@ -411,4 +411,46 @@ async fn the_router_preloads_matching_tools() {
     assert!(!note.contains("t.slow"), "only the top match: {note}");
     assert!(!offered(r).contains(&"t__echo".to_string()));
     let _ = id;
+}
+
+#[tokio::test]
+async fn per_tenant_servers_run_once_per_tenant() {
+    per_tenant("s", "s").await;
+}
+
+#[tokio::test]
+async fn per_tenant_servers_through_the_hub() {
+    per_tenant("a", "s").await;
+}
+
+/// Agents on `agent_node`, the per-tenant server on `mcp_node`.
+async fn per_tenant(agent_node: &str, mcp_node: &str) {
+    let cluster = format!(
+        "node \"s\" {{}}\nnode \"a\" {{}}\n{}\nmcp \"who\" {{\n  command = [{:?}]\n  env = {{ WHO = \"t-${{TENANT}}\" }}\n  per_tenant = true\n  default_tenant = \"base\"\n  nodes = [{mcp_node:?}]\n  lazy = false\n}}\nmixture \"tooler\" {{\n  agent = \"base\"\n  mcp = [\"who\"]\n}}\n",
+        agent("base", SYS, "{llm}", &[agent_node], ""),
+        echo_server()
+    );
+    let n = Net::new(&cluster).await;
+    n.node("s").await;
+    if agent_node != mcp_node {
+        n.node(agent_node).await;
+    }
+    let ask = || {
+        n.llm.push(SYS, |_| tool_call("c1", "who.env", json!({"name":"WHO"})));
+        n.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
+    };
+    ask();
+    let acme = n.hub.spawn_for(&Addr::root(), "tooler", "who?".into(), Some("acme".into())).await.unwrap();
+    assert_eq!(n.mail().await["content"], "t-acme");
+    ask();
+    n.hub.spawn_for(&Addr::root(), "tooler", "who?".into(), Some("globex".into())).await.unwrap();
+    assert_eq!(n.mail().await["content"], "t-globex");
+    ask();
+    n.spawn("tooler", "who?").await;
+    assert_eq!(n.mail().await["content"], "t-base", "no tenant: the default instance");
+    let agents = n.hub.list_agents().await;
+    assert_eq!(agents.iter().find(|a| a.id == acme.id).unwrap().tenant.as_deref(), Some("acme"));
+    // Agents can't choose a tenant for their children.
+    let e = n.hub.spawn_for(&Addr::Agent(acme.id), "tooler", "x".into(), Some("other".into())).await.unwrap_err();
+    assert!(e.to_string().contains("inherit"), "{e}");
 }

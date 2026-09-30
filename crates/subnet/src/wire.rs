@@ -84,7 +84,15 @@ pub enum ToNode {
     Revoke { agent: AgentId },
     Reply { id: u64, result: Result<Value, String> },
     /// Run a tool of an MCP type this node hosts, for an agent elsewhere.
-    McpInvoke { id: u64, mcp: String, tool: String, args: Value },
+    McpInvoke {
+        id: u64,
+        mcp: String,
+        tool: String,
+        args: Value,
+        /// The calling agent's tenant (per-tenant servers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tenant: Option<String>,
+    },
     McpAbort { id: u64 },
     /// Result of this node's `McpCall`.
     McpReply { id: u64, result: Result<String, String> },
@@ -99,7 +107,7 @@ mod tests {
     fn roundtrips() {
         let msgs = vec![
             ToNode::Reply { id: 3, result: Err("nope".into()) },
-            ToNode::McpInvoke { id: 1, mcp: "m@h".into(), tool: "t".into(), args: json!({"a":1}) },
+            ToNode::McpInvoke { id: 1, mcp: "m@h".into(), tool: "t".into(), args: json!({"a":1}), tenant: None },
             ToNode::Commit { agent: uuid::Uuid::nil(), seq: 1, event: Event::LlmDone },
         ];
         for m in msgs {

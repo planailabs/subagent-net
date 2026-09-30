@@ -118,7 +118,7 @@ async fn quiet(rx: &mut UnboundedReceiver<ToNode>) {
 }
 
 async fn spawn(hub: &Hub, caller: &Addr, ty: &str) -> Result<AgentId, String> {
-    hub.op(caller, Op::Spawn { ty: ty.into(), prompt: "go".into() }).await.map(|v| id_of(&v))
+    hub.op(caller, Op::Spawn { ty: ty.into(), prompt: "go".into(), tenant: None }).await.map(|v| id_of(&v))
 }
 
 async fn expect_assign(sp: &mut Sp) -> (AgentId, u64, Vec<Event>) {
@@ -330,6 +330,17 @@ async fn children_leave_the_parent_half_of_what_is_left() {
     spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
     let t = transcript(&hub, boss_id).await;
     assert_eq!(t["reserved"], 750, "250 left for the boss itself");
+}
+
+#[tokio::test]
+async fn children_inherit_the_tenant() {
+    let hub = hub().await;
+    let _sp = spawner(&hub, "s", vec![boss(), worker()], 8).await;
+    let boss_id = hub.spawn_for(&Addr::root(), "boss", "go".into(), Some("acme".into())).await.unwrap().id;
+    let kid = spawn(&hub, &Addr::Agent(boss_id), "worker").await.unwrap();
+    let agents = hub.list_agents().await;
+    let tenant = |id| agents.iter().find(|a| a.id == id).unwrap().tenant.clone();
+    assert_eq!((tenant(boss_id).as_deref(), tenant(kid).as_deref()), (Some("acme"), Some("acme")));
 }
 
 #[tokio::test]
