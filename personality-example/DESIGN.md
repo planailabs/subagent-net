@@ -127,4 +127,8 @@ Then it prints the URL. `DEEPSEEK_API_KEY` is needed for Vesper to think.
 
 ## Status
 
-Nothing is implemented yet.
+Implemented:
+
+- memory: `vesper-memory` stdio MCP server (crates/memory) with tests
+
+Not yet: world simulation, assets, room server, web client, stt stage, cluster file and launcher, end-to-end tests.
