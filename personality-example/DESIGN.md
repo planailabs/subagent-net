@@ -74,7 +74,11 @@ A counter (kitchen) and a side table (reading corner) are furniture: in the way,
 
 ## The character and objects
 
-Modelled in Blender by Python scripts in [blender/](blender/), run through the Blender MCP while developing and headless (`blender --background --python`) for a reproducible build. They produce `assets/*.glb` (committed).
+Modelled in Blender by Python scripts in [blender/](blender/): `python3 blender/live.py blender/build.py assets [--preview DIR]` runs them in the open Blender through the Blender MCP add-on (port 9876) and renders previews; `blender --background --factory-startup --python blender/build.py -- assets` is the reproducible build. They build into their own scenes (`Vesper`, `Room`) and export, all committed:
+
+- `assets/vesper.glb`: one skinned mesh `vesper` (rigid parts; the skirt blends into the thighs), the armature, the clips and the shape key.
+- `assets/props.glb`: one top-level node per world object id, origin at the centre of its footprint on the surface it stands on, front towards +z. Parts the browser changes are child nodes: `pot`, `coffee`, `led` (coffee maker), `mug_fill`, `platter`, `shade`, `flame` (the candle), `glass`.
+- `assets/room.glb`: floor, walls with the window opening, rug, a picture, and `sky` behind the window (tinted by time of day).
 
 - **Vesper:** stylized low-poly woman: proportioned body; face with eyes, brows and dark lips; a blue bob with bangs; black dress, fishnet-ish tights (texture), boots, a choker. An armature with clips `idle`, `walk`, `talk`, `wave`, `reach`, `sit`, `think`, `nod`, `shrug`. A `mouth_open` shape key follows her speech loudness.
 - **Objects:** coffee maker (with a pot), mug, floor lamp, record player, armchair, bookshelf with books, window, plus the room shell.
@@ -133,5 +137,6 @@ Implemented:
 
 - memory: `vesper-memory` stdio MCP server (crates/memory) with tests
 - world simulation: `vesper_room::world` (pure) with tests
+- assets: Blender scripts and the three .glb files, checked by `crates/room/tests/assets.rs`
 
-Not yet: assets, room server, web client, stt stage, cluster file and launcher, end-to-end tests.
+Not yet: room server, web client, stt stage, cluster file and launcher, end-to-end tests.
