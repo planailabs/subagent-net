@@ -360,6 +360,28 @@ async fn a_resident_follows_its_type_to_a_new_version() {
 }
 
 #[tokio::test]
+async fn a_cancelled_resident_starts_afresh() {
+    let n = Net::new(&resident_cluster()).await;
+    n.llm.say(CONCIERGE, &["on duty"]);
+    n.node("s").await;
+    assert_eq!(n.mail().await["content"], "on duty");
+    let old: uuid::Uuid = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap()[0]["id"].as_str().unwrap().parse().unwrap();
+    n.llm.say(CONCIERGE, &["back on duty"]);
+    n.hub.cancel(&Addr::root(), old).await.unwrap();
+    // The cancel's report, then the fresh resident's first answer.
+    let mut seen = vec![];
+    while seen.len() < 2 {
+        seen.push(n.mail().await["content"].as_str().unwrap().to_string());
+    }
+    assert!(seen.contains(&"back on duty".to_string()), "{seen:?}");
+    n.llm.say(CONCIERGE, &["yes?"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Resident("concierge".into()), content: "hello".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "yes?");
+    let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
+    assert_eq!(msgs, 4, "a fresh conversation: system, start your shift, back on duty, hello");
+}
+
+#[tokio::test]
 async fn an_outdated_agent_is_upgraded() {
     let n = net().await;
     n.node("a").await;

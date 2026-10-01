@@ -149,7 +149,7 @@ route "log-everything" {
 ```
 
 - Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets and `nodes`. An agent is only ever resumed on a node offering the same hash: changing an agent type (or an MCP server of its mixture) in the cluster leaves existing agents of the old version pending. They're listed `outdated`; `upgrade` moves one onto the current version (see Forking and upgrading). Residents move by themselves.
-- A `resident` is created when its type is available, answers to whoever applied the cluster, and is cancelled when removed from the file. When the cluster changes its type (or its MCP servers), it's upgraded once a node offers the new version: same history, new agent, same resident name. Changing which MCP servers its mixture lists doesn't replace the running agent.
+- A `resident` is created when its type is available, answers to whoever applied the cluster, and is cancelled when removed from the file. When the cluster changes its type (or its MCP servers), it's upgraded once a node offers the new version: same history, new agent, same resident name. Cancelling a resident's agent starts the resident afresh (a new agent with the resident's prompt). Changing which MCP servers its mixture lists doesn't replace the running agent.
 - `$VAR` in values and `env = "..."` in credentials are resolved on the node. A missing variable makes that type unavailable on that node, reported back to the hub and shown by `subnet list-nodes`.
 - Durations are `250ms`, `10s`, `5m`, `2h`, `1d`. Rates are `N/duration`.
 - HCL allows one attribute per line inside a block, so multi-field values on one line use object syntax: `budget = { max_tokens = 1000, max_depth = 2 }`.

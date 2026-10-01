@@ -324,6 +324,9 @@ pub struct Agent {
     /// How often the conversation was compacted.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub compactions: u32,
+    /// The agent its work moved to (an upgrade), once it's superseded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<AgentId>,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -350,6 +353,7 @@ impl Agent {
             context: 0,
             compact_skip: false,
             compactions: 0,
+            superseded_by: None,
         }
     }
 
@@ -789,10 +793,11 @@ impl Agent {
                 self.phase = Phase::Cancelled;
                 self.report(Status::Cancelled, "[cancelled]".into(), &mut fx);
             }
-            Event::Superseded { .. } => {
+            Event::Superseded { by } => {
                 if self.terminal() {
                     return fx;
                 }
+                self.superseded_by = Some(*by);
                 if self.inflight() {
                     fx.push(Effect::AbortInflight);
                 }

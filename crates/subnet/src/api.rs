@@ -45,6 +45,9 @@ pub struct AgentSummary {
     /// declares: no node resumes it until it's upgraded (`upgrade`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub outdated: bool,
+    /// Upgraded: its work goes on in this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<AgentId>,
     /// Number of committed events.
     pub seq: u64,
     /// The tool call waiting for approval, if any.

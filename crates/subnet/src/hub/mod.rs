@@ -863,7 +863,13 @@ impl Hub {
     }
 
     pub async fn cancel(&self, caller: &Addr, id: AgentId) -> Result<Done, HubError> {
-        self.control(caller, id, true, Event::Cancelled).await
+        let done = self.control(caller, id, true, Event::Cancelled).await?;
+        // A cancelled resident starts afresh.
+        if self.db.residents().await?.iter().any(|(_, r)| *r == id) {
+            // Boxed: syncing cancels residents dropped from the cluster.
+            Box::pin(self.sync_residents()).await;
+        }
+        Ok(done)
     }
 
     pub async fn approve(&self, caller: &Addr, id: AgentId, call_id: String, approved: bool) -> Result<Done, HubError> {
@@ -1164,10 +1170,12 @@ impl Hub {
         for (name, id) in &existing {
             if !c.spec.residents.contains_key(name) {
                 tracing::info!(resident = %name, agent = %id, "resident removed from the cluster, cancelling");
-                let _ = self.cancel(&Addr::root(), *id).await;
+                // No longer a resident first, so the cancel doesn't recreate it.
                 if let Err(e) = self.db.remove_resident(name).await {
                     tracing::error!(error = %e, "removing resident failed");
+                    continue;
                 }
+                let _ = self.cancel(&Addr::root(), *id).await;
             }
         }
         // A resident whose type (or MCP servers) the cluster changed moves
@@ -1188,8 +1196,18 @@ impl Hub {
             }
         }
         let by = c.version.as_ref().map_or_else(Addr::root, |v| v.applied_by.parse().unwrap_or_else(|_| Addr::root()));
+        // A resident whose agent was cancelled (not moved by an upgrade) is
+        // created afresh: cancelling a resident restarts it.
+        let dead: Vec<String> = {
+            let st = self.st.lock().await;
+            existing
+                .iter()
+                .filter(|(_, id)| st.agents.get(id).is_none_or(|r| matches!(r.a.phase, subnet_core::agent::Phase::Cancelled) && r.a.superseded_by.is_none()))
+                .map(|(n, _)| n.clone())
+                .collect()
+        };
         for (name, r) in &c.spec.residents {
-            if existing.iter().any(|(n, _)| n == name) {
+            if existing.iter().any(|(n, _)| n == name) && !dead.contains(name) {
                 continue;
             }
             match self.spawn(&by, &r.mixture, r.prompt.clone()).await {
@@ -1306,6 +1324,7 @@ fn summary(st: &State, c: &subnet_cluster::Cluster, id: AgentId, r: &AgentRec) -
         compactions: r.a.compactions,
         tenant: r.a.spec.tenant.clone(),
         outdated: outdated(c, &r.a.spec),
+        superseded_by: r.a.superseded_by,
         seq: r.seq,
         awaiting_approval,
         last: r

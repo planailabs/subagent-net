@@ -432,6 +432,7 @@ mod tests {
             compactions: 0,
             tenant: None,
             outdated: false,
+            superseded_by: None,
             seq: 1,
             awaiting_approval: None,
             last: Some("all done".into()),
