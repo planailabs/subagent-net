@@ -65,6 +65,9 @@ pub enum Op {
     MailboxPeek { name: String, max: u32 },
     /// Read a blob (`blob:<sha256>`).
     BlobGet { reference: String },
+    /// A whole blob, as `{mime, base64}` (nodes fetching images for a model;
+    /// not a tool).
+    BlobRaw { reference: String },
 }
 
 /// A delivered message in a user/client mailbox.

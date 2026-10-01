@@ -23,13 +23,24 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Images sent with the text (only to a model that can see; never
+    /// logged: the node attaches them for one call).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
+/// An image for a model: its type and base64 bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Image {
+    pub mime: String,
+    pub base64: String,
+}
+
 impl Message {
     fn text(role: Role, content: impl Into<String>) -> Self {
-        Self { role, content: Some(content.into()), tool_calls: vec![], tool_call_id: None, extra: Map::new() }
+        Self { role, content: Some(content.into()), tool_calls: vec![], tool_call_id: None, images: vec![], extra: Map::new() }
     }
     pub fn system(c: impl Into<String>) -> Self {
         Self::text(Role::System, c)

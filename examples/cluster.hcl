@@ -25,6 +25,7 @@ agent "deepseek-flash" {
   budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off
+  vision   = { max_px = 1024 }                # its model sees images from tools (formats, max_px, keep)
 }
 
 # --- MCP servers ------------------------------------------------------------

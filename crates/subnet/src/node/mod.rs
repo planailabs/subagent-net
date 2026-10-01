@@ -7,6 +7,7 @@ pub mod external;
 pub mod mcp;
 pub mod relay;
 pub mod senses;
+pub mod vision;
 pub mod ws;
 
 use std::collections::HashMap;
@@ -485,7 +486,8 @@ impl Runner {
                     msgs.extend(self.a.llm_messages());
                     let tools = self.a.offered_tools();
                     let abort = self.inflight.child_token();
-                    tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, self.proposer(), abort));
+                    let sees = self.a.spec.vision.clone().map(|v| (v, self.link.clone(), self.epoch));
+                    tokio::spawn(llm_call(self.rt.clone(), self.id, msgs, tools, sees, self.proposer(), abort));
                 }
                 Effect::Compact { upto } => {
                     let msgs = self.a.compaction_request(&self.rt.system, upto);
@@ -557,11 +559,24 @@ fn take_delta(buf: &mut Delta) -> Option<Event> {
 async fn llm_call(
     rt: Arc<AgentRt>,
     agent: AgentId,
-    msgs: Vec<Message>,
+    mut msgs: Vec<Message>,
     tools: Vec<subnet_core::chat::ToolDef>,
+    sees: Option<(subnet_core::agent::Vision, Arc<Link>, u64)>,
     p: Proposer,
     abort: CancellationToken,
 ) {
+    // A model that sees gets the latest images of the conversation.
+    if let Some((v, link, epoch)) = sees {
+        vision::attach(&mut msgs, &v, |hash| {
+            let link = link.clone();
+            async move {
+                let r = link.request(agent, epoch, Op::BlobRaw { reference: format!("blob:{hash}") }).await.ok()?;
+                let bytes = crate::hub::blobs::decode_b64(r["base64"].as_str()?).ok()?;
+                Some((r["mime"].as_str()?.to_string(), bytes))
+            }
+        })
+        .await;
+    }
     let stream = tokio::select! {
         s = rt.think(agent, &msgs, &tools) => s,
         _ = abort.cancelled() => return p.propose(vec![Event::LlmAborted]),
@@ -670,18 +685,47 @@ impl ToolTask {
         let Some(id) = self.spec.mcp.get(server) else {
             return Some(Err(format!("unknown tool {name:?}")));
         };
-        let args = match mcp::parse_args(args) {
+        let mut args = match mcp::parse_args(args) {
             Ok(a) => a,
             Err(e) => return Some(Err(e)),
         };
+        // Arguments the tool takes as blobs (`"format": "blob"`) get the
+        // bytes behind their `blob:<sha256>` references, as data URLs.
+        if let Some(schema) = self.spec.tools.iter().find(|t| t.name == name).map(|t| t.parameters.clone()) {
+            let (agent, epoch, link) = (self.agent, self.epoch, self.link.clone());
+            if let Err(e) = vision::resolve_refs(&mut args, &schema, |hash| {
+                let link = link.clone();
+                async move {
+                    if let Some(r) = vision::recent(&hash) {
+                        return Some(r);
+                    }
+                    let r = link.request(agent, epoch, Op::BlobRaw { reference: format!("blob:{hash}") }).await.ok()?;
+                    Some((r["mime"].as_str()?.to_string(), crate::hub::blobs::decode_b64(r["base64"].as_str()?).ok()?))
+                }
+            })
+            .await
+            {
+                return Some(Err(e));
+            }
+        }
         // A per-tenant server runs here if its base instance does; else the
         // hub picks a node (and passes the tenant on).
-        match (self.mcps.get(id), self.tenants.host(id, self.spec.tenant.as_deref()).await) {
+        let r = match (self.mcps.get(id), self.tenants.host(id, self.spec.tenant.as_deref()).await) {
             (Some(_), Some(Ok(h))) => h.call(tool, args, &self.abort).await,
             (Some(_), Some(Err(e))) => Some(Err(e)),
             (Some(h), None) => h.call(tool, args, &self.abort).await,
             (None, _) => self.link.mcp_call(self.agent, self.epoch, id, tool, args, &self.abort).await,
-        }
+        };
+        // Images and other binary results go to the blob store.
+        r.map(|r| {
+            r.map(|content| {
+                let (text, uploads) = vision::store_inline(&content, self.spec.vision.as_ref());
+                for (hash, mime, base64) in uploads {
+                    let _ = self.link.out.send(ToHub::Blob { hash, mime, base64 });
+                }
+                text
+            })
+        })
     }
 }
 

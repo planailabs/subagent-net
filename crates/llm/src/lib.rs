@@ -101,6 +101,16 @@ impl Client {
                     *n = wire_name(n);
                 }
             }
+            // Images go out as content parts after the text (OpenAI's form).
+            if let Some(Value::Array(images)) = m.as_object_mut().and_then(|o| o.remove("images")) {
+                let text = m.get("content").and_then(Value::as_str).unwrap_or_default().to_string();
+                let mut parts = vec![json!({"type": "text", "text": text})];
+                for i in images {
+                    let url = format!("data:{};base64,{}", i["mime"].as_str().unwrap_or("image/png"), i["base64"].as_str().unwrap_or_default());
+                    parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+                }
+                m["content"] = json!(parts);
+            }
         }
         body.insert("messages".into(), messages);
         body.insert("stream".into(), json!(true));
@@ -321,6 +331,18 @@ mod tests {
         assert_eq!(b["tools"][0]["function"]["name"], "world__say");
         assert_eq!(b["messages"][1]["tool_calls"][0]["function"]["name"], "world__say");
         assert_eq!(wire_name("a b/c"), "a_b_c");
+    }
+
+    #[test]
+    fn images_go_out_as_content_parts() {
+        let c = Client::new(cfg(false), None);
+        let mut m = Message::user("what's this?");
+        m.images.push(subnet_core::chat::Image { mime: "image/png".into(), base64: "iVBO".into() });
+        let b = c.body(&[m], &[]);
+        let parts = b["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts[0], json!({"type": "text", "text": "what's this?"}));
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,iVBO");
+        assert!(b["messages"][0].get("images").is_none());
     }
 
     #[test]

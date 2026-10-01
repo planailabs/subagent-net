@@ -63,6 +63,7 @@ agent "deepseek-flash" {
   budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off
+  vision   = { max_px = 1024 }                # its model sees images from tools (formats, max_px, keep)
 }
 
 # --- MCP servers ------------------------------------------------------------
@@ -315,6 +316,13 @@ A mixture with a `router { top_k = 3, min_score = 0.78 }` block gets matching la
 - Similarity is cosine over multilingual e5-small embeddings (fastembed, downloaded into `$SUBNET_MODELS`, default `subnet-models/`, on first use; the `router` cargo feature). Tool embeddings are cached. e5 puts scores in a narrow band, so `min_score` is a coarse filter: a wrong pre-load costs a few schema tokens, and a missed one is still a `load_tools` away.
 - Without a model (download failed, feature off) the router logs a warning and pre-loads nothing.
 
+### Images and vision
+
+- **From tools:** an MCP result's image (and audio) blocks are stored in the blob store by the agent's node, and the tool result carries a marker instead of the bytes: `[image blob:<sha256> image/jpeg 800x600]` (`[blob:<sha256> audio/wav]` for other media). Event logs and transcripts stay small; `blob_get` fetches the bytes.
+- **Seeing:** an agent type with `vision = { formats = [...], max_px = 1568, keep = 3 }` (`vision = {}` for these defaults: png, jpeg, webp, gif) has a model that takes images. Its node converts each tool image to a format the model accepts (JPEG if allowed, else PNG, else the first one listed) and scales it to at most `max_px` on its longer side before storing it. For every call it attaches the conversation's last `keep` images: a user message carries its own, and a tool result's go in a user message after the run of tool results (chat APIs take images only from users), as OpenAI-style `image_url` data URLs. Images it can't fetch stay markers. Without `vision` the model sees only the markers.
+- **To tools:** an argument whose JSON schema says `"format": "blob"` (a string, or an array's items) takes `blob:<sha256>` references; the node replaces them by `data:<mime>;base64,…` URLs before the call, so an agent can hand a tool what it saw (say, to keep with a memory).
+- Nodes keep the last images they stored, and fetch others from the hub (`BlobRaw`, an op only nodes use).
+
 ## Senses, streams and the switchboard
 
 ### Events and blobs (durable)
@@ -455,7 +463,7 @@ State and key handling (`tui::App`) are pure and tested; rendering is tested aga
 
 Everything in this document is implemented, except what "Not in scope yet" lists:
 
-- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), tenants and per-tenant MCP servers, snapshots, forks (with tree), upgrades onto a type's new version (residents automatically), internal and external executors.
+- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), vision (images from tools, converted and attached for models that see; blob arguments), tenants and per-tenant MCP servers, snapshots, forks (with tree), upgrades onto a type's new version (residents automatically), internal and external executors.
 - **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing.
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.

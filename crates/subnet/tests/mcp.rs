@@ -36,6 +36,13 @@ struct EchoArgs {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+struct KeepArgs {
+    /// A picture, as a blob reference (the node passes its bytes).
+    #[schemars(extend("format" = "blob"))]
+    pic: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct SlowArgs {
     ms: u64,
 }
@@ -55,6 +62,22 @@ impl Tools {
     #[tool(description = "Echo text back")]
     fn echo(&self, Parameters(EchoArgs { text }): Parameters<EchoArgs>) -> String {
         format!("echo: {text}")
+    }
+
+    #[tool(description = "A picture: a 200x100 PNG")]
+    fn snap(&self) -> rmcp::model::CallToolResult {
+        use base64::Engine;
+        let mut png = std::io::Cursor::new(vec![]);
+        image::DynamicImage::new_rgba8(200, 100).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("the view"),
+            rmcp::model::ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(png.into_inner()), "image/png"),
+        ])
+    }
+
+    #[tool(description = "Keep a picture")]
+    fn keep(&self, Parameters(KeepArgs { pic }): Parameters<KeepArgs>) -> String {
+        format!("kept {}", pic.split(',').next().unwrap_or_default())
     }
 
     #[tool(description = "Sleep for ms milliseconds")]
@@ -349,6 +372,33 @@ async fn hard_pause_cancels_every_parallel_call() {
     e.hub.op(&Addr::root(), Op::Pause { id, mode: PauseMode::Hard, tree: false }).await.unwrap();
     e.until("both cancelled", || stats.slow_dropped.load(Ordering::SeqCst) == 2).await;
     e.net.until(id, "paused", |t| t["paused"] == true).await;
+}
+
+#[tokio::test]
+async fn images_from_tools_reach_a_model_that_sees() {
+    let stats = Arc::new(Stats::default());
+    let url = mcp_server(stats).await;
+    // Only JPEG, at most 64 px: the 200x100 PNG is converted and scaled.
+    let c = cluster(&url, &["s", "s2"], &[], "lazy = false", "").replace(
+        "  model = \"mock\"\n",
+        "  model = \"mock\"\n  vision = { formats = [\"jpeg\"], max_px = 64 }\n",
+    );
+    let e = Net::new(&c).await;
+    e.node("s").await;
+    e.llm.push(SYS, |_| tool_call("c1", "t.snap", json!({})));
+    e.llm.push(SYS, |body| {
+        let msgs = body["messages"].as_array().unwrap();
+        let tool = msgs.iter().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap().to_string();
+        let parts = msgs.last().unwrap()["content"].as_array().cloned().unwrap_or_default();
+        let url = parts.iter().find(|p| p["type"] == "image_url").map(|p| p["image_url"]["url"].as_str().unwrap().to_string()).unwrap_or_default();
+        let blob = tool.split("[image ").nth(1).and_then(|r| r.split(' ').next()).unwrap_or_default().to_string();
+        assert!(tool.contains("image/jpeg 64x32"), "{tool}");
+        assert!(url.starts_with("data:image/jpeg;base64,"), "{url}");
+        tool_call("c2", "t.keep", json!({"pic": blob}))
+    });
+    e.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
+    e.spawn("tooler", "go").await;
+    assert_eq!(e.mail().await["content"], "kept data:image/jpeg;base64", "the tool got the stored image's bytes");
 }
 
 fn offered(body: &Value) -> Vec<String> {

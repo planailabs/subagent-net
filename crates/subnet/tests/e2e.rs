@@ -390,7 +390,18 @@ async fn an_outdated_agent_is_upgraded() {
     assert_eq!(n.mail().await["content"], "first");
     n.apply(&cluster("  params = { temperature = 0.5 }")).await;
     n.until(id, "listed as outdated", |t| t["outdated"] == true).await;
-    let up = n.hub.upgrade(&Addr::root(), id, false).await.unwrap();
+    // Until the node offers the new version, there's nothing to move onto.
+    let mut up = n.hub.upgrade(&Addr::root(), id, false).await;
+    for _ in 0..200 {
+        match &up {
+            Err(e) if e.to_string().contains("no live node") => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                up = n.hub.upgrade(&Addr::root(), id, false).await;
+            }
+            _ => break,
+        }
+    }
+    let up = up.unwrap();
     assert_ne!(up.id, id);
     n.until(id, "the old one cancelled", |t| t["phase"] == "cancelled").await;
     n.llm.say(WORKER, &["second"]);

@@ -60,6 +60,24 @@ pub struct Compact {
     pub keep: usize,
 }
 
+/// What a model can see (an agent type's `vision`): images from tools are
+/// converted to one of `formats` and scaled to at most `max_px` on their
+/// longer side, and the last `keep` of them go with each call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct Vision {
+    /// Image types the model accepts: png, jpeg, webp, gif.
+    pub formats: Vec<String>,
+    pub max_px: u32,
+    pub keep: usize,
+}
+
+impl Default for Vision {
+    fn default() -> Self {
+        Self { formats: vec!["png".into(), "jpeg".into(), "webp".into(), "gif".into()], max_px: 1568, keep: 3 }
+    }
+}
+
 /// What an agent is, fixed when it is created (stored beside the log).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Spec {
@@ -95,6 +113,9 @@ pub struct Spec {
     /// children). Per-tenant MCP servers run once per tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
+    /// Whether (and how) its model sees images; `None` = text only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<Vision>,
 }
 
 impl Spec {
@@ -112,6 +133,7 @@ impl Spec {
             lazy: vec![],
             compact: None,
             tenant: None,
+            vision: None,
         }
     }
 }

@@ -217,7 +217,9 @@ pub fn parse_args(args: &str) -> Result<Value, String> {
     }
 }
 
-/// Tool output for the model: text blocks as-is, anything else as JSON.
+/// Tool output for the model: text blocks as-is, images and audio as inline
+/// blobs (`{"$blob": {"base64", "mime"}}`, which the agent's node stores and
+/// turns into a reference), anything else as JSON.
 fn render(content: &[ContentBlock], structured: Option<&Value>) -> String {
     if content.is_empty()
         && let Some(s) = structured
@@ -226,9 +228,11 @@ fn render(content: &[ContentBlock], structured: Option<&Value>) -> String {
     }
     content
         .iter()
-        .map(|c| match c.as_text() {
-            Some(t) => t.text.clone(),
-            None => serde_json::to_string(c).unwrap_or_default(),
+        .map(|c| match c {
+            ContentBlock::Text(t) => t.text.clone(),
+            ContentBlock::Image(i) => serde_json::json!({"$blob": {"base64": i.data, "mime": i.mime_type}}).to_string(),
+            ContentBlock::Audio(a) => serde_json::json!({"$blob": {"base64": a.data, "mime": a.mime_type}}).to_string(),
+            other => serde_json::to_string(other).unwrap_or_default(),
         })
         .collect::<Vec<_>>()
         .join("\n")

@@ -123,6 +123,9 @@ pub struct AgentDef {
     /// Conversation compaction (on unless `enabled = false`).
     #[serde(default, skip_serializing_if = "CompactDef::is_default")]
     pub compact: CompactDef,
+    /// The model sees images (`vision = {}` for the defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<subnet_core::agent::Vision>,
 }
 
 /// `compact { ... }` of an agent: when a model call's context reaches

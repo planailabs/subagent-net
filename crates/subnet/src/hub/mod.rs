@@ -751,6 +751,7 @@ impl Hub {
             Op::MailboxTake { name, max } => j(self.mailbox(caller, &name, max, true).await),
             Op::MailboxPeek { name, max } => j(self.mailbox(caller, &name, max, false).await),
             Op::BlobGet { reference } => j(self.blob_for_model(&reference).await),
+            Op::BlobRaw { reference } => j(self.get_blob(&reference).await.map(|(mime, data)| serde_json::json!({"mime": mime, "base64": blobs::encode_b64(&data)}))),
         }
     }
 
@@ -1136,7 +1137,7 @@ impl Hub {
             Some(p) => st.agents[&p].a.spec.tenant.clone(),
             None => tenant,
         };
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone() };
         Ok((spec, reserved))
     }
 
