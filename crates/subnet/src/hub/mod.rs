@@ -756,7 +756,8 @@ impl Hub {
 
     pub async fn list_agents(&self) -> Vec<AgentSummary> {
         let st = self.st.lock().await;
-        let mut v: Vec<_> = st.agents.iter().map(|(id, r)| summary(&st, *id, r)).collect();
+        let c = self.cluster.read().unwrap().spec.clone();
+        let mut v: Vec<_> = st.agents.iter().map(|(id, r)| summary(&st, &c, *id, r)).collect();
         v.sort_by_key(|a| a.id);
         v
     }
@@ -796,7 +797,7 @@ impl Hub {
         let st = self.st.lock().await;
         let Some(r) = st.agents.get(&id) else { return no_agent(id) };
         Ok(Transcript {
-            summary: summary(&st, id, r),
+            summary: summary(&st, &self.cluster.read().unwrap().spec.clone(), id, r),
             messages: r.a.messages.clone(),
             partial: (!r.a.acc.is_empty()).then(|| r.a.acc.partial()),
             inbox: r.a.inbox.iter().cloned().collect(),
@@ -886,6 +887,52 @@ impl Hub {
             return Err(HubError::Forbidden("agents may not fork".into()));
         }
         let mut st = self.st.lock().await;
+        self.copy(&mut st, id, at, tree, false).await
+    }
+
+    /// Moves an agent onto the current version of its type (and mixture's
+    /// MCP servers): its whole history is copied into a new agent whose spec
+    /// is built from the cluster as it is now (keeping its parent, budget and
+    /// tenant), the old agent is cancelled, and a resident it was follows the
+    /// copy. Only roots: with `tree` its children move too; without, they're
+    /// cancelled.
+    /// An agent of an older version is otherwise never resumed.
+    pub async fn upgrade(&self, caller: &Addr, id: AgentId, tree: bool) -> Result<Spawned, HubError> {
+        if matches!(caller, Addr::Agent(_)) {
+            return Err(HubError::Forbidden("agents may not upgrade agents".into()));
+        }
+        let mut st = self.st.lock().await;
+        if let Some(p) = st.agents.get(&id).and_then(|r| r.a.spec.parent) {
+            return bad(format!("{id} is a child of {p}: upgrade the root of its tree (with tree)"));
+        }
+        let new = self.copy(&mut st, id, None, tree, true).await?;
+        // The old tree stops without reporting: its work goes on in the copy.
+        for old in self.targets(&st, caller, id, true)? {
+            self.commit(&mut st, old, vec![Event::Superseded { by: new.id }]).await?;
+        }
+        drop(st);
+        for (name, rid) in self.db.residents().await? {
+            if rid == id {
+                self.db.set_resident(&name, new.id).await?;
+                tracing::info!(resident = %name, from = %id, to = %new.id, ty = %new.ty, "resident upgraded");
+            }
+        }
+        Ok(new)
+    }
+
+    /// The spec `old` would get if it were spawned now: the current type
+    /// and MCP servers, with its own parent, budget and tenant.
+    fn current_spec(&self, st: &State, old: &Spec) -> Result<Spec, HubError> {
+        let name = old.mixture.clone().unwrap_or_else(|| old.ty.split('@').next().unwrap_or_default().to_string());
+        let (mut spec, _) = self.spec_for(st, &name, None, old.tenant.clone())?;
+        spec.parent = old.parent;
+        spec.budget = old.budget.clone();
+        Ok(spec)
+    }
+
+    /// Copies an agent's history (the first `at` events) into a new agent,
+    /// with its spec as it was (fork) or as it would be now (`fresh`, upgrade).
+    async fn copy(&self, st: &mut State, id: AgentId, at: Option<u64>, tree: bool, fresh: bool) -> Result<Spawned, HubError> {
         let Some(r) = st.agents.get(&id) else { return no_agent(id) };
         let mut root_events = self.db.events(id, 0).await?;
         root_events.truncate(at.unwrap_or(r.seq) as usize);
@@ -915,14 +962,20 @@ impl Hub {
             }
             serde_json::from_str(&j).expect("remapped event parses")
         };
+        // Built before anything is created, so a missing type fails cleanly.
+        let mut specs = HashMap::new();
+        for (old, _) in &subtree {
+            let was = &st.agents[old].a.spec;
+            specs.insert(*old, if fresh { self.current_spec(st, was)? } else { was.clone() });
+        }
         for (old, events) in &subtree {
             let new = map[old];
-            let mut spec = st.agents[old].a.spec.clone();
+            let mut spec = specs.remove(old).unwrap();
             spec.parent = if old == &id { None } else { spec.parent.and_then(|p| map.get(&p).copied()) };
             self.db.create_agent(new, &spec).await?;
             st.agents.insert(new, AgentRec { a: Agent::new(new, spec), seq: 0, epoch: 0, node: None });
             let events: Vec<Event> = events.iter().map(remap).collect();
-            self.restore(&mut st, new, events).await?;
+            self.restore(st, new, events).await?;
         }
         let root = map[&id];
         Ok(Spawned { id: root, ty: st.agents[&root].a.spec.ty.clone() })
@@ -1117,6 +1170,23 @@ impl Hub {
                 }
             }
         }
+        // A resident whose type (or MCP servers) the cluster changed moves
+        // onto the new version once a node offers it, keeping its history.
+        for (name, id) in &existing {
+            if !c.spec.residents.contains_key(name) {
+                continue;
+            }
+            let ready = {
+                let st = self.st.lock().await;
+                st.agents.get(id).is_some_and(|r| outdated(&c.spec, &r.a.spec) && !matches!(r.a.phase, subnet_core::agent::Phase::Cancelled) && self.current_spec(&st, &r.a.spec).is_ok())
+            };
+            if ready {
+                match self.upgrade(&Addr::root(), *id, true).await {
+                    Ok(s) => tracing::info!(resident = %name, agent = %s.id, ty = %s.ty, "resident moved to its type's new version"),
+                    Err(e) => tracing::warn!(resident = %name, error = %e, "upgrading resident failed"),
+                }
+            }
+        }
         let by = c.version.as_ref().map_or_else(Addr::root, |v| v.applied_by.parse().unwrap_or_else(|_| Addr::root()));
         for (name, r) in &c.spec.residents {
             if existing.iter().any(|(n, _)| n == name) {
@@ -1212,7 +1282,14 @@ fn is_ancestor(st: &State, anc: AgentId, mut id: AgentId) -> bool {
     false
 }
 
-fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
+/// Whether an agent runs an older version of its type or of its MCP servers
+/// than the cluster declares now (`upgrade` moves it onto the current one).
+fn outdated(c: &subnet_cluster::Cluster, spec: &Spec) -> bool {
+    let name = spec.ty.split('@').next().unwrap_or_default();
+    c.agent_id(name).is_some_and(|now| now != spec.ty) || spec.mcp.iter().any(|(m, id)| c.mcp_id(m).is_some_and(|now| &now != id))
+}
+
+fn summary(st: &State, c: &subnet_cluster::Cluster, id: AgentId, r: &AgentRec) -> AgentSummary {
     let awaiting_approval = r.a.awaiting_approval().first().map(|c| (*c).clone());
     let phase = serde_json::to_value(&r.a.phase).unwrap()["phase"].as_str().unwrap_or_default().to_string();
     AgentSummary {
@@ -1228,6 +1305,7 @@ fn summary(st: &State, id: AgentId, r: &AgentRec) -> AgentSummary {
         reserved: r.a.reserved,
         compactions: r.a.compactions,
         tenant: r.a.spec.tenant.clone(),
+        outdated: outdated(c, &r.a.spec),
         seq: r.seq,
         awaiting_approval,
         last: r

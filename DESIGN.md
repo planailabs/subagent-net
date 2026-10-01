@@ -148,8 +148,8 @@ route "log-everything" {
 }
 ```
 
-- Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets and `nodes`. An agent is only ever resumed on a node offering the same hash: changing an agent type in the cluster leaves existing agents of the old version pending (roll back, or fork them).
-- A `resident` is created when its type is available, answers to whoever applied the cluster, and is cancelled when removed from the file. Changing a resident's mixture doesn't replace the running agent.
+- Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets and `nodes`. An agent is only ever resumed on a node offering the same hash: changing an agent type (or an MCP server of its mixture) in the cluster leaves existing agents of the old version pending. They're listed `outdated`; `upgrade` moves one onto the current version (see Forking and upgrading). Residents move by themselves.
+- A `resident` is created when its type is available, answers to whoever applied the cluster, and is cancelled when removed from the file. When the cluster changes its type (or its MCP servers), it's upgraded once a node offers the new version: same history, new agent, same resident name. Changing which MCP servers its mixture lists doesn't replace the running agent.
 - `$VAR` in values and `env = "..."` in credentials are resolved on the node. A missing variable makes that type unavailable on that node, reported back to the hub and shown by `subnet list-nodes`.
 - Durations are `250ms`, `10s`, `5m`, `2h`, `1d`. Rates are `N/duration`.
 - HCL allows one attribute per line inside a block, so multi-field values on one line use object syntax: `budget = { max_tokens = 1000, max_depth = 2 }`.
@@ -177,7 +177,7 @@ enum Event {
     ToolResult { call_id, content, is_error }, ToolAborted { call_id },
     Approval { call_id, approved },
     ChildSpawned { id, reserved }, ChildReport { id, status, content },
-    PauseRequested { mode }, Resumed, Cancelled,
+    PauseRequested { mode }, Resumed, Cancelled, Superseded { by },
     Recovered,                                     // logged by the hub on every placement
     ToolsLoaded { names },                         // the tool router
     Compacted { upto, summary, usage }, CompactFailed { error },
@@ -199,6 +199,7 @@ enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
 - **Compaction** (on by default; see below) keeps long conversations within the model's context.
 - **Snapshots:** each time an agent's log crosses a multiple of 200 events the hub stores its folded state (`agent_snapshots`, newest only). Loading an agent reads the snapshot and the events after it; `Assign` carries the snapshot and only the events after it (never a snapshot taken at the final `Recovered`, so the node always has an event to start from).
 - **Forking:** `fork(id, at, tree)` copies the log prefix into a new agent. Copied history is folded without re-running its effects, so old answers aren't delivered again.
+- **Upgrading:** `upgrade(id, tree)` moves a root agent onto the current version of its type: its whole log is copied into a new agent whose spec is built from the cluster as it is now (type, tools, MCP servers, compaction; its budget and tenant are kept), the old agent and its descendants get `Superseded { by }` (they stop like a cancel but report nothing: the work goes on in the copy), and a resident pointing at it points at the copy. With `tree` its children move too; without, they stop. Children aren't upgraded on their own (their parent knows them by id).
   - Without `tree`, the copy has no children: `ChildSpawned`/`ChildReport` events are left out, so a `wait_for` pending at the fork point returns "not a child".
   - With `tree`, every child spawned within the prefix is forked as well (recursively, with its full log), with ids remapped in all copied events and specs.
 
@@ -388,7 +389,7 @@ The web UI and the TUI use the same API.
 
 - Principals are declared in the cluster file: `user`, `client`, `node`. Each has a role:
   - `admin`: apply cluster files, issue tokens, everything else
-  - `operator`: spawn, send, pause, resume, cancel, approve, fork
+  - `operator`: spawn, send, pause, resume, cancel, approve, fork, upgrade
   - `viewer`: read only
   - nodes: the node protocol only
 - `subnet issue-token <kind> <name>` (admin) creates a random token. The hub stores only its SHA-256.
@@ -415,7 +416,7 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 - **Design:** monochrome and dark. Black background, white/grey text, no colour. State is shown by glyph and pattern: `●` thinking, `▣` tools, `○` idle, `‖` paused, `✕` failed, `·` cancelled. Monospace type throughout.
 - **Views:**
   - **Park:** agents laid out as *plots*. Each root agent and its descendants form a bordered block (a tree in spawn order), and plots flow in a responsive grid with live plots first. Tiles show glyph, type, a token bar and the last line of output (streaming, else the last answer), updating live from the event stream. A text filter matches type, id, phase, node and "paused". `#park/<id>` opens an agent.
-  - **Agent panel:** live transcript with the streaming partial, tool calls and results, pending approval (approve/deny), pause (safe/quick/hard), resume, fork, cancel, and a message box.
+  - **Agent panel:** live transcript with the streaming partial, tool calls and results, pending approval (approve/deny), pause (safe/quick/hard), resume, fork, cancel, an upgrade button when the agent is outdated (the park marks it ⇡), and a message box.
   - **Senses:** live event feed per sense, and stream status (rate, subscribers).
   - **Switchboard:** routes with counters (matched, dropped, throttled, delivered), and the latest deliveries.
   - **Cluster:** nodes and what they run, current spec version, diff and apply (admin), history.
@@ -454,7 +455,7 @@ State and key handling (`tui::App`) are pure and tested; rendering is tested aga
 
 Everything in this document is implemented, except what "Not in scope yet" lists:
 
-- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), tenants and per-tenant MCP servers, snapshots, forks (with tree), internal and external executors.
+- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), tenants and per-tenant MCP servers, snapshots, forks (with tree), upgrades onto a type's new version (residents automatically), internal and external executors.
 - **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing.
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.

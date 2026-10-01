@@ -41,6 +41,10 @@ pub struct AgentSummary {
     /// Whose work it is (per-tenant MCP servers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
+    /// Runs an older version of its type or MCP servers than the cluster
+    /// declares: no node resumes it until it's upgraded (`upgrade`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outdated: bool,
     /// Number of committed events.
     pub seq: u64,
     /// The tool call waiting for approval, if any.
@@ -276,6 +280,14 @@ pub struct ForkArgs {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct UpgradeArgs {
+    pub id: AgentId,
+    /// Move its children too (otherwise they're cancelled).
+    #[serde(default)]
+    pub tree: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ApplyArgs {
     /// Cluster files; their blocks are merged.
     pub files: Vec<ClusterFile>,
@@ -423,6 +435,7 @@ op!(InjectEvent, "inject_event", Operator, Some((Method::Post, "/v1/senses/{sens
 op!(BlobPut, "blob_put", Operator, Some((Method::Post, "/v1/blobs")), BlobPutArgs, crate::hub::blobs::BlobRef, "Store a blob; returns its blob:<sha256> reference.");
 op!(BlobGetOp, "blob_get", Viewer, Some((Method::Get, "/v1/blobs/{hash}")), BlobGetArgs, crate::hub::blobs::Blob, "Read a blob as base64 (raw bytes: GET /v1/blobs/{hash}/raw).");
 op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events, optionally with its children) into a new agent.");
+op!(Upgrade, "upgrade", Operator, Some((Method::Post, "/v1/agents/{id}/upgrade")), UpgradeArgs, Spawned, "Move an agent (a root; with `tree` its children too) onto the current version of its type: its history is copied into a new agent built from the cluster as it is now, the old one is cancelled, and a resident follows. Agents listed `outdated` need this to run again.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
 pub fn metas() -> Vec<OpMeta> {
@@ -440,6 +453,7 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<Cancel>(),
         OpMeta::of::<Approve>(),
         OpMeta::of::<Fork>(),
+        OpMeta::of::<Upgrade>(),
         OpMeta::of::<ApplyCluster>(),
         OpMeta::of::<GetCluster>(),
         OpMeta::of::<ClusterHistory>(),
@@ -523,6 +537,11 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<Fork, _, _>(move |c, a| {
         let h = h.clone();
         async move { Ok(h.fork(&c.addr, a.id, a.at, a.tree).await?) }
+    });
+    let h = hub.clone();
+    r.add::<Upgrade, _, _>(move |c, a| {
+        let h = h.clone();
+        async move { Ok(h.upgrade(&c.addr, a.id, a.tree).await?) }
     });
     let h = hub.clone();
     r.add::<ApplyCluster, _, _>(move |c, a| {

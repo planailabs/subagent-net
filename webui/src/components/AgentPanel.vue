@@ -43,6 +43,11 @@ async function send() {
   }
 }
 
+async function upgrade() {
+  const r = await act("upgrade", { tree: true });
+  if (r) error.value = `upgraded: now ${r.id}`;
+}
+
 async function fork(tree) {
   const r = await act("fork", { tree });
   if (r) error.value = `forked as ${r.id}`;
@@ -67,6 +72,10 @@ const content = (m) => m.content ?? (m.tool_calls?.length ? m.tool_calls.map((c)
     <div v-if="t" class="dim">
       {{ t.phase }}<span v-if="t.pause"> · pause {{ t.pause }}{{ t.paused ? "" : " (finishing)" }}</span> · node {{ t.node || "–" }} ·
       {{ t.usage.prompt_tokens + t.usage.completion_tokens }} tokens<span v-if="t.usage.cached_prompt_tokens"> ({{ t.usage.cached_prompt_tokens }} cached)</span><span v-if="t.budget.max_tokens"> of {{ t.budget.max_tokens }}</span>
+    </div>
+    <div v-if="t?.outdated" class="err">
+      Runs an older version of its type, so no node resumes it.
+      <button @click="upgrade">upgrade</button>
     </div>
     <div class="row" style="margin: 8px 0">
       <button @click="act('pause', { mode: 'safe' })">pause safe</button>

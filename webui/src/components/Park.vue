@@ -74,13 +74,13 @@ onUnmounted(() => {
             @keydown.enter="selected = r.agent.id"
           >
             <span><span class="dim">{{ treePrefix(r) }}</span><span class="glyph" :title="r.agent.phase">{{ glyph(r.agent) }}</span></span>
-            <span>{{ typeName(r.agent.type) }} <span class="dim">{{ shortId(r.agent.id) }}</span></span>
+            <span>{{ typeName(r.agent.type) }} <span class="dim">{{ shortId(r.agent.id) }}</span><span v-if="r.agent.outdated" class="err" title="an older version of its type: upgrade it to run"> ⇡</span></span>
             <span class="dim" :title="`${r.agent.usage.prompt_tokens + r.agent.usage.completion_tokens} tokens`">{{ bar(tokenShare(r.agent)) }}</span>
             <span class="last">{{ tileLine(live, r.agent.id) || (r.agent.paused ? 'paused: ' + r.agent.pause : lastLine(r.agent.last)) }}</span>
           </div>
         </div>
       </div>
-      <p class="dim" style="margin-top: 12px">● thinking · ▣ tools · ○ idle · ‖ paused · ? needs approval · ✕ failed · · cancelled</p>
+      <p class="dim" style="margin-top: 12px">● thinking · ▣ tools · ○ idle · ‖ paused · ? needs approval · ✕ failed · · cancelled · ⇡ outdated (upgrade)</p>
     </section>
     <AgentPanel v-if="selected" :id="selected" @close="selected = null" @changed="refresh" />
   </div>

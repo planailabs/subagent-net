@@ -337,6 +337,50 @@ async fn residents_are_created_addressable_and_removed() {
 }
 
 #[tokio::test]
+async fn a_resident_follows_its_type_to_a_new_version() {
+    let n = Net::new(&resident_cluster()).await;
+    n.llm.say(CONCIERGE, &["on duty"]);
+    n.node("s").await;
+    assert_eq!(n.mail().await["content"], "on duty");
+    let old: uuid::Uuid = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap()[0]["id"].as_str().unwrap().parse().unwrap();
+    // A changed type (a new version): no node would resume the old agent,
+    // so the resident moves onto the new one with its history.
+    let changed = resident_cluster().replace("  model = \"mock\"", "  model = \"mock\"\n  params = { temperature = 0.5 }");
+    assert_ne!(changed, resident_cluster());
+    n.apply(&changed).await;
+    n.until(old, "the old version cancelled", |t| t["phase"] == "cancelled").await;
+    n.llm.say(CONCIERGE, &["still here"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Resident("concierge".into()), content: "remember me?".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "still here");
+    let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
+    assert_eq!(msgs, 4, "system, start your shift, on duty, remember me?: the history moved along");
+    let agents = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
+    let new = agents.as_array().unwrap().iter().find(|a| a["id"] != old.to_string()).unwrap();
+    assert!(new.get("outdated").is_none(), "{new}");
+}
+
+#[tokio::test]
+async fn an_outdated_agent_is_upgraded() {
+    let n = net().await;
+    n.node("a").await;
+    n.llm.say(WORKER, &["first"]);
+    let id = n.spawn("worker", "one").await;
+    assert_eq!(n.mail().await["content"], "first");
+    n.apply(&cluster("  params = { temperature = 0.5 }")).await;
+    n.until(id, "listed as outdated", |t| t["outdated"] == true).await;
+    let up = n.hub.upgrade(&Addr::root(), id, false).await.unwrap();
+    assert_ne!(up.id, id);
+    n.until(id, "the old one cancelled", |t| t["phase"] == "cancelled").await;
+    n.llm.say(WORKER, &["second"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(up.id), content: "two".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "second");
+    let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
+    assert_eq!(msgs, 4, "system, one, first, two");
+    // Agents may not move agents; children are moved from their root.
+    assert!(n.hub.upgrade(&Addr::Agent(up.id), up.id, false).await.is_err());
+}
+
+#[tokio::test]
 async fn mailboxes_are_readable_only_by_listed_mixtures() {
     let n = Net::new(&resident_cluster()).await;
     n.llm.say(CONCIERGE, &["on duty"]);

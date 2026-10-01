@@ -184,6 +184,11 @@ pub enum Event {
     },
     Resumed,
     Cancelled,
+    /// Moved to a new agent (an upgrade): it stops like a cancel, but
+    /// reports nothing, since its work goes on in `by`.
+    Superseded {
+        by: AgentId,
+    },
     /// The agent was (re)placed on a spawner: whatever was in flight before is
     /// gone. Logged so every replica folds the same state.
     Recovered,
@@ -783,6 +788,15 @@ impl Agent {
                 }
                 self.phase = Phase::Cancelled;
                 self.report(Status::Cancelled, "[cancelled]".into(), &mut fx);
+            }
+            Event::Superseded { .. } => {
+                if self.terminal() {
+                    return fx;
+                }
+                if self.inflight() {
+                    fx.push(Effect::AbortInflight);
+                }
+                self.phase = Phase::Cancelled;
             }
         }
         fx
