@@ -135,6 +135,10 @@ where
         }) else {
             continue;
         };
+        // Images from events come as they were sent: fitted here.
+        let Ok((bytes, mime, ..)) = fit(&bytes, v).inspect_err(|e| tracing::warn!(%hash, %mime, e, "an image the model can't take")) else {
+            continue;
+        };
         let img = Image { mime, base64: base64::engine::general_purpose::STANDARD.encode(bytes) };
         let (place, on_message) = if msgs[i].role == Role::User {
             (i, true)

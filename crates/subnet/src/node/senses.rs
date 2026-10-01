@@ -250,7 +250,9 @@ enum Out {
 }
 
 /// Replaces inline blobs (`{"$blob": {"base64": …, "mime": …}}`) in event data
-/// with `blob:<sha256>` references; returns the blobs to upload first.
+/// with `blob:<sha256>` references (an image with its marker, `[image
+/// blob:<sha256> image/png 800x600]`, so a model that sees gets it); returns
+/// the blobs to upload first.
 pub fn extract_blobs(v: &mut Value) -> Vec<(String, String, String)> {
     let mut out = vec![];
     walk(v, &mut out);
@@ -266,8 +268,15 @@ fn walk(v: &mut Value, out: &mut Vec<(String, String, String)>) {
         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
             let h = crate::hub::blobs::hash(&bytes);
             let mime = inner["mime"].as_str().unwrap_or("application/octet-stream").to_string();
-            out.push((h.clone(), mime, b64.to_string()));
-            *v = Value::String(format!("blob:{h}"));
+            let dims = mime.starts_with("image/").then(|| image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions().ok()).flatten();
+            out.push((h.clone(), mime.clone(), b64.to_string()));
+            *v = Value::String(match dims {
+                Some((w, ht)) => {
+                    super::vision::remember(&h, &mime, &bytes);
+                    super::vision::marker(&h, &mime, w, ht)
+                }
+                None => format!("blob:{h}"),
+            });
             return;
         }
     }
@@ -481,6 +490,15 @@ mod tests {
         assert_eq!(blobs[0].1, "text/plain");
         assert_eq!(blobs[1].1, "application/octet-stream");
         assert_eq!(v["n"], 1);
+        // An image is a marker, which a model that sees is given.
+        let mut png = std::io::Cursor::new(vec![]);
+        image::DynamicImage::new_rgb8(3, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        use base64::Engine;
+        let mut v = json!({"photo": {"$blob": {"base64": base64::engine::general_purpose::STANDARD.encode(png.get_ref()), "mime": "image/png"}}});
+        extract_blobs(&mut v);
+        let h = crate::hub::blobs::hash(png.get_ref());
+        assert_eq!(v["photo"], format!("[image blob:{h} image/png 3x2]"));
+        assert_eq!(super::super::vision::markers(&v.to_string()), [(h, "image/png".to_string())]);
     }
 
     #[test]
