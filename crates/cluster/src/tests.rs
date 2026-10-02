@@ -223,7 +223,7 @@ fn compaction_is_on_unless_turned_off() {
     let with_compact = |c: &str| parse(&BASE.replace("nodes = [\"n1\"]", &format!("nodes = [\"n1\"]\n  {c}")));
     let on = parse(BASE).unwrap();
     let a = &on.agents["a"];
-    assert_eq!(a.compact.spec(&a.executor), Some(subnet_core::agent::Compact { at_tokens: 96_000, keep: 8 }));
+    assert_eq!(a.compact.spec(&a.executor), Some(subnet_core::agent::Compact { at_tokens: 96_000, keep: 8, instructions: None }));
     let tuned = with_compact("compact {\n    at_tokens = 50000\n  }").unwrap();
     assert_eq!(tuned.agents["a"].compact.at_tokens, 50_000);
     assert_eq!(tuned.agents["a"].compact.keep, 8, "unset fields keep their defaults");
@@ -232,6 +232,13 @@ fn compaction_is_on_unless_turned_off() {
     let a = &off.agents["a"];
     assert_eq!(a.compact.spec(&a.executor), None);
     assert!(with_compact("compact {\n    keep = 0\n  }").unwrap_err().to_string().contains("compact"));
+    // What its summaries must keep, added to the built-in instructions.
+    let told = with_compact("compact {\n    at_tokens = 50000\n    instructions = <<-EOT\n      Keep feelings.\n    EOT\n  }").unwrap();
+    let a = &told.agents["a"];
+    assert_eq!(a.compact.spec(&a.executor).unwrap().instructions.as_deref(), Some("Keep feelings."));
+    assert_ne!(told.agent_id("a"), tuned.agent_id("a"), "a new version of the type");
+    // Unset, it changes nothing about a type (its id stays).
+    assert!(!serde_json::to_string(&tuned.agents["a"].compact).unwrap().contains("instructions"));
 }
 
 #[test]

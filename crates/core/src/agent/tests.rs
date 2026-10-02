@@ -807,7 +807,7 @@ fn compacting_spec() -> Spec {
     let mut s = spec();
     s.tools = vec![ToolDef { name: "srv.t".into(), description: "A tool.".into(), parameters: json!({"type": "object"}) }];
     s.lazy = vec!["srv.t".into()];
-    s.compact = Some(Compact { at_tokens: 1000, keep: 2 });
+    s.compact = Some(Compact { at_tokens: 1000, keep: 2, instructions: None });
     s
 }
 
@@ -866,6 +866,19 @@ fn a_failed_compaction_goes_on_without_one() {
     assert_eq!(h.ev(Event::CompactFailed { error: "down".into() }), vec![Effect::CallLlm], "no second try this step");
     assert_eq!(h.a.messages.len(), 7);
     h.crash();
+}
+
+#[test]
+fn a_type_says_what_its_summaries_keep() {
+    let mut h = H::new(compacting_spec());
+    grown(&mut h);
+    assert_eq!(h.a.compaction_request("be useful", 5)[0].content.as_deref(), Some(COMPACT_PROMPT), "the fixed instructions alone");
+    let mut s = compacting_spec();
+    s.compact.as_mut().unwrap().instructions = Some("Keep how she feels about each person.".into());
+    let mut h = H::new(s);
+    grown(&mut h);
+    let system = h.a.compaction_request("be useful", 5)[0].content.clone().unwrap();
+    assert!(system.starts_with(COMPACT_PROMPT) && system.ends_with("For this agent in particular:\nKeep how she feels about each person."), "{system}");
 }
 
 #[test]

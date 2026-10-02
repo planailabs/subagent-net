@@ -53,11 +53,15 @@ impl Budget {
 
 /// When and how an agent's conversation is compacted: once a model call's
 /// context reaches `at_tokens`, everything but the task (the first message)
-/// and the last `keep` messages is replaced by a summary the model writes.
+/// and the last `keep` messages is replaced by a summary the model writes,
+/// following `COMPACT_PROMPT` and the type's own `instructions`, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Compact {
     pub at_tokens: u64,
     pub keep: usize,
+    /// What summaries of this agent must also keep (or may drop).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 /// What a model can see (an agent type's `vision`): images from tools are
@@ -506,8 +510,12 @@ impl Agent {
             }
             t.push('\n');
         }
+        let prompt = match self.spec.compact.as_ref().and_then(|c| c.instructions.as_deref()) {
+            Some(i) => format!("{COMPACT_PROMPT}\n\nFor this agent in particular:\n{i}"),
+            None => COMPACT_PROMPT.to_string(),
+        };
         vec![
-            Message::system(COMPACT_PROMPT),
+            Message::system(prompt),
             Message::user(format!("The agent's instructions:\n{system}\n\nIts conversation so far:\n\n{t}")),
         ]
     }

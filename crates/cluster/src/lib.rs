@@ -130,18 +130,23 @@ pub struct AgentDef {
 
 /// `compact { ... }` of an agent: when a model call's context reaches
 /// `at_tokens`, all but the task and the last `keep` messages are replaced
-/// by a summary the model writes. External executors never compact.
+/// by a summary the model writes, following the built-in instructions and
+/// the type's own `instructions` (what else its summaries keep). External
+/// executors never compact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct CompactDef {
     pub enabled: bool,
     pub at_tokens: u64,
     pub keep: usize,
+    /// Added to the summariser's instructions for this type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 impl Default for CompactDef {
     fn default() -> Self {
-        Self { enabled: true, at_tokens: 96_000, keep: 8 }
+        Self { enabled: true, at_tokens: 96_000, keep: 8, instructions: None }
     }
 }
 
@@ -152,7 +157,8 @@ impl CompactDef {
 
     /// What agents of a type get, if anything.
     pub fn spec(&self, executor: &Executor) -> Option<subnet_core::agent::Compact> {
-        (self.enabled && !executor.is_external()).then(|| subnet_core::agent::Compact { at_tokens: self.at_tokens, keep: self.keep })
+        let instructions = self.instructions.as_deref().map(str::trim).filter(|i| !i.is_empty()).map(String::from);
+        (self.enabled && !executor.is_external()).then(|| subnet_core::agent::Compact { at_tokens: self.at_tokens, keep: self.keep, instructions })
     }
 }
 
