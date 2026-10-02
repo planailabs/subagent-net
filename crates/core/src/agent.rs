@@ -21,6 +21,10 @@ pub const COMPACT_PROMPT: &str = "You compact an AI agent's conversation. The ag
 - open threads and the next steps the agent was about to take.\n\
 Drop small talk, repetition and raw tool output that no longer matters. Be complete rather than short, but don't pad. Answer with the summary only.";
 
+/// What a summary must be, whatever the instructions: appended to a type's
+/// own `prompt` (the built-in `COMPACT_PROMPT` says it already).
+pub const COMPACT_CONTRACT: &str = "The agent will continue from your summary plus its most recent messages, which it keeps verbatim; the rest is gone. Answer with the summary only.";
+
 /// Name of the one built-in tool the state machine handles itself.
 pub const WAIT_FOR: &str = "wait_for";
 /// Loads lazy tools' schemas; resolved by the state machine itself.
@@ -54,7 +58,8 @@ impl Budget {
 /// When and how an agent's conversation is compacted: once a model call's
 /// context reaches `at_tokens`, everything but the task (the first message)
 /// and the last `keep` messages is replaced by a summary the model writes,
-/// following `COMPACT_PROMPT` and the type's own `instructions`, if any.
+/// following `COMPACT_PROMPT` and the type's own `instructions`, if any, or
+/// the type's own `prompt` in its place (with `COMPACT_CONTRACT`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Compact {
     pub at_tokens: u64,
@@ -62,6 +67,9 @@ pub struct Compact {
     /// What summaries of this agent must also keep (or may drop).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Instructions replacing `COMPACT_PROMPT` for this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 /// What a model can see (an agent type's `vision`): images from tools are
@@ -510,10 +518,14 @@ impl Agent {
             }
             t.push('\n');
         }
-        let prompt = match self.spec.compact.as_ref().and_then(|c| c.instructions.as_deref()) {
-            Some(i) => format!("{COMPACT_PROMPT}\n\nFor this agent in particular:\n{i}"),
+        let c = self.spec.compact.as_ref();
+        let mut prompt = match c.and_then(|c| c.prompt.as_deref()) {
+            Some(own) => format!("{own}\n\n{COMPACT_CONTRACT}"),
             None => COMPACT_PROMPT.to_string(),
         };
+        if let Some(i) = c.and_then(|c| c.instructions.as_deref()) {
+            prompt = format!("{prompt}\n\nFor this agent in particular:\n{i}");
+        }
         vec![
             Message::system(prompt),
             Message::user(format!("The agent's instructions:\n{system}\n\nIts conversation so far:\n\n{t}")),

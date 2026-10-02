@@ -807,7 +807,7 @@ fn compacting_spec() -> Spec {
     let mut s = spec();
     s.tools = vec![ToolDef { name: "srv.t".into(), description: "A tool.".into(), parameters: json!({"type": "object"}) }];
     s.lazy = vec!["srv.t".into()];
-    s.compact = Some(Compact { at_tokens: 1000, keep: 2, instructions: None });
+    s.compact = Some(Compact { at_tokens: 1000, keep: 2, instructions: None, prompt: None });
     s
 }
 
@@ -879,6 +879,14 @@ fn a_type_says_what_its_summaries_keep() {
     grown(&mut h);
     let system = h.a.compaction_request("be useful", 5)[0].content.clone().unwrap();
     assert!(system.starts_with(COMPACT_PROMPT) && system.ends_with("For this agent in particular:\nKeep how she feels about each person."), "{system}");
+    // Its own prompt instead of the built-in one, with the contract kept.
+    let mut s = compacting_spec();
+    s.compact.as_mut().unwrap().prompt = Some("Write her diary of these days.".into());
+    let mut h = H::new(s);
+    grown(&mut h);
+    let system = h.a.compaction_request("be useful", 5)[0].content.clone().unwrap();
+    assert_eq!(system, format!("Write her diary of these days.\n\n{COMPACT_CONTRACT}"));
+    assert!(!system.contains("AI agent's conversation"));
 }
 
 #[test]

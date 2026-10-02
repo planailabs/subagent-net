@@ -63,7 +63,8 @@ agent "deepseek-flash" {
   budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off;
-                                              # instructions = "…" adds what its summaries must keep
+                                              # instructions = "…" adds what its summaries must keep;
+                                              # prompt = "…" replaces the built-in instructions
   vision   = { max_px = 1024 }                # its model sees images from tools (formats, max_px, keep)
 }
 
@@ -210,7 +211,7 @@ enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
 Each LLM call reports its context size (prompt + completion tokens). Before the next call, if that reached the agent type's `compact.at_tokens` (default 96 000), the state machine asks for a compaction (`Effect::Compact { upto }`) instead of the call:
 
 - **What goes:** everything but the first message (the task) and the last `keep` messages (default 8). The kept part never starts with a tool result, so a call stays with its result. It only happens between steps, when no tool call is pending.
-- **The summary:** the node asks the agent's own model, without tools, to summarise the conversation up to `upto` (`Agent::compaction_request`: fixed instructions (`COMPACT_PROMPT`), then the type's own `compact.instructions` if it has any, the agent's system prompt, the transcript as text). A type's instructions say what else its summaries must keep, or may drop (a character: feelings and relationships; a researcher: every source). They're part of the type: changing them is a new version, as with any setting; unset, they leave a type's id as it was. It proposes `Compacted { upto, summary, usage }`.
+- **The summary:** the node asks the agent's own model, without tools, to summarise the conversation up to `upto` (`Agent::compaction_request`: fixed instructions (`COMPACT_PROMPT`), then the type's own `compact.instructions` if it has any, the agent's system prompt, the transcript as text). A type's instructions say what else its summaries must keep, or may drop (a character: feelings and relationships; a researcher: every source). Or a type gives its own `compact.prompt` in place of the built-in instructions (an agent that isn't working on a task: a character's memory of her days); `COMPACT_CONTRACT` (the agent continues from the summary plus its kept messages; answer with the summary only) always follows it. A type has one or the other, not both. Either is part of the type: changing it is a new version, as with any setting; unset, they leave a type's id as it was. It proposes `Compacted { upto, summary, usage }`.
 - **Applying it:** messages `1..upto` become one user message with the summary. Schemas the agent loaded (`load_tools`) come back as a note after it, since `call_tool` still needs them. The summary call's usage counts towards the budget. The LLM call then goes ahead.
 - **Deterministic:** the summary is in the log, so replicas fold the same transcript. After a crash mid-summary, recovery asks for it again.
 - **Failures are not fatal:** `CompactFailed` (the model errored or returned nothing) lets the call go ahead uncompacted; the next step tries again.

@@ -131,8 +131,10 @@ pub struct AgentDef {
 /// `compact { ... }` of an agent: when a model call's context reaches
 /// `at_tokens`, all but the task and the last `keep` messages are replaced
 /// by a summary the model writes, following the built-in instructions and
-/// the type's own `instructions` (what else its summaries keep). External
-/// executors never compact.
+/// the type's own `instructions` (what else its summaries keep), or the
+/// type's own `prompt` in place of the built-in ones (a short contract,
+/// "answer with the summary only", always follows). External executors
+/// never compact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct CompactDef {
@@ -142,11 +144,14 @@ pub struct CompactDef {
     /// Added to the summariser's instructions for this type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Replaces the summariser's built-in instructions for this type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 impl Default for CompactDef {
     fn default() -> Self {
-        Self { enabled: true, at_tokens: 96_000, keep: 8, instructions: None }
+        Self { enabled: true, at_tokens: 96_000, keep: 8, instructions: None, prompt: None }
     }
 }
 
@@ -157,8 +162,8 @@ impl CompactDef {
 
     /// What agents of a type get, if anything.
     pub fn spec(&self, executor: &Executor) -> Option<subnet_core::agent::Compact> {
-        let instructions = self.instructions.as_deref().map(str::trim).filter(|i| !i.is_empty()).map(String::from);
-        (self.enabled && !executor.is_external()).then(|| subnet_core::agent::Compact { at_tokens: self.at_tokens, keep: self.keep, instructions })
+        let text = |t: &Option<String>| t.as_deref().map(str::trim).filter(|i| !i.is_empty()).map(String::from);
+        (self.enabled && !executor.is_external()).then(|| subnet_core::agent::Compact { at_tokens: self.at_tokens, keep: self.keep, instructions: text(&self.instructions), prompt: text(&self.prompt) })
     }
 }
 
@@ -543,6 +548,9 @@ impl Cluster {
             }
             if a.compact.enabled && (a.compact.at_tokens == 0 || a.compact.keep == 0) {
                 return invalid(format!("{ctx}: compact needs at_tokens and keep above 0"));
+            }
+            if a.compact.prompt.is_some() && a.compact.instructions.is_some() {
+                return invalid(format!("{ctx}: compact has either instructions (added to the built-in ones) or a prompt (replacing them), not both"));
             }
             if a.executor.internal && a.executor.command.is_some() {
                 return invalid(format!("{ctx}: executor is either internal or a command"));
