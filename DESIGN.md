@@ -64,6 +64,7 @@ agent "deepseek-flash" {
   approve  = ["memory.delete"]
   group_events = true                         # optional: events from routes in one message per call (below)
   search_history = true                       # optional: the built-in search_history (below)
+  hooks = ["careful"]                         # optional: hooks deciding at points of its loop (below)
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off;
                                               # instructions = "…" adds what its summaries must keep;
                                               # prompt = "…" replaces the built-in instructions
@@ -165,6 +166,15 @@ route "morning" {
   from = "door"
   when = "event.state == 'unlocked'"
   deliver { release = "night" }
+}
+
+# --- hooks ---------------------------------------------------------------------
+hook "careful" {
+  on      = "pre_tool"
+  tools   = ["memory.*"]
+  run     { url = "https://policy.example.org/hook" }
+  timeout = "10s"
+  on_lost = "deny"
 }
 ```
 
@@ -292,6 +302,41 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
 - **Token usage** counts prompt and completion tokens, and the prompt tokens the provider served from its cache (`cached_prompt_tokens`, read from `prompt_tokens_details.cached_tokens` or DeepSeek's `prompt_cache_hit_tokens`). An agent type's `budget { cached_percent = 10 }` counts cached tokens at that percentage towards `max_tokens` (unset: 100), so budgets can track cost; cached input costs about a tenth.
 - **Budgets:** a child's token budget is carved out of the parent's (`ChildSpawned.reserved`). A child gets at most half of what the parent has left (a type without a limit gets exactly that), so a parent never spends its whole budget on children and can still read their answers. A spawn whose child would get less than a tenth of its type's limit is refused, as a tool error the model sees. Depth shrinks per level; `max_children` is per agent.
 - **Placement:** an agent needs an executor only while it has work. Dormant agents keep their slot until it's needed, and are placed again when an event gives them work. Placement picks the least-loaded live node offering the exact type hash.
+
+### Hooks
+
+A **hook** is a decision made outside an agent at a point of its own loop. Hooks are declared once (`hook "name" { ... }`) and an agent type lists the ones it uses (`hooks = [...]`, in order); the hooks' definitions are part of the type's identity, so changing one is a new version.
+
+```hcl
+hook "no-force-push" {
+  on         = "pre_tool"            # pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact
+  tools      = ["shell.*"]           # pre/post_tool: the tools it's for (`*` patterns; none: all)
+  # from     = ["user:*"]            # on_message: the senders it's for
+  when       = "input.args.cmd.contains('--force')"   # optional CEL over point, input, agent
+  run        { mcp = { server = "policy", tool = "check" } }   # or url = "https://…", or spawn = "<mixture>"
+  timeout    = "10s"                 # default 30s
+  on_lost    = "deny"                # allow | deny (default) | ask (pre_tool) | fail
+  idempotent = true                  # run again after a restart instead of on_lost
+  # max_continue = 3                 # on_turn_end: how often it may continue one turn
+}
+```
+
+| point | asked about (`input`) | it can answer |
+|---|---|---|
+| `pre_tool` | `{tool, args, call_id}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`); `rewrite` with new `args` |
+| `post_tool` | `{tool, args, call_id, result}` | `allow` (a `note` is added to the result); `deny` (the result is withheld); `rewrite` (`text` replaces it) |
+| `on_message` | `{from, content, reply}`, before a message reaches the model; messages behind a held one wait, so order is kept | `allow` (with a `note`); `deny` (dropped); `rewrite` (`text`) |
+| `on_turn_end` | `{content}`, when the model ends its turn | `allow`; `continue` with `text`: the model goes on with `[from hook x]` and the text, at most `max_continue` times per turn |
+| `on_report` | `{content}`, the answer about to go out (after `on_turn_end`) | `allow`; `rewrite` (`text`) |
+| `pre_compact` | `{upto, messages}`, before a compaction | `allow`, with `text`: instructions added to that summary's request |
+
+Several hooks at a point run one after the other, each seeing what the one before decided (rewritten arguments, results, messages). An outcome is `{decision, reason?, args?, text?, note?}`.
+
+**Replayable and resumable.** A hook run is an effect (`RunHook { id, hook, input }`, ids `h<n>.<k>`, deterministic) and its answer an event (`HookDone { id, outcome }`); `Agent::apply` stays pure. While it waits the agent is in an explicit state: a tool call `pre_hook` or `post_hook` (then `cleared` to start), a held message in `screening`, or the phase `hooking` (turn end, compaction). Replays fold the answers and never run a hook again; forks and upgrades copy them. `Recovered` runs a hook that was running again if it's `idempotent`, else settles it by `on_lost` (deterministically, in `apply`); after a restart the hub recovers agents waiting for hooks that no node will place. An answer that's late, broken or a decision its point doesn't take counts as an error: `on_lost` decides (`deny` is the careful side: a call denied, a result withheld, a message dropped, a turn just ends; `fail`: the agent fails, a tool call first getting the hook's error as its result).
+
+**Where hooks run:** the hub runs `RunHook` from its own replica (like reports): `when` first (false: allowed, the hook isn't asked; checked when the cluster is applied), then the hook: an MCP tool on any node running its server (waited for after a restart, within the timeout), an HTTP POST, or an agent spawned with the question and the decisions its point takes, whose answer (a JSON object, words around it allowed) is the outcome; it's cancelled after. Each gets `{hook, point, agent: {id, type}, input}`; the timeout bounds it all.
+
+**By hand:** an agent's summary lists the hook runs it waits for (`hooks: [{run, name}]`); `settle_hook {id, run, decision, reason?, text?, args?}` (operator) answers one as if the hook had. The web UI shows them with allow/deny buttons; the TUI marks the agent ⌛.
 
 ## MCP servers and the MCP switchboard
 
@@ -509,6 +554,7 @@ Everything in this document is implemented, except what "Not in scope yet" lists
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.
 - **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in Postgres), deliveries log.
+- **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI).
 - **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
 
 When something in this document changes, the change and its status land in the same commit.

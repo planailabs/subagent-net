@@ -416,7 +416,7 @@ impl Hub {
 
     /// A route calling an MCP tool directly, on any node running the server.
     /// Idempotent tools are retried (3 attempts).
-    async fn route_mcp(&self, server: &str, tool: &str, args: Value) -> Result<String, String> {
+    pub(crate) async fn route_mcp(&self, server: &str, tool: &str, args: Value) -> Result<String, String> {
         let (id, idempotent) = {
             let c = self.cluster.read().unwrap();
             let id = c.spec.mcp_id(server).ok_or_else(|| format!("no mcp {server:?}"))?;

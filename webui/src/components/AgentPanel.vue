@@ -101,6 +101,13 @@ const content = (m) => m.content ?? (m.tool_calls?.length ? m.tool_calls.map((c)
         <button @click="act('approve', { call_id: t.awaiting_approval.id, approved: false })">deny</button>
       </div>
     </div>
+    <div v-for="h in t?.hooks ?? []" :key="h.run" class="err">
+      waiting for hook <span class="hi">{{ h.name }}</span> <span class="dim">({{ h.run }})</span>
+      <div class="row">
+        <button title="decide it by hand: as if the hook allowed" @click="act('settle_hook', { run: h.run, decision: 'allow' })">allow</button>
+        <button title="decide it by hand: as if the hook denied" @click="act('settle_hook', { run: h.run, decision: 'deny', reason: 'denied by hand' })">deny</button>
+      </div>
+    </div>
     <div v-if="error" class="err">{{ error }}</div>
     <form class="row" @submit.prevent="send">
       <input v-model="msg" class="grow" placeholder="message" aria-label="message" />

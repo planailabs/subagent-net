@@ -28,6 +28,8 @@ fastembed = { workspace = true, optional = true }
 clap.workspace = true
 axum.workspace = true
 regex.workspace = true
+# Hooks that run at a URL.
+reqwest.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

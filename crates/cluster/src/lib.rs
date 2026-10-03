@@ -134,6 +134,84 @@ pub struct AgentDef {
     /// summarised away too, searchable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub search_history: bool,
+    /// Hooks (`hook` blocks) deciding at points of its agents' loop, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<String>,
+}
+
+/// `hook "name" { ... }`: a decision made outside an agent at a point of
+/// its loop (see subnet_core::hooks).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HookDef {
+    pub on: subnet_core::hooks::HookPoint,
+    /// pre_tool, post_tool: the tools it's for (patterns with `*`; none: all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// on_message: the senders it's for (`user:*`, `route:chat-*`; none: all).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from: Vec<String>,
+    /// CEL over `point`, `input`, `agent`: false allows without running it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    pub run: HookRunDef,
+    /// How long it may take (default 30s); then `on_lost` decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<Dur>,
+    #[serde(default)]
+    pub on_lost: subnet_core::hooks::OnLost,
+    /// Safe to run again when its run was lost (a restart).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
+    /// on_turn_end: how often it may continue one turn (default 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_continue: Option<u32>,
+}
+
+/// Where a hook runs: exactly one of these.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HookRunDef {
+    /// A tool of an MCP server (`{ server, tool }`), on any node running it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpCall>,
+    /// An HTTP endpoint the hub POSTs the question to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// A mixture (or agent type) asked to decide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpCall {
+    pub server: String,
+    pub tool: String,
+}
+
+impl HookDef {
+    /// The hook as an agent's spec has it.
+    pub fn spec(&self, name: &str) -> subnet_core::hooks::HookSpec {
+        use subnet_core::hooks::{HookRun, HookSpec};
+        let run = match (&self.run.mcp, &self.run.url, &self.run.spawn) {
+            (Some(m), _, _) => HookRun::Mcp { server: m.server.clone(), tool: m.tool.clone() },
+            (_, Some(u), _) => HookRun::Url { url: u.clone() },
+            (_, _, Some(m)) => HookRun::Spawn { mixture: m.clone() },
+            _ => unreachable!("validated: exactly one"),
+        };
+        HookSpec {
+            name: name.to_string(),
+            on: self.on,
+            matches: if self.tools.is_empty() { self.from.clone() } else { self.tools.clone() },
+            when: self.when.clone(),
+            run,
+            timeout_ms: self.timeout.map_or(30_000, |d| d.0.as_millis() as u64),
+            on_lost: self.on_lost,
+            idempotent: self.idempotent,
+            max_continue: self.max_continue.unwrap_or(3),
+        }
+    }
 }
 
 /// `compact { ... }` of an agent: when a model call's context reaches
@@ -478,9 +556,11 @@ pub struct Cluster {
     pub senses: IndexMap<String, SenseDef>,
     #[serde(default, rename = "route")]
     pub routes: IndexMap<String, RouteDef>,
+    #[serde(default, rename = "hook", skip_serializing_if = "IndexMap::is_empty")]
+    pub hooks: IndexMap<String, HookDef>,
 }
 
-const KINDS: &[&str] = &["user", "client", "node", "agent", "mcp", "mixture", "resident", "sense", "route"];
+const KINDS: &[&str] = &["user", "client", "node", "agent", "mcp", "mixture", "resident", "sense", "route", "hook"];
 
 impl Cluster {
     /// Parses and validates one or more files (`(name, text)`); their blocks
@@ -521,6 +601,7 @@ impl Cluster {
             merged.residents.extend(c.residents);
             merged.senses.extend(c.senses);
             merged.routes.extend(c.routes);
+            merged.hooks.extend(c.hooks);
         }
         merged.validate()?;
         Ok(merged)
@@ -551,8 +632,46 @@ impl Cluster {
             if self.nodes.contains_key(n) { Ok(()) } else { invalid(format!("{ctx}: unknown node {n:?}")) }
         };
         let spawnable = |n: &str| self.mixtures.contains_key(n) || self.agents.contains_key(n);
+        for (name, h) in &self.hooks {
+            use subnet_core::hooks::{HookPoint, OnLost};
+            let ctx = format!("hook {name:?}");
+            let n = [h.run.mcp.is_some(), h.run.url.is_some(), h.run.spawn.is_some()].iter().filter(|b| **b).count();
+            if n != 1 {
+                return invalid(format!("{ctx}: run needs exactly one of mcp, url, spawn"));
+            }
+            if let Some(m) = &h.run.mcp
+                && !self.mcps.contains_key(&m.server)
+            {
+                return invalid(format!("{ctx}: unknown mcp {:?}", m.server));
+            }
+            if let Some(m) = &h.run.spawn
+                && !spawnable(m)
+            {
+                return invalid(format!("{ctx}: unknown mixture or agent {m:?}"));
+            }
+            if let Some(u) = &h.run.url
+                && !(u.starts_with("http://") || u.starts_with("https://"))
+            {
+                return invalid(format!("{ctx}: url must be http(s)"));
+            }
+            if !h.tools.is_empty() && !matches!(h.on, HookPoint::PreTool | HookPoint::PostTool) {
+                return invalid(format!("{ctx}: tools only goes with pre_tool and post_tool"));
+            }
+            if !h.from.is_empty() && h.on != HookPoint::OnMessage {
+                return invalid(format!("{ctx}: from only goes with on_message"));
+            }
+            if h.on_lost == OnLost::Ask && h.on != HookPoint::PreTool {
+                return invalid(format!("{ctx}: on_lost = \"ask\" only goes with pre_tool"));
+            }
+            if h.max_continue.is_some() && h.on != HookPoint::OnTurnEnd {
+                return invalid(format!("{ctx}: max_continue only goes with on_turn_end"));
+            }
+        }
         for (name, a) in &self.agents {
             let ctx = format!("agent {name:?}");
+            if let Some(h) = a.hooks.iter().find(|h| !self.hooks.contains_key(*h)) {
+                return invalid(format!("{ctx}: unknown hook {h:?}"));
+            }
             if a.nodes.is_empty() {
                 return invalid(format!("{ctx}: nodes must not be empty"));
             }
@@ -722,6 +841,10 @@ impl Cluster {
         let a = self.agents.get(name)?;
         let mut v = serde_json::to_value(a).unwrap();
         v.as_object_mut().unwrap().remove("nodes");
+        // Its hooks as they're defined: changing one is a new version.
+        if !a.hooks.is_empty() {
+            v["hook_defs"] = serde_json::json!(a.hooks.iter().map(|h| (h.clone(), serde_json::json!(self.hooks.get(h)))).collect::<Map<String, Value>>());
+        }
         Some(format!("{name}@{}", hash(&v)))
     }
 

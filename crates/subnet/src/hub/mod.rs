@@ -6,6 +6,7 @@ pub mod auth;
 pub mod blobs;
 pub mod db;
 pub mod ha;
+mod hooks;
 pub mod http;
 pub mod relay;
 pub mod router;
@@ -265,7 +266,8 @@ impl Hub {
         tracing::info!(agents = st.agents.len(), "hub loaded");
         *self.st.lock().await = st;
         self.load_holds().await?;
-        self.load_auth().await
+        self.load_auth().await?;
+        self.recover_hooks().await
     }
 
     fn arc(&self) -> Arc<Hub> {
@@ -582,11 +584,15 @@ impl Hub {
         };
         let r = st.agents.get_mut(&id).unwrap();
         let mut reports = vec![];
+        let mut hooks = vec![];
         for event in events {
             r.seq += 1;
             for fx in r.a.apply(&event) {
-                if let Effect::Report { to, status, content } = fx {
-                    reports.push((to, status, content));
+                match fx {
+                    Effect::Report { to, status, content } => reports.push((to, status, content)),
+                    // Hooks run here too, from the hub's replica, each once.
+                    Effect::RunHook { id: run, hook, input } => hooks.push((run, hook, input)),
+                    _ => {}
                 }
             }
             let seq = r.seq;
@@ -620,6 +626,9 @@ impl Hub {
                     .filter(|(_, p)| p.node.is_none() && s.ready.contains(&p.a.spec.ty) && wants_runner(&p.a))
                     .map(|(p, _)| Work::Place(*p)),
             );
+        }
+        for (run, hook, input) in hooks {
+            self.arc().start_hook(id, run, hook, input);
         }
         let parent = r.a.spec.parent;
         for (to, status, content) in reports {
@@ -1282,7 +1291,8 @@ impl Hub {
             Some(p) => st.agents[&p].a.spec.tenant.clone(),
             None => tenant,
         };
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events };
+        let hooks = def.hooks.iter().filter_map(|h| c.hooks.get(h).map(|d| d.spec(h))).collect();
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks };
         Ok((spec, reserved))
     }
 
@@ -1430,8 +1440,10 @@ fn wants_runner(a: &Agent) -> bool {
         Phase::Idle => !a.inbox.is_empty() || a.children.values().any(|r| !r.is_empty()),
         Phase::Thinking { .. } => true,
         Phase::Tools { calls } => {
-            calls.iter().any(|c| matches!(c.state, CallState::Queued { .. } | CallState::Approved))
+            calls.iter().any(|c| matches!(c.state, CallState::Queued { .. } | CallState::Approved | CallState::Cleared))
         }
+        // Hooks run at the hub.
+        Phase::Hooking { .. } => false,
         Phase::Failed { .. } | Phase::Cancelled => false,
     }
 }
@@ -1477,6 +1489,7 @@ fn summary(st: &State, c: &subnet_cluster::Cluster, id: AgentId, r: &AgentRec) -
         superseded_by: r.a.superseded_by,
         seq: r.seq,
         awaiting_approval,
+        hooks: r.a.waiting_hooks().into_iter().map(|(run, name)| crate::api::WaitingHook { run, name }).collect(),
         last: r
             .a
             .messages

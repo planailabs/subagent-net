@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::addr::{Addr, AgentId};
 use crate::chat::{Accumulator, Delta, Message, ToolCall, ToolDef, Usage};
+use crate::hooks::{Decision, HookPoint, HookSpec, Outcome};
 
 /// How a compaction's summary is written.
 pub const COMPACT_PROMPT: &str = "You compact an AI agent's conversation. The agent will continue its work from your summary plus its most recent messages, which it keeps verbatim; the rest is gone. Write the summary for the agent itself, as its own notes:\n\
@@ -162,6 +163,9 @@ pub struct Spec {
     /// per event), instead of a message each.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub group_events: bool,
+    /// Decisions made outside it at points of its loop (`hooks`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<HookSpec>,
 }
 
 impl Spec {
@@ -181,6 +185,7 @@ impl Spec {
             tenant: None,
             vision: None,
             group_events: false,
+            hooks: vec![],
         }
     }
 }
@@ -292,6 +297,11 @@ pub enum Event {
     /// context's size: an idle agent compacts at once and stays idle; a busy
     /// one before its next model call.
     CompactRequested,
+    /// A hook's answer (`Effect::RunHook` with this `id`).
+    HookDone {
+        id: String,
+        outcome: Outcome,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,6 +324,45 @@ pub enum Effect {
     /// The turn ended: deliver the final answer to everyone who asked. The hub
     /// performs this from its own replica.
     Report { to: Vec<Addr>, status: Status, content: String },
+    /// Run a hook; propose `HookDone` with `id`. The hub performs this from
+    /// its own replica.
+    RunHook { id: String, hook: HookSpec, input: Value },
+}
+
+/// Hooks run one after the other for one decision (a tool call, a message,
+/// a turn's end): which ones (indices into the spec's), which is running,
+/// and what they're asked about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookChain {
+    pub hooks: Vec<usize>,
+    pub at: usize,
+    /// The chain's number: the running hook's id is `h<run>.<at>`.
+    pub run: u64,
+    pub input: Value,
+}
+
+impl HookChain {
+    pub fn id(&self) -> String {
+        format!("h{}.{}", self.run, self.at)
+    }
+}
+
+/// A message held until its `on_message` hooks pass it (in order: messages
+/// behind it wait too).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Screened {
+    pub q: Queued,
+    pub chain: Option<HookChain>,
+}
+
+/// What a `Phase::Hooking` waits to do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "then", rename_all = "snake_case")]
+pub enum HookAt {
+    /// End the turn with this answer (`on_turn_end`, then `on_report`).
+    TurnEnd { content: String },
+    /// Compact up to here (`pre_compact`).
+    Compact { upto: usize },
 }
 
 /// Where one tool call of the current assistant message stands.
@@ -332,6 +381,17 @@ pub enum CallState {
     /// `wait_for`: waiting for these children to report.
     Children {
         ids: Vec<AgentId>,
+    },
+    /// Its `pre_tool` hooks are deciding.
+    PreHook {
+        chain: HookChain,
+    },
+    /// Its `pre_tool` hooks let it run (approval may still come).
+    Cleared,
+    /// It returned; its `post_tool` hooks are deciding about the result.
+    PostHook {
+        chain: HookChain,
+        result: String,
     },
     Done,
 }
@@ -352,6 +412,11 @@ pub enum Phase {
     /// Tool calls of the last assistant message, run in parallel.
     Tools {
         calls: Vec<PendingCall>,
+    },
+    /// Hooks deciding before the turn ends or a compaction runs.
+    Hooking {
+        chain: HookChain,
+        at: HookAt,
     },
     Failed {
         error: String,
@@ -418,6 +483,22 @@ pub struct Agent {
     /// The agent its work moved to (an upgrade), once it's superseded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<AgentId>,
+    /// Messages its `on_message` hooks hold (in order).
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub screening: VecDeque<Screened>,
+    /// Hook chains started (their ids' numbers).
+    #[serde(default, skip_serializing_if = "is_zero64")]
+    pub hook_runs: u64,
+    /// How often `on_turn_end` hooks continued this turn.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub continues: u32,
+    /// `pre_compact` hooks' instructions for the coming summary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compact_notes: Vec<String>,
+}
+
+fn is_zero64(n: &u64) -> bool {
+    *n == 0
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -447,6 +528,10 @@ impl Agent {
             compact_asked: false,
             compact_then_idle: false,
             superseded_by: None,
+            screening: VecDeque::new(),
+            hook_runs: 0,
+            continues: 0,
+            compact_notes: vec![],
         }
     }
 
@@ -535,8 +620,316 @@ impl Agent {
         self.acc.tool_calls.clear();
         let mut fx = vec![];
         self.rerequest_approvals(&mut fx);
+        // Hooks that were running: run again if that's safe, else their
+        // on_lost decides.
+        let mut lost = vec![];
+        for c in self.hook_chains() {
+            if self.hook_of(&c).idempotent {
+                self.run_hook(&c, &mut fx);
+            } else {
+                lost.push(c.id());
+            }
+        }
+        for id in lost {
+            self.hook_done(&id, Outcome::error("its runner stopped before it answered"), &mut fx);
+        }
         self.advance(&mut fx);
         fx
+    }
+
+    /// Every hook chain waiting for an answer.
+    fn hook_chains(&self) -> Vec<HookChain> {
+        let mut out = vec![];
+        if let Phase::Tools { calls } = &self.phase {
+            for c in calls {
+                if let CallState::PreHook { chain } | CallState::PostHook { chain, .. } = &c.state {
+                    out.push(chain.clone());
+                }
+            }
+        }
+        if let Some(c) = self.screening.front().and_then(|s| s.chain.clone()) {
+            out.push(c);
+        }
+        if let Phase::Hooking { chain, .. } = &self.phase {
+            out.push(chain.clone());
+        }
+        out
+    }
+
+    /// The hooks it waits for: (the run's id, the hook's name).
+    pub fn waiting_hooks(&self) -> Vec<(String, String)> {
+        self.hook_chains().iter().map(|c| (c.id(), self.hook_of(c).name.clone())).collect()
+    }
+
+    fn chain(&mut self, hooks: Vec<usize>, input: Value) -> HookChain {
+        self.hook_runs += 1;
+        HookChain { hooks, at: 0, run: self.hook_runs, input }
+    }
+
+    fn hook_of(&self, c: &HookChain) -> &HookSpec {
+        &self.spec.hooks[c.hooks[c.at]]
+    }
+
+    fn run_hook(&self, c: &HookChain, fx: &mut Vec<Effect>) {
+        fx.push(Effect::RunHook { id: c.id(), hook: self.hook_of(c).clone(), input: c.input.clone() });
+    }
+
+    /// Moves a chain to its next hook (and runs it), if there is one.
+    fn next_hook(&self, c: &mut HookChain, fx: &mut Vec<Effect>) -> bool {
+        c.at += 1;
+        if c.at < c.hooks.len() {
+            self.run_hook(c, fx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The model ended its turn: its `on_turn_end` and `on_report` hooks
+    /// first, if it has any.
+    fn turn_end(&mut self, content: String, fx: &mut Vec<Effect>) {
+        let mut hooks = crate::hooks::at(&self.spec.hooks, HookPoint::OnTurnEnd, "");
+        hooks.extend(crate::hooks::at(&self.spec.hooks, HookPoint::OnReport, ""));
+        if hooks.is_empty() {
+            return self.end_turn(Status::Idle, content, fx);
+        }
+        let chain = self.chain(hooks, json!({"content": content}));
+        self.run_hook(&chain, fx);
+        self.phase = Phase::Hooking { chain, at: HookAt::TurnEnd { content } };
+    }
+
+    /// A compaction is due: its `pre_compact` hooks first, if it has any.
+    fn begin_compaction(&mut self, upto: usize, fx: &mut Vec<Effect>) {
+        let hooks = crate::hooks::at(&self.spec.hooks, HookPoint::PreCompact, "");
+        if hooks.is_empty() {
+            self.phase = Phase::Thinking { running: true };
+            fx.push(Effect::Compact { upto });
+            return;
+        }
+        let chain = self.chain(hooks, json!({"upto": upto, "messages": self.messages.len()}));
+        self.run_hook(&chain, fx);
+        self.phase = Phase::Hooking { chain, at: HookAt::Compact { upto } };
+    }
+
+    /// Lets held messages through, in order: the first one's hooks start;
+    /// one without hooks goes on to the inbox.
+    fn screen(&mut self, fx: &mut Vec<Effect>) {
+        while let Some(front) = self.screening.front() {
+            if front.chain.is_some() {
+                return;
+            }
+            let from = front.q.from.to_string();
+            let hooks = crate::hooks::at(&self.spec.hooks, HookPoint::OnMessage, &from);
+            if hooks.is_empty() {
+                let s = self.screening.pop_front().unwrap();
+                self.inbox.push_back(s.q);
+                continue;
+            }
+            let input = json!({"from": from, "content": front.q.content, "reply": front.q.reply});
+            let chain = self.chain(hooks, input);
+            self.run_hook(&chain, fx);
+            self.screening.front_mut().unwrap().chain = Some(chain);
+            return;
+        }
+    }
+
+    /// The `post_tool` hooks for a call that returned, started (none: `None`).
+    fn post_hooks(&mut self, call_id: &str, result: &str) -> Option<HookChain> {
+        let run = self.run_of(call_id)?;
+        let hooks = crate::hooks::at(&self.spec.hooks, HookPoint::PostTool, &run.function.name);
+        if hooks.is_empty() {
+            return None;
+        }
+        let args: Value = serde_json::from_str(&run.function.arguments).unwrap_or(Value::Null);
+        Some(self.chain(hooks, json!({"tool": run.function.name, "args": args, "call_id": call_id, "result": result})))
+    }
+
+    /// A call as it runs (call_tool resolved).
+    fn run_of(&self, call_id: &str) -> Option<ToolCall> {
+        let Phase::Tools { calls } = &self.phase else { return None };
+        let c = calls.iter().find(|c| c.call.id == call_id)?;
+        match translate(&self.spec, &self.loaded, &c.call) {
+            Dispatch::Run(run) => Some(run),
+            _ => None,
+        }
+    }
+
+    /// A pre_tool hook's new arguments for a call (inside call_tool's, for one).
+    fn rewrite_args(&mut self, call_id: &str, args: &Value) {
+        if let Phase::Tools { calls } = &mut self.phase
+            && let Some(c) = calls.iter_mut().find(|c| c.call.id == call_id)
+        {
+            c.call.function.arguments = if c.call.function.name == CALL_TOOL {
+                let mut outer: Value = serde_json::from_str(&c.call.function.arguments).unwrap_or_else(|_| json!({}));
+                outer["arguments"] = args.clone();
+                outer.to_string()
+            } else {
+                args.to_string()
+            };
+        }
+    }
+
+    /// A hook couldn't decide and its on_lost is `fail`: the agent fails.
+    fn hook_failed(&mut self, h: &HookSpec, why: Option<String>, fx: &mut Vec<Effect>) {
+        if self.inflight() {
+            fx.push(Effect::AbortInflight);
+        }
+        self.acc.tool_calls.clear();
+        self.fail(why.unwrap_or_else(|| format!("hook {} failed", h.name)), fx);
+    }
+
+    /// A hook answered: on with whatever it was deciding about. An answer
+    /// for no hook that's waiting (late, after a cancel) changes nothing.
+    fn hook_done(&mut self, id: &str, outcome: Outcome, fx: &mut Vec<Effect>) {
+        if let Phase::Tools { calls } = &self.phase
+            && let Some(c) = calls.iter().find(|c| matches!(&c.state, CallState::PreHook { chain } | CallState::PostHook { chain, .. } if chain.id() == id))
+        {
+            let call_id = c.call.id.clone();
+            match c.state.clone() {
+                CallState::PreHook { chain } => self.pre_tool_done(&call_id, chain, outcome, fx),
+                CallState::PostHook { chain, result } => self.post_tool_done(&call_id, chain, result, outcome, fx),
+                _ => unreachable!("matched above"),
+            }
+            return;
+        }
+        if self.screening.front().and_then(|s| s.chain.as_ref()).is_some_and(|c| c.id() == id) {
+            return self.message_done(outcome, fx);
+        }
+        if matches!(&self.phase, Phase::Hooking { chain, .. } if chain.id() == id) {
+            self.phase_hook_done(outcome, fx);
+        }
+    }
+
+    fn pre_tool_done(&mut self, call_id: &str, mut chain: HookChain, outcome: Outcome, fx: &mut Vec<Effect>) {
+        let h = self.hook_of(&chain).clone();
+        let o = judged(&h, outcome);
+        match o.decision {
+            Decision::Allow | Decision::Rewrite => {
+                if o.decision == Decision::Rewrite
+                    && let Some(args) = &o.args
+                {
+                    self.rewrite_args(call_id, args);
+                    chain.input["args"] = args.clone();
+                }
+                if self.next_hook(&mut chain, fx) {
+                    self.set_call(call_id, CallState::PreHook { chain });
+                } else {
+                    self.set_call(call_id, CallState::Cleared);
+                }
+                self.advance(fx);
+            }
+            Decision::Deny => self.tool_done(call_id, format!("[denied by hook {}: {}]", h.name, o.reason.unwrap_or_else(|| "no reason given".into())), fx),
+            Decision::Ask => {
+                self.set_call(call_id, CallState::Approval);
+                if let Some(run) = self.run_of(call_id) {
+                    fx.push(Effect::RequestApproval { call: run });
+                }
+            }
+            Decision::Continue | Decision::Error => {
+                self.finish_call(call_id, format!("[{}]", o.reason.clone().unwrap_or_else(|| format!("hook {} failed", h.name))));
+                self.hook_failed(&h, o.reason, fx);
+            }
+        }
+    }
+
+    fn post_tool_done(&mut self, call_id: &str, mut chain: HookChain, result: String, outcome: Outcome, fx: &mut Vec<Effect>) {
+        let h = self.hook_of(&chain).clone();
+        let o = judged(&h, outcome);
+        match o.decision {
+            Decision::Allow | Decision::Rewrite => {
+                let mut result = if o.decision == Decision::Rewrite { o.text.unwrap_or(result) } else { result };
+                if let Some(n) = o.note {
+                    result = format!("{result}\n\n[note from hook {}] {n}", h.name);
+                }
+                chain.input["result"] = json!(result);
+                if self.next_hook(&mut chain, fx) {
+                    self.set_call(call_id, CallState::PostHook { chain, result });
+                } else {
+                    self.tool_done(call_id, result, fx);
+                }
+            }
+            Decision::Deny => self.tool_done(call_id, format!("[result withheld by hook {}: {}]", h.name, o.reason.unwrap_or_else(|| "no reason given".into())), fx),
+            _ => {
+                self.finish_call(call_id, format!("[{}]", o.reason.clone().unwrap_or_else(|| format!("hook {} failed", h.name))));
+                self.hook_failed(&h, o.reason, fx);
+            }
+        }
+    }
+
+    fn message_done(&mut self, outcome: Outcome, fx: &mut Vec<Effect>) {
+        let mut s = self.screening.pop_front().expect("checked by hook_done");
+        let mut chain = s.chain.take().expect("checked by hook_done");
+        let h = self.hook_of(&chain).clone();
+        let o = judged(&h, outcome);
+        match o.decision {
+            Decision::Allow | Decision::Rewrite => {
+                if o.decision == Decision::Rewrite
+                    && let Some(t) = o.text
+                {
+                    s.q.content = t;
+                }
+                if let Some(n) = o.note {
+                    s.q.content = format!("{}\n\n[note from hook {}] {n}", s.q.content, h.name);
+                }
+                chain.input["content"] = json!(s.q.content);
+                if self.next_hook(&mut chain, fx) {
+                    s.chain = Some(chain);
+                    self.screening.push_front(s);
+                    return;
+                }
+                self.inbox.push_back(s.q);
+            }
+            // Dropped.
+            Decision::Deny => {}
+            _ => return self.hook_failed(&h, o.reason, fx),
+        }
+        self.screen(fx);
+        if self.phase == Phase::Idle {
+            self.advance(fx);
+        }
+    }
+
+    fn phase_hook_done(&mut self, outcome: Outcome, fx: &mut Vec<Effect>) {
+        let Phase::Hooking { mut chain, at } = std::mem::replace(&mut self.phase, Phase::Idle) else { unreachable!("checked by hook_done") };
+        let h = self.hook_of(&chain).clone();
+        let o = judged(&h, outcome);
+        match (at, o.decision) {
+            (HookAt::TurnEnd { .. }, Decision::Continue) if self.continues < h.max_continue => {
+                self.continues += 1;
+                self.messages.push(Message::user(format!("[from hook {}]\n{}", h.name, o.text.unwrap_or_default())));
+                self.phase = Phase::Thinking { running: false };
+                self.advance(fx);
+            }
+            (HookAt::TurnEnd { mut content }, Decision::Allow | Decision::Continue | Decision::Rewrite) => {
+                if o.decision == Decision::Rewrite
+                    && let Some(t) = o.text
+                {
+                    content = t;
+                    chain.input["content"] = json!(content);
+                }
+                if self.next_hook(&mut chain, fx) {
+                    self.phase = Phase::Hooking { chain, at: HookAt::TurnEnd { content } };
+                } else {
+                    self.end_turn(Status::Idle, content, fx);
+                    self.advance(fx);
+                }
+            }
+            (HookAt::Compact { upto }, Decision::Allow) => {
+                if let Some(t) = o.text.filter(|t| !t.trim().is_empty()) {
+                    self.compact_notes.push(t);
+                }
+                if self.next_hook(&mut chain, fx) {
+                    self.phase = Phase::Hooking { chain, at: HookAt::Compact { upto } };
+                } else {
+                    self.phase = Phase::Thinking { running: true };
+                    fx.push(Effect::Compact { upto });
+                }
+            }
+            (at, _) => {
+                self.phase = Phase::Hooking { chain, at };
+                self.hook_failed(&h, o.reason, fx);
+            }
+        }
     }
 
     /// Asks again for approvals still open (after a restart or resume).
@@ -648,6 +1041,9 @@ impl Agent {
         };
         if let Some(i) = c.and_then(|c| c.instructions.as_deref()) {
             prompt = format!("{prompt}\n\nFor this agent in particular:\n{i}");
+        }
+        for n in &self.compact_notes {
+            prompt = format!("{prompt}\n\nFor this summary:\n{n}");
         }
         vec![
             Message::system(prompt),
@@ -814,7 +1210,14 @@ impl Agent {
             Event::LlmDelta { .. } | Event::LlmDone | Event::LlmAborted | Event::LlmFailed { .. } | Event::Compacted { .. } | Event::CompactFailed { .. }
                 if !thinking => {}
             Event::Inbox { from, content, reply } => {
-                self.inbox.push_back(Queued { from: from.clone(), content: content.clone(), reply: *reply });
+                let q = Queued { from: from.clone(), content: content.clone(), reply: *reply };
+                // Held while its hooks decide, or while one before it is held.
+                if !self.screening.is_empty() || !crate::hooks::at(&self.spec.hooks, HookPoint::OnMessage, &from.to_string()).is_empty() {
+                    self.screening.push_back(Screened { q, chain: None });
+                    self.screen(&mut fx);
+                } else {
+                    self.inbox.push_back(q);
+                }
                 if self.phase == Phase::Idle {
                     self.advance(&mut fx);
                 }
@@ -841,7 +1244,7 @@ impl Agent {
                 let content = msg.content.clone().unwrap_or_default();
                 self.messages.push(msg);
                 if calls.is_empty() {
-                    self.end_turn(Status::Idle, content, &mut fx);
+                    self.turn_end(content, &mut fx);
                 } else {
                     self.phase = Phase::Tools { calls };
                 }
@@ -859,9 +1262,16 @@ impl Agent {
             }
             Event::ToolResult { call_id, content, .. } => {
                 if self.call_in(call_id, &CallState::Running) {
-                    self.tool_done(call_id, content.clone(), &mut fx);
+                    match self.post_hooks(call_id, content) {
+                        Some(chain) => {
+                            self.run_hook(&chain, &mut fx);
+                            self.set_call(call_id, CallState::PostHook { chain, result: content.clone() });
+                        }
+                        None => self.tool_done(call_id, content.clone(), &mut fx),
+                    }
                 }
             }
+            Event::HookDone { id, outcome } => self.hook_done(id, outcome.clone(), &mut fx),
             Event::ToolAborted { call_id } => {
                 if self.call_in(call_id, &CallState::Running) {
                     self.tool_done(call_id, "[aborted before completion]".into(), &mut fx);
@@ -949,10 +1359,12 @@ impl Agent {
                     self.compactions += 1;
                     self.context = 0;
                 }
+                self.compact_notes.clear();
                 self.after_compaction(&mut fx);
             }
             Event::CompactFailed { .. } => {
                 self.compact_skip = true;
+                self.compact_notes.clear();
                 self.after_compaction(&mut fx);
             }
             Event::CompactRequested => {
@@ -965,10 +1377,7 @@ impl Agent {
                     self.compact_asked = false;
                     self.compact_then_idle = true;
                     match self.compact_point() {
-                        Some(upto) => {
-                            self.phase = Phase::Thinking { running: true };
-                            fx.push(Effect::Compact { upto });
-                        }
+                        Some(upto) => self.begin_compaction(upto, &mut fx),
                         None => self.compact_then_idle = false,
                     }
                 }
@@ -1008,8 +1417,10 @@ impl Agent {
                     if self.inbox.is_empty() && !self.children.values().any(|r| !r.is_empty()) {
                         return;
                     }
+                    self.continues = 0;
                     self.phase = Phase::Thinking { running: false };
                 }
+                Phase::Hooking { .. } => return,
                 Phase::Thinking { running: true } => return,
                 Phase::Thinking { running: false } => {
                     self.inject_pending();
@@ -1018,10 +1429,12 @@ impl Agent {
                         self.fail(format!("token budget exhausted ({used} used or reserved for children)"), fx);
                         return;
                     }
-                    self.phase = Phase::Thinking { running: true };
                     match self.compact_point() {
-                        Some(upto) => fx.push(Effect::Compact { upto }),
-                        None => fx.push(Effect::CallLlm),
+                        Some(upto) => self.begin_compaction(upto, fx),
+                        None => {
+                            self.phase = Phase::Thinking { running: true };
+                            fx.push(Effect::CallLlm);
+                        }
                     }
                     // Asked for or not, it's done (or there was nothing to compact).
                     self.compact_asked = false;
@@ -1041,6 +1454,28 @@ impl Agent {
                             self.finish_call(&call.id, result);
                         }
                         continue;
+                    }
+                    // pre_tool hooks judge a call before it may start.
+                    let judged: Vec<(String, ToolCall)> = {
+                        let Phase::Tools { calls } = &self.phase else { unreachable!() };
+                        calls
+                            .iter()
+                            .filter(|c| c.state == CallState::Queued { retry: false } && c.call.function.name != WAIT_FOR)
+                            .filter_map(|c| match translate(&self.spec, &self.loaded, &c.call) {
+                                Dispatch::Run(run) => Some((c.call.id.clone(), run)),
+                                _ => None,
+                            })
+                            .collect()
+                    };
+                    for (id, run) in judged {
+                        let hooks = crate::hooks::at(&self.spec.hooks, HookPoint::PreTool, &run.function.name);
+                        if hooks.is_empty() {
+                            continue;
+                        }
+                        let args: Value = serde_json::from_str(&run.function.arguments).unwrap_or(Value::Null);
+                        let chain = self.chain(hooks, json!({"tool": run.function.name, "args": args, "call_id": id}));
+                        self.run_hook(&chain, fx);
+                        self.set_call(&id, CallState::PreHook { chain });
                     }
                     // Start every call that can start; they run in parallel.
                     // Every call is judged against what was loaded before any
@@ -1064,7 +1499,11 @@ impl Agent {
                             _ => continue,
                         };
                         match c.state.clone() {
-                            CallState::Approved => {
+                            CallState::Cleared if self.spec.approve.contains(&run.function.name) => {
+                                c.state = CallState::Approval;
+                                fx.push(Effect::RequestApproval { call: run });
+                            }
+                            CallState::Cleared | CallState::Approved => {
                                 c.state = CallState::Running;
                                 fx.push(Effect::CallTool { call: run, retry: false });
                             }
@@ -1243,6 +1682,18 @@ impl Agent {
         }
         fx.push(Effect::Report { to: to.into_iter().collect(), status, content });
     }
+}
+
+/// What a hook's answer comes to: a decision its point doesn't take counts
+/// as an error, and an error is replaced by what its `on_lost` says (an
+/// error still: `fail`).
+fn judged(h: &HookSpec, o: Outcome) -> Outcome {
+    let o = if o.decision != Decision::Error && !h.on.allows(o.decision) {
+        Outcome::error(format!("it answered {:?}, which {} doesn't take", o.decision, h.on.name()))
+    } else {
+        o
+    };
+    if o.decision == Decision::Error { o.instead(h) } else { o }
 }
 
 thread_local! {

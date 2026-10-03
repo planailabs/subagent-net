@@ -56,6 +56,9 @@ pub struct AgentSummary {
     pub seq: u64,
     /// The tool call waiting for approval, if any.
     pub awaiting_approval: Option<ToolCall>,
+    /// Hooks it waits for (`settle_hook` decides one by hand).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<WaitingHook>,
     /// The start of its last answer (up to 200 characters).
     pub last: Option<String>,
 }
@@ -379,6 +382,32 @@ pub struct MailArgs {
     pub max: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WaitingHook {
+    /// The run's id (`settle_hook` takes it).
+    pub run: String,
+    /// The hook's name.
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SettleArgs {
+    /// Agent id.
+    pub id: AgentId,
+    /// The hook run (an agent summary's `hooks`).
+    pub run: String,
+    /// allow, deny, ask, rewrite or continue (what the hook's point takes).
+    pub decision: subnet_core::hooks::Decision,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Rewrite: the text (a result, a message, an answer); continue: the message.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Rewrite (pre_tool): the arguments.
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct HoldArgs {
     /// A hold some route goes through.
@@ -465,6 +494,7 @@ op!(RevokeTokens, "revoke_tokens", Admin, Some((Method::Post, "/v1/tokens/revoke
 op!(WhoAmIOp, "whoami", Viewer, Some((Method::Get, "/v1/whoami")), NoArgs, WhoAmI, "Who the hub thinks you are.");
 op!(ListRoutes, "list_routes", Viewer, Some((Method::Get, "/v1/routes")), NoArgs, Vec<crate::hub::switchboard::RouteSummary>, "Switchboard routes with their counters.");
 op!(ListDeliveries, "list_deliveries", Viewer, Some((Method::Get, "/v1/deliveries")), DeliveriesArgs, Vec<crate::hub::db::DeliveryRow>, "Recent switchboard deliveries and their outcomes.");
+op!(SettleHook, "settle_hook", Operator, Some((Method::Post, "/v1/agents/{id}/hooks")), SettleArgs, Done, "Decide a hook an agent waits for by hand, as if the hook had answered (its summary lists the runs it waits for).");
 op!(ListHolds, "list_holds", Viewer, Some((Method::Get, "/v1/holds")), NoArgs, Vec<crate::hub::switchboard::HoldSummary>, "Holds: whether each is frozen, since when, how many deliveries wait in it, and its routes.");
 op!(FreezeHold, "freeze_hold", Operator, Some((Method::Post, "/v1/holds/{name}/freeze")), HoldArgs, crate::hub::switchboard::HoldSummary, "Freeze a hold: the deliveries of routes going through it wait in it until it's released.");
 op!(ReleaseHold, "release_hold", Operator, Some((Method::Post, "/v1/holds/{name}/release")), HoldArgs, crate::hub::switchboard::HoldSummary, "Release a hold: what it kept is delivered, in order, and its routes deliver again.");
@@ -503,6 +533,7 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<WhoAmIOp>(),
         OpMeta::of::<ListRoutes>(),
         OpMeta::of::<ListDeliveries>(),
+        OpMeta::of::<SettleHook>(),
         OpMeta::of::<ListHolds>(),
         OpMeta::of::<FreezeHold>(),
         OpMeta::of::<ReleaseHold>(),
@@ -644,6 +675,14 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<PeekMail, _, _>(move |_, a| {
         let h = h.clone();
         async move { Ok(h.peek_mail(&a.addr, a.max.unwrap_or(50)).await?) }
+    });
+    let h = hub.clone();
+    r.add::<SettleHook, _, _>(move |_, a: SettleArgs| {
+        let h = h.clone();
+        async move {
+            let outcome = subnet_core::hooks::Outcome { decision: a.decision, reason: a.reason, args: a.args, text: a.text, note: None };
+            Ok(h.settle_hook(a.id, &a.run, outcome).await?)
+        }
     });
     let h = hub.clone();
     r.add::<ListHolds, _, _>(move |_, _: NoArgs| {

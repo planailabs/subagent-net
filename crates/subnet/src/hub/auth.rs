@@ -152,6 +152,12 @@ impl Hub {
         let texts: Vec<(&str, &str)> = files.iter().map(|f| (f.name.as_str(), f.text.as_str())).collect();
         let spec = Cluster::parse(&texts).map_err(|e| HubError::Bad(e.to_string()))?;
         let routes = subnet_switchboard::compile(&spec).map_err(HubError::Bad)?;
+        // Hooks' `when`, like routes' expressions, is checked now.
+        for (name, h) in &spec.hooks {
+            if let Some(w) = &h.when {
+                subnet_switchboard::Expr::compile(w).map_err(|e| HubError::Bad(format!("hook {name:?}: when: {e}")))?;
+            }
+        }
         let changes = self.cluster.read().unwrap().spec.diff(&spec);
         if dry_run || (changes.is_empty() && self.cluster.read().unwrap().version.is_some()) {
             return Ok(Applied { version: None, changes });

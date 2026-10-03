@@ -54,6 +54,7 @@ pub fn glyph(a: &AgentSummary) -> &'static str {
         "failed" => "✕",
         _ if a.paused => "‖",
         _ if a.awaiting_approval.is_some() => "?",
+        _ if !a.hooks.is_empty() => "⌛",
         "thinking" => "●",
         "tools" => "▣",
         _ => "○",
@@ -276,6 +277,9 @@ pub fn draw(f: &mut Frame, app: &App) {
         if let Some(c) = &s.awaiting_approval {
             lines.push(Line::styled(format!("? approve {}({})  [a]pprove / [d]eny", c.function.name, c.function.arguments), bold));
         }
+        for h in &s.hooks {
+            lines.push(Line::styled(format!("⌛ waiting for hook {} ({})  settle: subnet settle-hook {} --run {} --decision allow|deny", h.name, h.run, s.id, h.run), bold));
+        }
         for m in &t.messages {
             let role = serde_json::to_value(m.role).unwrap();
             lines.push(Line::raw(""));
@@ -440,6 +444,7 @@ mod tests {
             superseded_by: None,
             seq: 1,
             awaiting_approval: None,
+            hooks: vec![],
             last: Some("all done".into()),
         }
     }

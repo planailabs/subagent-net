@@ -515,8 +515,8 @@ impl Runner {
                 Effect::RequestApproval { call } => {
                     tracing::info!(agent = %self.id, tool = %call.function.name, "waiting for approval");
                 }
-                // The hub routes reports from its own replica.
-                Effect::Report { .. } => {}
+                // The hub routes reports and runs hooks from its own replica.
+                Effect::Report { .. } | Effect::RunHook { .. } => {}
             }
         }
     }

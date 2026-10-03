@@ -26,6 +26,7 @@ agent "deepseek-flash" {
   approve  = ["memory.delete"]
   group_events = true                         # optional: events from routes in one message per call
   search_history = true                       # optional: the built-in search_history
+  hooks = ["careful"]                         # optional: hooks deciding at points of its loop (below)
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off
   vision   = { max_px = 1024 }                # its model sees images from tools (formats, max_px, keep)
 }
@@ -125,4 +126,13 @@ route "morning" {
   from = "door"
   when = "event.state == 'unlocked'"
   deliver { release = "night" }
+}
+
+# --- hooks ---------------------------------------------------------------------
+hook "careful" {
+  on      = "pre_tool"
+  tools   = ["memory.*"]
+  run     { url = "https://policy.example.org/hook" }
+  timeout = "10s"
+  on_lost = "deny"
 }
