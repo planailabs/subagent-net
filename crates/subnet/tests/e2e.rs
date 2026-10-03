@@ -548,3 +548,58 @@ async fn a_failed_model_call_is_resumed_and_says_why() {
     let t = n.t(id).await;
     assert!(t["error"].is_null() && t["phase"] == "idle");
 }
+
+#[tokio::test]
+async fn an_agent_searches_what_was_summarised_away() {
+    let n = Net::new(&cluster("  search_history = true\n  compact = { at_tokens = 1000000, keep = 2 }")).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |_| text(&["noted"]));
+    let id = n.spawn("worker", "remember: the door code is Swordfish-42").await;
+    n.mail().await;
+    for i in 1..4 {
+        n.llm.push(WORKER, move |_| text(&[&format!("answer {i}")]));
+        n.hub.send(&Addr::root(), Addr::Agent(id), format!("and {i}?")).await.unwrap();
+        n.mail().await;
+    }
+    n.llm.say(subnet_core::agent::COMPACT_PROMPT, &["we talked a while"]);
+    n.hub.compact(&Addr::root(), id).await.unwrap();
+    n.until(id, "compacted", |t| t["compactions"] == 1 && t["phase"] == "idle").await;
+    // The code is out of its context now; it searches and finds it.
+    n.llm.push(WORKER, |_| tool_call("c1", "search_history", json!({"pattern": "door code is \\w+"})));
+    n.llm.push(WORKER, |body| {
+        let r: Value = serde_json::from_str(&last_tool_result(body)).unwrap();
+        assert_eq!(r["matches"], 1, "{r}");
+        assert_eq!(r["hits"][0]["summarised"], false, "the task stays: {r}");
+        text(&["it's Swordfish-42"])
+    });
+    n.hub.send(&Addr::root(), Addr::Agent(id), "what was the code?".into()).await.unwrap();
+    assert_eq!(n.mail().await["content"], "it's Swordfish-42");
+    // An answer from before the summary is marked so; its own searches aren't hits.
+    n.llm.push(WORKER, |_| tool_call("c2", "search_history", json!({"pattern": "answer 1|search_history"})));
+    n.llm.push(WORKER, |body| {
+        let r: Value = serde_json::from_str(&last_tool_result(body)).unwrap();
+        assert_eq!((r["matches"].as_u64(), r["hits"][0]["summarised"].as_bool(), r["hits"][0]["text"].as_str()), (Some(1), Some(true), Some("answer 1")), "{r}");
+        text(&["yes"])
+    });
+    n.hub.send(&Addr::root(), Addr::Agent(id), "and the first answer?".into()).await.unwrap();
+    assert_eq!(n.mail().await["content"], "yes");
+    n.llm.push(WORKER, |_| tool_call("c3", "search_history", json!({"pattern": "("})));
+    n.llm.push(WORKER, |body| {
+        assert!(last_tool_result(body).contains("bad pattern"));
+        text(&["ok"])
+    });
+    n.hub.send(&Addr::root(), Addr::Agent(id), "try a broken one".into()).await.unwrap();
+    assert_eq!(n.mail().await["content"], "ok");
+}
+
+#[tokio::test]
+async fn without_search_history_there_is_no_such_tool() {
+    let n = Net::new(&cluster("")).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |body| {
+        assert!(!body["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "search_history"));
+        text(&["fine"])
+    });
+    n.spawn("worker", "hi").await;
+    assert_eq!(n.mail().await["content"], "fine");
+}

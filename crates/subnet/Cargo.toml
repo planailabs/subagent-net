@@ -27,6 +27,7 @@ dotenvy.workspace = true
 fastembed = { workspace = true, optional = true }
 clap.workspace = true
 axum.workspace = true
+regex.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

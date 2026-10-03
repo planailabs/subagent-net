@@ -65,6 +65,8 @@ pub enum Op {
     MailboxPeek { name: String, max: u32 },
     /// Read a blob (`blob:<sha256>`).
     BlobGet { reference: String },
+    /// Search the caller's own whole conversation (`search_history`).
+    SearchHistory { pattern: String, page: u32 },
     /// A whole blob, as `{mime, base64}` (nodes fetching images for a model;
     /// not a tool).
     BlobRaw { reference: String },

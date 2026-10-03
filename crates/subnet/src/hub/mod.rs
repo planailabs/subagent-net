@@ -758,6 +758,7 @@ impl Hub {
             Op::MailboxTake { name, max } => j(self.mailbox(caller, &name, max, true).await),
             Op::MailboxPeek { name, max } => j(self.mailbox(caller, &name, max, false).await),
             Op::BlobGet { reference } => j(self.blob_for_model(&reference).await),
+            Op::SearchHistory { pattern, page } => j(self.search_history(caller, &pattern, page).await),
             Op::BlobRaw { reference } => j(self.get_blob(&reference).await.map(|(mime, data)| serde_json::json!({"mime": mime, "base64": blobs::encode_b64(&data)}))),
         }
     }
@@ -829,6 +830,43 @@ impl Hub {
             (t.messages, t.compacted) = (h.messages, h.compactions);
         }
         Ok(t)
+    }
+
+    /// An agent searching its own whole conversation (summarised parts too):
+    /// the messages matching `pattern` (a case-insensitive regex), oldest
+    /// first, `HISTORY_PAGE` a page, each cut to the part around the match.
+    pub async fn search_history(&self, caller: &Addr, pattern: &str, page: u32) -> Result<Value, HubError> {
+        const HISTORY_PAGE: usize = 20;
+        const AROUND: usize = 200;
+        let Addr::Agent(id) = caller else { return bad("only an agent searches its own history") };
+        let re = regex::RegexBuilder::new(pattern).case_insensitive(true).size_limit(1 << 20).build().map_err(|e| HubError::Bad(format!("bad pattern: {e}")))?;
+        let t = self.transcript_of(*id, true).await?;
+        // The summarised ones are in a compaction's range (the task never is).
+        let summarised = |n: usize| t.compacted.iter().any(|c| (c.from..c.to).contains(&n));
+        // Its own searches (calls and results) aren't news.
+        let searches: std::collections::HashSet<&str> =
+            t.messages.iter().flat_map(|m| &m.tool_calls).filter(|c| c.function.name == "search_history").map(|c| c.id.as_str()).collect();
+        let mut hits = vec![];
+        for (n, m) in t.messages.iter().enumerate() {
+            if m.tool_call_id.as_deref().is_some_and(|c| searches.contains(c)) || m.tool_calls.iter().any(|c| searches.contains(c.id.as_str())) {
+                continue;
+            }
+            let text = std::iter::once(m.content.clone().unwrap_or_default())
+                .chain(m.tool_calls.iter().map(|c| format!("{}({})", c.function.name, c.function.arguments)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let Some(found) = re.find(&text) else { continue };
+            // The part around the match, on character boundaries.
+            let start = text.floor_char_boundary(found.start().saturating_sub(AROUND));
+            let end = text.ceil_char_boundary((found.end() + AROUND).min(text.len()));
+            let cut = format!("{}{}{}", if start > 0 { "…" } else { "" }, &text[start..end], if end < text.len() { "…" } else { "" });
+            hits.push(serde_json::json!({"n": n, "role": m.role, "summarised": summarised(n), "text": cut}));
+        }
+        let pages = hits.len().div_ceil(HISTORY_PAGE).max(1);
+        let page = (page as usize).clamp(1, pages);
+        let total = hits.len();
+        let shown: Vec<Value> = hits.into_iter().skip((page - 1) * HISTORY_PAGE).take(HISTORY_PAGE).collect();
+        Ok(serde_json::json!({"pattern": pattern, "matches": total, "page": page, "pages": pages, "messages": t.messages.len(), "hits": shown}))
     }
 
     pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {
@@ -984,6 +1022,8 @@ impl Hub {
         for id in live {
             let spec = &st.agents[&id].a.spec;
             let mut tools = subnet_core::tools::builtin_tools();
+            // Built-ins its type adds (they're its version's, not a server's).
+            tools.extend(spec.tools.iter().filter(|t| t.name == "search_history").cloned());
             let (mut idempotent, mut lazy) = (vec![], vec![]);
             let mut all_live = true;
             for (m, mid) in &spec.mcp {
@@ -1165,6 +1205,9 @@ impl Hub {
             return bad(format!("no live node offers type {agent:?} ({ty})"));
         }
         let mut tools = subnet_core::tools::builtin_tools();
+        if def.search_history {
+            tools.push(subnet_core::tools::history_tool());
+        }
         let mut mcp = std::collections::BTreeMap::new();
         let mut idempotent = vec![];
         let mut lazy = vec![];

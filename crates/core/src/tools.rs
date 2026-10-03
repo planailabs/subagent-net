@@ -67,6 +67,16 @@ pub fn builtin_tools() -> Vec<ToolDef> {
     ]
 }
 
+/// The built-in tool of an agent type with `search_history`: its whole
+/// conversation, summarised parts too.
+pub fn history_tool() -> ToolDef {
+    def(
+        "search_history",
+        "Search your whole conversation, the parts summarised away too, for words or a regex (case-insensitive): the matching messages, oldest first, 20 a page, each with its number, its role and whether it's from before a summary.",
+        obj(json!({"pattern":{"type":"string"},"page":{"type":"integer","minimum":1}}), &["pattern"]),
+    )
+}
+
 /// Maps a built-in tool call to a hub op. `None` = not a built-in (an MCP tool).
 pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
     fn parse<T: for<'de> Deserialize<'de>>(args: &str) -> Result<T, String> {
@@ -116,6 +126,15 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
     fn ten() -> u32 {
         10
     }
+    #[derive(Deserialize)]
+    struct Search {
+        pattern: String,
+        #[serde(default = "one")]
+        page: u32,
+    }
+    fn one() -> u32 {
+        1
+    }
     let a = &call.function.arguments;
     Some(match call.function.name.as_str() {
         "spawn_agent" => parse::<Spawn>(a).map(|s| Op::Spawn { ty: s.ty, prompt: s.prompt, tenant: None }),
@@ -128,6 +147,7 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
         "blob_get" => parse::<BlobArg>(a).map(|b| Op::BlobGet { reference: b.reference }),
         "mailbox_take" => parse::<Mailbox>(a).map(|m| Op::MailboxTake { name: m.name, max: m.max.max(1) }),
         "mailbox_peek" => parse::<Mailbox>(a).map(|m| Op::MailboxPeek { name: m.name, max: m.max.max(1) }),
+        "search_history" => parse::<Search>(a).map(|s| Op::SearchHistory { pattern: s.pattern, page: s.page.max(1) }),
         _ => return None,
     })
 }
@@ -167,6 +187,8 @@ mod tests {
     fn mailbox_max_defaults_and_clamps() {
         assert_eq!(builtin_op(&call("mailbox_take", r#"{"name":"b"}"#)).unwrap().unwrap(), Op::MailboxTake { name: "b".into(), max: 10 });
         assert_eq!(builtin_op(&call("mailbox_peek", r#"{"name":"b","max":0}"#)).unwrap().unwrap(), Op::MailboxPeek { name: "b".into(), max: 1 });
+        assert_eq!(builtin_op(&call("search_history", r#"{"pattern":"tea"}"#)).unwrap().unwrap(), Op::SearchHistory { pattern: "tea".into(), page: 1 });
+        assert_eq!(builtin_op(&call("search_history", r#"{"pattern":"tea","page":0}"#)).unwrap().unwrap(), Op::SearchHistory { pattern: "tea".into(), page: 1 });
     }
 
     #[test]

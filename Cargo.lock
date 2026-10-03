@@ -4398,6 +4398,7 @@ dependencies = [
  "mime_guess",
  "notify",
  "ratatui",
+ "regex",
  "reqwest 0.13.5",
  "rmcp",
  "rust-embed",

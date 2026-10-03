@@ -63,6 +63,7 @@ agent "deepseek-flash" {
   budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
   group_events = true                         # optional: events from routes in one message per call (below)
+  search_history = true                       # optional: the built-in search_history (below)
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off;
                                               # instructions = "…" adds what its summaries must keep;
                                               # prompt = "…" replaces the built-in instructions
@@ -283,6 +284,7 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
   | `load_tools(names)`, `call_tool(name, arguments)` | load lazy tools' schemas and call them (see [Lazy tools](#lazy-tools)); offered when a mixture has lazy tools |
   | `mailbox_take(name, max)` / `mailbox_peek(name, max)` | mailboxes the mixture lists |
   | `blob_get(ref)` | fetch a blob as text/base64 |
+  | `search_history(pattern, page?)` | only for a type with `search_history = true`: its own whole conversation, the parts compaction summarised away too (the full history, as `transcript` with `full` has it), searched with a case-insensitive regex; the matching messages oldest first, 20 a page, each `{n, role, summarised, text}` (`text`: the part around the match; `summarised`: in a compaction's range), its own searches left out |
   | `list_agents`, `list_types` | |
   | `pause_agent`, `resume_agent`, `cancel_agent` | descendants only |
 

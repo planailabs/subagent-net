@@ -130,6 +130,10 @@ pub struct AgentDef {
     /// by route, one JSON line each.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub group_events: bool,
+    /// Its agents get `search_history`: their whole conversation, the parts
+    /// summarised away too, searchable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search_history: bool,
 }
 
 /// `compact { ... }` of an agent: when a model call's context reaches
