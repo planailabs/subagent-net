@@ -265,6 +265,18 @@ pub enum Event {
     ToolsLoaded {
         names: Vec<String>,
     },
+    /// Its MCP servers (the same versions) offer other tools now: what's
+    /// offered to the model from here on.
+    ToolsChanged {
+        tools: Vec<ToolDef>,
+        #[serde(default)]
+        idempotent: Vec<String>,
+        #[serde(default)]
+        lazy: Vec<String>,
+        /// The ones it didn't have (the model is told of them).
+        #[serde(default)]
+        added: Vec<String>,
+    },
     /// The conversation's messages `1..upto` summarised (`Effect::Compact`).
     Compacted {
         upto: usize,
@@ -902,6 +914,15 @@ impl Agent {
                         "[tools loaded for the next message; call them with call_tool {{\"name\", \"arguments\"}}]\n{}",
                         self.schemas(&matched)
                     ));
+                }
+            }
+            Event::ToolsChanged { tools, idempotent, lazy, added } => {
+                self.loaded.retain(|n| tools.iter().any(|t| &t.name == n));
+                self.spec.tools = tools.clone();
+                self.spec.idempotent = idempotent.clone();
+                self.spec.lazy = lazy.clone();
+                if !added.is_empty() {
+                    self.notes.push(format!("[new tools you have now: {}]", added.join(", ")));
                 }
             }
             Event::Compacted { upto, summary, usage } => {

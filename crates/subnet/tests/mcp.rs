@@ -95,6 +95,43 @@ impl Tools {
     }
 }
 
+/// A server that grows a tool: `shout` from the sessions opened after `grown` is set.
+#[derive(Clone)]
+struct Grow {
+    tool_router: rmcp::handler::server::router::tool::ToolRouter<Grow>,
+}
+
+#[tool_router(router = base_tools)]
+impl Grow {
+    #[tool(description = "Echo text back")]
+    fn echo(&self, Parameters(EchoArgs { text }): Parameters<EchoArgs>) -> String {
+        format!("echo: {text}")
+    }
+}
+
+#[tool_router(router = more_tools)]
+impl Grow {
+    #[tool(description = "Shout text back")]
+    fn shout(&self, Parameters(EchoArgs { text }): Parameters<EchoArgs>) -> String {
+        text.to_uppercase()
+    }
+}
+
+#[rmcp::tool_handler(router = self.tool_router)]
+impl rmcp::ServerHandler for Grow {}
+
+async fn growing_server(grown: Arc<std::sync::atomic::AtomicBool>) -> String {
+    let service = StreamableHttpService::new(
+        move || Ok(Grow { tool_router: if grown.load(Ordering::SeqCst) { Grow::base_tools() + Grow::more_tools() } else { Grow::base_tools() } }),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, axum::Router::new().nest_service("/mcp", service)).await.unwrap() });
+    url
+}
+
 async fn mcp_server(stats: Arc<Stats>) -> String {
     let service = StreamableHttpService::new(
         move || Ok(Tools(stats.clone())),
@@ -503,4 +540,29 @@ async fn per_tenant(agent_node: &str, mcp_node: &str) {
     // Agents can't choose a tenant for their children.
     let e = n.hub.spawn_for(&Addr::Agent(acme.id), "tooler", "x".into(), Some("other".into())).await.unwrap_err();
     assert!(e.to_string().contains("inherit"), "{e}");
+}
+
+#[tokio::test]
+async fn an_agent_learns_of_tools_its_server_grew() {
+    let grown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let url = growing_server(grown.clone()).await;
+    let n = Net::new(&cluster(&url, &["s"], &[], "lazy = false", "")).await;
+    let conn = n.node("s").await;
+    n.llm.say(SYS, &["ready"]);
+    let id = n.spawn("tooler", "go").await;
+    assert_eq!(n.mail().await["content"], "ready");
+    let offered = |req: &Value| req["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let first = offered(&n.llm.requests().pop().unwrap());
+    assert!(first.contains(&"t__echo".to_string()) && !first.contains(&"t__shout".to_string()), "{first:?}");
+    // The server (same config, same version) grows a tool; its node comes back and says so.
+    grown.store(true, Ordering::SeqCst);
+    n.hub.disconnect(conn).await;
+    n.node("s").await;
+    // (Recorded before the node counts as ready.)
+    n.llm.say(SYS, &["loud"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(id), content: "anything new?".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "loud");
+    let req = n.llm.requests().pop().unwrap();
+    assert!(offered(&req).contains(&"t__shout".to_string()), "offered now");
+    assert!(req.to_string().contains("[new tools you have now: t.shout]"), "and told: {req}");
 }

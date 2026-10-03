@@ -398,6 +398,7 @@ impl Hub {
                 n.mcps = mcps.into_iter().filter(|m| m.error.is_none()).map(|m| (m.id, m.tools)).collect();
                 n.configured = true;
                 tracing::info!(node = %n.name, agents = ?n.ready, mcps = ?n.mcps.keys().collect::<Vec<_>>(), "node ready");
+                self.refresh_tools(&mut st).await?;
                 self.place_pending(&mut st).await?;
                 drop(st);
                 self.sync_residents().await;
@@ -962,6 +963,60 @@ impl Hub {
             self.commit(&mut st, old, vec![Event::Superseded { by: new.id }]).await?;
         }
         Ok(new)
+    }
+
+    /// Agents whose MCP servers (the same versions) offer other tools now
+    /// (a server grew a tool) learn of it: `ToolsChanged`. Another version
+    /// of a server is an upgrade instead.
+    async fn refresh_tools(&self, st: &mut State) -> Result<(), HubError> {
+        let c = self.cluster.read().unwrap().spec.clone();
+        let live: Vec<AgentId> = st
+            .agents
+            .iter()
+            .filter(|(_, r)| !r.a.spec.mcp.is_empty() && !matches!(r.a.phase, Phase::Cancelled) && r.a.superseded_by.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        let sorted = |v: &[ToolDef]| {
+            let mut v = v.to_vec();
+            v.sort_by(|a, b| a.name.cmp(&b.name));
+            v
+        };
+        for id in live {
+            let spec = &st.agents[&id].a.spec;
+            let mut tools = subnet_core::tools::builtin_tools();
+            let (mut idempotent, mut lazy) = (vec![], vec![]);
+            let mut all_live = true;
+            for (m, mid) in &spec.mcp {
+                // Not running anywhere now: nothing to compare with.
+                let Some(listed) = st.nodes.values().find_map(|n| n.mcps.get(mid)) else {
+                    all_live = false;
+                    break;
+                };
+                let names: Vec<String> = listed.iter().map(|t| format!("{m}.{}", t.name)).collect();
+                tools.extend(listed.iter().map(|t| ToolDef { name: format!("{m}.{}", t.name), ..t.clone() }));
+                match c.mcps.get(m).filter(|_| c.mcp_id(m).as_deref() == Some(mid.as_str())) {
+                    Some(def) => {
+                        if def.lazy {
+                            lazy.extend(names);
+                        }
+                        idempotent.extend(def.idempotent.iter().map(|t| format!("{m}.{t}")));
+                    }
+                    // The cluster has moved on from this version: keep what it was.
+                    None => {
+                        let mine = |n: &&String| n.starts_with(&format!("{m}."));
+                        lazy.extend(spec.lazy.iter().filter(mine).cloned());
+                        idempotent.extend(spec.idempotent.iter().filter(mine).cloned());
+                    }
+                }
+            }
+            if !all_live || sorted(&tools) == sorted(&spec.tools) {
+                continue;
+            }
+            let added: Vec<String> = tools.iter().map(|t| t.name.clone()).filter(|n| !spec.tools.iter().any(|t| &t.name == n)).collect();
+            tracing::info!(agent = %id, ?added, "its servers offer other tools now");
+            self.commit(st, id, vec![Event::ToolsChanged { tools, idempotent, lazy, added }]).await?;
+        }
+        Ok(())
     }
 
     /// The spec `old` would get if it were spawned now: the current type
