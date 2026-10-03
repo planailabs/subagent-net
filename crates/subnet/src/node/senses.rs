@@ -47,6 +47,11 @@ impl Senses {
         Arc::new(Self { out, streams: Default::default(), webhooks: Default::default(), running: Default::default() })
     }
 
+    /// Whether a webhook at `path` is taking events yet (its sense has started).
+    pub fn has_webhook(&self, path: &str) -> bool {
+        self.webhooks.lock().unwrap().contains_key(path)
+    }
+
     /// A stream's channel on this node (created on first use by either side).
     pub fn stream(&self, name: &str) -> broadcast::Sender<Bytes> {
         self.streams.lock().unwrap().entry(name.to_string()).or_insert_with(|| broadcast::channel(STREAM_FRAMES).0).clone()
