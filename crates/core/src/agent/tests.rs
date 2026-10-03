@@ -896,3 +896,40 @@ fn no_compaction_without_the_setting() {
     let mut h = H::new(s);
     assert_eq!(grown(&mut h), vec![Effect::CallLlm]);
 }
+
+#[test]
+fn the_full_history_keeps_what_compaction_dropped() {
+    let mut h = H::new(compacting_spec());
+    let before = |h: &H| h.a.messages.clone();
+    assert_eq!(grown(&mut h), vec![Effect::Compact { upto: 5 }]);
+    let all = before(&h);
+    h.ev(Event::Compacted { upto: 5, summary: "first notes".into(), usage: None });
+    // Grow again and compact a second time.
+    h.text("more");
+    h.call(0, "c4", "call_tool", r#"{"name":"srv.t","arguments":{}}"#);
+    used(&mut h, 1500);
+    tool_effect(&h.done());
+    let fx = h.result("c4", "r4");
+    let upto = match fx.as_slice() {
+        [Effect::Compact { upto }] => *upto,
+        other => panic!("{other:?}"),
+    };
+    h.ev(Event::Compacted { upto, summary: "second notes".into(), usage: None });
+    let full = Agent::full_history(h.a.id, h.a.spec.clone(), &h.log);
+    // The task, everything as it happened, nothing of the summaries' notes.
+    assert_eq!(full.messages[0].content.as_deref(), Some("the task"));
+    assert_eq!(&full.messages[..5], &all[..5], "the first compacted part, as it was");
+    assert!(!full.messages.iter().any(|m| m.content.as_deref().is_some_and(|c| c.contains("[The conversation so far was compacted") || c.contains("[tools you loaded earlier"))));
+    assert!(full.messages.iter().any(|m| m.content.as_deref() == Some("r4")), "and what came later");
+    assert_eq!(full.compactions.len(), 2);
+    assert_eq!((full.compactions[0].from, full.compactions[0].to, full.compactions[0].summary.as_str()), (1, 5, "first notes"));
+    assert!(full.compactions[1].from == 5 && full.compactions[1].to > 5 && full.compactions[1].summary == "second notes");
+    // What's left after the last compaction is the agent's tail.
+    let tail = &h.a.messages[h.a.messages.len() - 2..];
+    assert_eq!(&full.messages[full.messages.len() - 2..], tail);
+    // Without compactions it's just the transcript.
+    let mut h = H::new(spec());
+    h.user("hello");
+    h.text("hi");
+    assert_eq!(Agent::full_history(h.a.id, h.a.spec.clone(), &h.log).messages, h.a.messages);
+}

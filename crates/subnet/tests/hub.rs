@@ -693,3 +693,22 @@ async fn fork_with_and_without_tree() {
     // The originals are untouched.
     assert_eq!(transcript(&hub, kid).await["parent"], json!(b));
 }
+
+#[tokio::test]
+async fn blobs_an_agents_history_mentions_are_kept() {
+    let db = subnet::hub::db::Db::connect(&common::db_url().await).await.unwrap();
+    let (seen, loose) = ("a".repeat(64), "b".repeat(64));
+    for h in [&seen, &loose] {
+        db.put_blob(h, "image/png", b"x").await.unwrap();
+    }
+    // Old and unused, both; one is in an agent's log (a picture it saw).
+    let pool = db.pool.clone();
+    sqlx::query("update blobs set touched_at = now() - interval '400 days'").execute(&pool).await.unwrap();
+    let id = uuid::Uuid::new_v4();
+    sqlx::query("insert into agents (id, spec) values ($1, '{}')").bind(id).execute(&pool).await.unwrap();
+    let ev = serde_json::json!({"ToolResult": {"call_id": "c1", "content": format!("[image blob:{seen} image/png 1x1]")}});
+    sqlx::query("insert into events (agent_id, seq, event) values ($1, 1, $2)").bind(id).bind(ev).execute(&pool).await.unwrap();
+    assert_eq!(db.gc_blobs(30).await.unwrap(), 1, "only the loose one goes");
+    assert!(db.get_blob(&seen).await.unwrap().is_some());
+    assert!(db.get_blob(&loose).await.unwrap().is_none());
+}

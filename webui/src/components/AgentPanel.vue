@@ -2,6 +2,7 @@
 import { computed, inject, ref, watch } from "vue";
 import { call } from "../lib/api.js";
 import { glyph, typeName } from "../lib/park.js";
+import { sections } from "../lib/transcript.js";
 
 const props = defineProps({ id: { type: String, required: true } });
 const emit = defineEmits(["close", "changed"]);
@@ -12,7 +13,8 @@ const error = ref("");
 
 async function load() {
   try {
-    t.value = await call("transcript", { id: props.id });
+    // Everything as it happened: compacted parts too, folded below.
+    t.value = await call("transcript", { id: props.id, full: true });
     error.value = "";
   } catch (e) {
     error.value = e.message;
@@ -100,10 +102,22 @@ const content = (m) => m.content ?? (m.tool_calls?.length ? m.tool_calls.map((c)
       <button type="submit">send</button>
     </form>
     <div v-if="t">
-      <div v-for="(m, i) in t.messages" :key="i" :class="['msg', m.role]">
-        <div class="who">{{ m.role }}<span v-if="m.tool_call_id"> · {{ m.tool_call_id }}</span></div>
-        <pre>{{ content(m) }}</pre>
-      </div>
+      <template v-for="(s, k) in sections(t.messages, t.compacted)" :key="k">
+        <details v-if="s.compacted" class="compacted">
+          <summary>compacted: {{ s.items.length }} messages, which the model now sees as this summary</summary>
+          <pre class="summary">{{ s.compacted.summary }}</pre>
+          <div v-for="{ m, i } in s.items" :key="i" :class="['msg', m.role]">
+            <div class="who">{{ m.role }}<span v-if="m.tool_call_id"> · {{ m.tool_call_id }}</span></div>
+            <pre>{{ content(m) }}</pre>
+          </div>
+        </details>
+        <template v-else>
+          <div v-for="{ m, i } in s.items" :key="i" :class="['msg', m.role]">
+            <div class="who">{{ m.role }}<span v-if="m.tool_call_id"> · {{ m.tool_call_id }}</span></div>
+            <pre>{{ content(m) }}</pre>
+          </div>
+        </template>
+      </template>
       <div v-if="streaming" class="msg assistant partial">
         <div class="who">assistant · streaming</div>
         <pre>{{ streaming }}</pre>

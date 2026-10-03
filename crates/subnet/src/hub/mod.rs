@@ -795,14 +795,33 @@ impl Hub {
     }
 
     pub async fn transcript(&self, id: AgentId) -> Result<Transcript, HubError> {
-        let st = self.st.lock().await;
-        let Some(r) = st.agents.get(&id) else { return no_agent(id) };
-        Ok(Transcript {
-            summary: summary(&st, &self.cluster.read().unwrap().spec.clone(), id, r),
-            messages: r.a.messages.clone(),
-            partial: (!r.a.acc.is_empty()).then(|| r.a.acc.partial()),
-            inbox: r.a.inbox.iter().cloned().collect(),
-        })
+        self.transcript_of(id, false).await
+    }
+
+    /// An agent's transcript: what its model is sent, or (`full`) the whole
+    /// conversation as it happened, replayed from its log, compacted parts
+    /// included.
+    pub async fn transcript_of(&self, id: AgentId, full: bool) -> Result<Transcript, HubError> {
+        let (mut t, spec, seq) = {
+            let st = self.st.lock().await;
+            let Some(r) = st.agents.get(&id) else { return no_agent(id) };
+            let t = Transcript {
+                summary: summary(&st, &self.cluster.read().unwrap().spec.clone(), id, r),
+                messages: r.a.messages.clone(),
+                compacted: vec![],
+                partial: (!r.a.acc.is_empty()).then(|| r.a.acc.partial()),
+                inbox: r.a.inbox.iter().cloned().collect(),
+            };
+            (t, r.a.spec.clone(), r.seq)
+        };
+        if full && t.summary.compactions > 0 {
+            let mut events = self.db.events(id, 0).await?;
+            // As far as the state above (more may have come meanwhile).
+            events.truncate(seq as usize);
+            let h = Agent::full_history(id, spec, &events);
+            (t.messages, t.compacted) = (h.messages, h.compactions);
+        }
+        Ok(t)
     }
 
     pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {

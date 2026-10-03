@@ -55,3 +55,7 @@ main { padding: 12px; }
 .msg.assistant .who { color: var(--hi); }
 .msg.partial { border-top-style: dashed; }
 .feed { max-height: 60vh; overflow: auto; }
+.compacted { border-top: 1px dashed var(--line); padding: 6px 0; }
+.compacted > summary { cursor: pointer; color: var(--dim); }
+.compacted .summary { color: var(--hi); border-left: 2px solid var(--line); padding-left: 8px; }
+.compacted .msg { opacity: 0.7; }

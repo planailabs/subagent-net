@@ -488,4 +488,17 @@ async fn long_conversations_are_compacted() {
     assert!(last["messages"][2]["content"].as_str().unwrap().contains("found: boss and worker"));
     let t = n.t(id).await;
     assert_eq!(t["compactions"], 1);
+    // Nothing's lost: the full transcript has what was compacted away, and
+    // where the compaction was.
+    let full = serde_json::to_value(n.hub.transcript_of(id, true).await.unwrap()).unwrap();
+    let msgs = full["messages"].as_array().unwrap();
+    assert!(msgs.len() > t["messages"].as_array().unwrap().len(), "{full}");
+    assert!(msgs.iter().any(|m| m["tool_call_id"] == "c1"), "the first call's result, compacted away");
+    assert!(!msgs.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("[The conversation so far was compacted"))));
+    assert_eq!(full["compacted"][0]["summary"], "found: boss and worker");
+    assert!(full["compacted"][0]["from"].as_u64().unwrap() >= 1);
+    // A watcher following the full transcript sees it too.
+    let w = n.hub.watch(subnet::api::WatchArgs { id, after: Some(0), tail: None, timeout_ms: Some(0), max_chars: None, full: true }).await.unwrap();
+    assert_eq!(w.next as usize, msgs.len());
+    assert_eq!(w.compacted.len(), 1);
 }

@@ -216,7 +216,8 @@ Each LLM call reports its context size (prompt + completion tokens). Before the 
 - **Deterministic:** the summary is in the log, so replicas fold the same transcript. After a crash mid-summary, recovery asks for it again.
 - **Failures are not fatal:** `CompactFailed` (the model errored or returned nothing) lets the call go ahead uncompacted; the next step tries again.
 - The provider's prompt cache restarts after a compaction (the prefix changed); that's the price.
-- Watchers whose cursor is past the end of a compacted transcript start again from the top. Agent summaries show `compactions`.
+- **Nothing is deleted:** compaction changes what the model is sent, not the log. Every event stays in `events` (append-only), so the whole conversation can be read back: `transcript` and `watch_agent` with `full = true` replay the log (`Agent::full_history`) into the messages as they happened, compacted ones included (each compaction's own notes left out), and `compacted: [{from, to, summary}]` says which were replaced by which summary. A full transcript only grows, so a full watcher's cursor never goes back. The web UI's agent panel shows it, each compaction folded (its summary, then the messages it replaced). Blobs an agent's log mentions (`blob:<sha256>`) aren't collected, so its pictures stay too.
+- Watchers (not `full`) whose cursor is past the end of a compacted transcript start again from the top. Agent summaries show `compactions`.
 - `compact { enabled = false }` turns it off for a type; external executors never compact (their brain owns its context).
 
 ### Executors
@@ -330,7 +331,7 @@ A mixture with a `router { top_k = 3, min_score = 0.78 }` block gets matching la
 
 ### Events and blobs (durable)
 
-A sense emits **events**: `{ id, sense, at, data }`. `data` is JSON. Large payloads go into the **blob store** (Postgres `blobs` table, 64 MiB limit per blob): a sense writes `{"$blob": {"base64": …, "mime": …}}` anywhere in its output, and the node uploads the bytes and replaces that object with `"blob:<sha256>"` before sending the event. Blobs are content-addressed and read via `blob_get` (API: base64; `GET /v1/blobs/<hash>/raw`: bytes; agents: the `blob_get` tool, text as-is or base64, cut at 256 KiB). `blob_put` stores one from a client. A blob is deleted 7 days after it was last stored or read.
+A sense emits **events**: `{ id, sense, at, data }`. `data` is JSON. Large payloads go into the **blob store** (Postgres `blobs` table, 64 MiB limit per blob): a sense writes `{"$blob": {"base64": …, "mime": …}}` anywhere in its output, and the node uploads the bytes and replaces that object with `"blob:<sha256>"` before sending the event. Blobs are content-addressed and read via `blob_get` (API: base64; `GET /v1/blobs/<hash>/raw`: bytes; agents: the `blob_get` tool, text as-is or base64, cut at 256 KiB). `blob_put` stores one from a client. A blob is deleted 7 days after it was last stored or read, unless an agent's log mentions it (`blob:<sha256>` in any event: a picture it saw, a reference it was sent); those stay with the history.
 
 ### Streams (ephemeral)
 

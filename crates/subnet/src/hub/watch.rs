@@ -20,7 +20,7 @@ impl Hub {
         // Subscribe before looking, so nothing between the look and the wait is missed.
         let mut rx = self.subscribe();
         let cap = a.max_chars.unwrap_or(2000);
-        let t = self.transcript(a.id).await?;
+        let t = self.transcript_of(a.id, a.full).await?;
         let len = t.messages.len() as u64;
         let timeout = a.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let after = match a.after {
@@ -52,7 +52,7 @@ impl Hub {
             tokio::time::sleep(COALESCE).await;
         };
         let _ = tokio::time::timeout(Duration::from_millis(timeout), wait).await;
-        Ok(render(self.transcript(a.id).await?, after, cap))
+        Ok(render(self.transcript_of(a.id, a.full).await?, after, cap))
     }
 }
 
@@ -91,7 +91,7 @@ fn entry(index: u64, m: &Message, cap: usize) -> WatchEntry {
 fn render(t: crate::api::Transcript, from: u64, cap: usize) -> Watch {
     let entries = t.messages.iter().enumerate().skip(from as usize).map(|(i, m)| entry(i as u64, m, cap)).collect();
     let partial = t.partial.and_then(|p| p.content).filter(|c| !c.is_empty()).map(|c| cut(&c, cap).0);
-    Watch { next: t.messages.len() as u64, entries, partial, queued: t.inbox.len() as u64, summary: t.summary }
+    Watch { next: t.messages.len() as u64, entries, partial, queued: t.inbox.len() as u64, summary: t.summary, compacted: t.compacted }
 }
 
 #[cfg(test)]

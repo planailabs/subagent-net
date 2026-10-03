@@ -60,7 +60,12 @@ pub struct AgentSummary {
 pub struct Transcript {
     #[serde(flatten)]
     pub summary: AgentSummary,
+    /// What the model is sent now; with `full`, everything as it happened.
     pub messages: Vec<Message>,
+    /// With `full`: where each compaction was (`messages[from..to]` were
+    /// replaced, for the model, by its summary).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted: Vec<subnet_core::agent::Compaction>,
     /// The assistant message being streamed (or cut off by a pause).
     pub partial: Option<Message>,
     /// Messages queued for the next LLM call.
@@ -106,6 +111,9 @@ pub struct Watch {
     pub partial: Option<String>,
     /// Messages queued for its next LLM call.
     pub queued: u64,
+    /// With `full`: where each compaction was (entry indexes `from..to`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted: Vec<subnet_core::agent::Compaction>,
 }
 
 /// Something that can be spawned: a mixture or a bare agent type.
@@ -197,6 +205,16 @@ pub struct IdArgs {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TranscriptArgs {
+    /// Agent id.
+    pub id: AgentId,
+    /// The whole conversation as it happened, compacted parts included
+    /// (with where each compaction was), instead of what the model is sent.
+    #[serde(default)]
+    pub full: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WatchArgs {
     /// Agent id.
     pub id: AgentId,
@@ -215,6 +233,10 @@ pub struct WatchArgs {
     /// Cut texts and tool arguments longer than this (default 2000; 0 = no cap).
     #[serde(default)]
     pub max_chars: Option<usize>,
+    /// Follow the whole conversation, compacted parts included (a cursor
+    /// then never goes back: compaction doesn't shorten it).
+    #[serde(default)]
+    pub full: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -414,7 +436,7 @@ macro_rules! op {
 op!(ListTypes, "list_types", Viewer, Some((Method::Get, "/v1/types")), NoArgs, Vec<TypeSummary>, "List agent types that live nodes offer.");
 op!(ListNodes, "list_nodes", Viewer, Some((Method::Get, "/v1/nodes")), NoArgs, Vec<NodeSummary>, "List connected nodes and what they run.");
 op!(ListAgents, "list_agents", Viewer, Some((Method::Get, "/v1/agents")), NoArgs, Vec<AgentSummary>, "List all agents with phase, pause state, node and usage.");
-op!(GetAgent, "transcript", Viewer, Some((Method::Get, "/v1/agents/{id}")), IdArgs, Transcript, "An agent's transcript, partial output, queued inbox and state.");
+op!(GetAgent, "transcript", Viewer, Some((Method::Get, "/v1/agents/{id}")), TranscriptArgs, Transcript, "An agent's transcript, partial output, queued inbox and state; with full, the whole conversation as it happened, compacted parts included.");
 op!(WatchAgent, "watch_agent", Viewer, Some((Method::Get, "/v1/agents/{id}/watch")), WatchArgs, Watch, "Follow an agent live: what's new in its transcript after a cursor (waiting for it if nothing is), its streamed partial and state, and the next cursor.");
 op!(Spawn, "spawn", Operator, Some((Method::Post, "/v1/agents")), SpawnArgs, Spawned, "Spawn an agent with a task. Its answer arrives in your inbox.");
 op!(Send, "send", Operator, Some((Method::Post, "/v1/messages")), SendArgs, Done, "Send a message to an agent (it answers into your inbox), a user or a client.");
@@ -494,7 +516,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     let h = hub.clone();
     r.add::<GetAgent, _, _>(move |_, a| {
         let h = h.clone();
-        async move { Ok(h.transcript(a.id).await?) }
+        async move { Ok(h.transcript_of(a.id, a.full).await?) }
     });
     let h = hub.clone();
     r.add::<WatchAgent, _, _>(move |_, a| {

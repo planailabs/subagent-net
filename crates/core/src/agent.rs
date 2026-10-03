@@ -55,6 +55,22 @@ impl Budget {
     }
 }
 
+/// An agent's whole conversation (`Agent::full_history`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FullHistory {
+    pub messages: Vec<Message>,
+    pub compactions: Vec<Compaction>,
+}
+
+/// One compaction in a full history: `messages[from..to]` were replaced, for
+/// the model, by `summary`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Compaction {
+    pub from: usize,
+    pub to: usize,
+    pub summary: String,
+}
+
 /// When and how an agent's conversation is compacted: once a model call's
 /// context reaches `at_tokens`, everything but the task (the first message)
 /// and the last `keep` messages is replaced by a summary the model writes,
@@ -402,6 +418,38 @@ impl Agent {
             self.apply(e);
         }
         self
+    }
+
+    /// The whole conversation as it happened, from a log: the messages in
+    /// order, compacted ones included (each compaction's own notes, its
+    /// summary and reloaded schemas, left out), and where each compaction
+    /// was. Compaction only changes what the model is sent; the log keeps
+    /// everything, and this is how to read it back.
+    pub fn full_history<'a>(id: AgentId, spec: Spec, events: impl IntoIterator<Item = &'a Event>) -> FullHistory {
+        let mut a = Self::new(id, spec);
+        let mut earlier: Vec<Message> = vec![];
+        let mut compactions = vec![];
+        // How many of the messages after the task are a compaction's notes.
+        let mut notes = 0;
+        for e in events {
+            if let Event::Compacted { upto, summary, .. } = e
+                && (2..=a.messages.len()).contains(upto)
+            {
+                let gone = &a.messages[(1 + notes).min(*upto)..*upto];
+                let from = 1 + earlier.len();
+                earlier.extend(gone.iter().cloned());
+                compactions.push(Compaction { from, to: 1 + earlier.len(), summary: summary.clone() });
+                let kept = a.messages.len() - upto;
+                a.apply(e);
+                notes = a.messages.len() - 1 - kept;
+                continue;
+            }
+            a.apply(e);
+        }
+        let mut messages: Vec<Message> = a.messages.first().cloned().into_iter().collect();
+        messages.extend(earlier);
+        messages.extend(a.messages.iter().skip(1 + notes).cloned());
+        FullHistory { messages, compactions }
     }
 
     /// Whatever was in flight is gone: mark it so and return the effects that

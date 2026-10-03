@@ -346,8 +346,14 @@ impl Db {
         r.map(|r| Ok((r.try_get("mime")?, r.try_get("data")?))).transpose()
     }
 
+    /// Deletes blobs unused for `older_than_days`, except those an agent's
+    /// log mentions (`blob:<sha256>`): its history stays reviewable,
+    /// compacted parts included.
     pub async fn gc_blobs(&self, older_than_days: i64) -> Result<u64, sqlx::Error> {
-        let r = sqlx::query("delete from blobs where touched_at < now() - make_interval(days => $1::int)")
+        let r = sqlx::query(
+            "delete from blobs where touched_at < now() - make_interval(days => $1::int)
+             and hash not in (select (regexp_matches(event::text, 'blob:([0-9a-f]{64})', 'g'))[1] from events)",
+        )
             .bind(older_than_days)
             .execute(&self.pool)
             .await?;

@@ -3,6 +3,21 @@ import assert from "node:assert/strict";
 
 import { bar, buildPlots, filterAgents, glyph, tokenShare, treePrefix, typeName } from "../src/lib/park.js";
 import { applyNotice, emptyLive, lastLine, tileLine } from "../src/lib/live.js";
+import { sections } from "../src/lib/transcript.js";
+
+test("a full transcript in sections: what the model sees, and each compaction folded", () => {
+  const m = (c) => ({ role: "user", content: c });
+  const msgs = ["task", "a", "b", "c", "d", "e"].map(m);
+  assert.deepEqual(sections(msgs).map((s) => [s.compacted, s.items.map((x) => x.i)]), [[null, [0, 1, 2, 3, 4, 5]]], "no compactions: one section");
+  const s = sections(msgs, [{ from: 1, to: 3, summary: "one" }, { from: 3, to: 5, summary: "two" }]);
+  assert.deepEqual(s.map((x) => [x.compacted?.summary ?? null, x.items.map((y) => y.m.content)]), [
+    [null, ["task"]],
+    ["one", ["a", "b"]],
+    ["two", ["c", "d"]],
+    [null, ["e"]],
+  ]);
+  assert.equal(s[3].items[0].i, 5, "indexes are the transcript's");
+});
 
 const agent = (id, extra = {}) => ({
   id,
