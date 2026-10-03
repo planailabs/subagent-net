@@ -126,6 +126,10 @@ pub struct AgentDef {
     /// The model sees images (`vision = {}` for the defaults).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<subnet_core::agent::Vision>,
+    /// Events from routes reach the model in one message per call, grouped
+    /// by route, one JSON line each.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub group_events: bool,
 }
 
 /// `compact { ... }` of an agent: when a model call's context reaches

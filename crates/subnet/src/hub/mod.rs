@@ -1156,7 +1156,7 @@ impl Hub {
             Some(p) => st.agents[&p].a.spec.tenant.clone(),
             None => tenant,
         };
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone() };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events };
         Ok((spec, reserved))
     }
 

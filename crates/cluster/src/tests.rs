@@ -261,3 +261,13 @@ fn per_tenant_servers_need_a_command_and_a_default() {
     let plain = with(&mcp("")).unwrap();
     assert!(!serde_json::to_string(&plain.mcps["m"]).unwrap().contains("tenant"));
 }
+
+#[test]
+fn grouped_events_are_a_types_choice() {
+    let plain = parse(BASE).unwrap();
+    assert!(!plain.agents["a"].group_events);
+    let grouped = parse(&BASE.replace("nodes = [\"n1\"]", "nodes = [\"n1\"]\n  group_events = true")).unwrap();
+    assert!(grouped.agents["a"].group_events);
+    assert_ne!(grouped.agent_id("a"), plain.agent_id("a"), "a new version of the type");
+    assert!(!serde_json::to_string(&plain.agents["a"]).unwrap().contains("group_events"), "unset, a type's id stays");
+}

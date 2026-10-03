@@ -55,6 +55,15 @@ impl Budget {
     }
 }
 
+/// An event on one line, for a grouped delivery: JSON compacted, anything
+/// else with its line breaks escaped.
+fn event_line(content: &str) -> String {
+    match serde_json::from_str::<Value>(content) {
+        Ok(v) => v.to_string(),
+        Err(_) => content.replace('\n', "\\n"),
+    }
+}
+
 /// An agent's whole conversation (`Agent::full_history`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FullHistory {
@@ -144,6 +153,11 @@ pub struct Spec {
     /// Whether (and how) its model sees images; `None` = text only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<Vision>,
+    /// Events from routes reach the model together: one message for a call,
+    /// grouped by route (`[events from route:x]`, then one compact JSON line
+    /// per event), instead of a message each.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub group_events: bool,
 }
 
 impl Spec {
@@ -162,6 +176,7 @@ impl Spec {
             compact: None,
             tenant: None,
             vision: None,
+            group_events: false,
         }
     }
 }
@@ -1081,7 +1096,20 @@ impl Agent {
         for note in std::mem::take(&mut self.notes) {
             self.messages.push(Message::user(note));
         }
+        // Grouped events: where their message goes (where the first one
+        // was), and each route's lines in order.
+        let mut grouped: Option<(usize, Vec<(Addr, Vec<String>)>)> = None;
         for Queued { from, content, reply } in std::mem::take(&mut self.inbox) {
+            if self.spec.group_events && !reply && matches!(from, Addr::Route(_)) {
+                let (_, by_route) = grouped.get_or_insert_with(|| (self.messages.len(), vec![]));
+                let line = event_line(&content);
+                match by_route.iter_mut().find(|(r, _)| *r == from) {
+                    Some((_, lines)) => lines.push(line),
+                    None => by_route.push((from.clone(), vec![line])),
+                }
+                self.reply_to.insert(from);
+                continue;
+            }
             let kind = if reply { "reply" } else { "message" };
             self.messages.push(Message::user(match &from {
                 Addr::User(_) if !reply => content,
@@ -1090,6 +1118,10 @@ impl Agent {
             if !reply {
                 self.reply_to.insert(from);
             }
+        }
+        if let Some((at, by_route)) = grouped {
+            let text = by_route.iter().map(|(r, lines)| format!("[events from {r}]\n{}", lines.join("\n"))).collect::<Vec<_>>().join("\n\n");
+            self.messages.insert(at, Message::user(text));
         }
         for (id, reports) in &mut self.children {
             for r in std::mem::take(reports) {

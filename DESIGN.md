@@ -62,6 +62,7 @@ agent "deepseek-flash" {
   spawns   = ["deepseek-flash"]
   budget   = { max_tokens = 200000, max_depth = 2, max_children = 4 }
   approve  = ["memory.delete"]
+  group_events = true                         # optional: events from routes in one message per call (below)
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off;
                                               # instructions = "…" adds what its summaries must keep;
                                               # prompt = "…" replaces the built-in instructions
@@ -374,6 +375,19 @@ CEL expressions in routes see `event` (the event data), `sense`, `at` (unix ms) 
    - `mailbox = "<name>"`: durable queue; agents read it with `mailbox_take`.
    - `mcp { server, tool, args = CEL }`: a direct tool call on any node running the server; idempotent tools are retried (3 attempts). Without `args` the tool gets `{"event", "batch"}`.
    - `max_active` counts a route's spawned agents until their first answer; slots are reserved atomically, excess spawns wait in the route's queue.
+
+**Grouped events:** an agent type with `group_events = true` gets the events routes `send` it together: everything queued for its next model call from routes becomes one message, grouped by route in the order they first came, each event on its own line (JSON compacted; other text with its line breaks escaped), the groups separated by a blank line:
+
+```
+[events from route:chat-to-vesper]
+{"from":"alice","text":"hi"}
+{"from":"bob","text":"hello"}
+
+[events from route:world-to-vesper]
+{"event":"joined","who":"bob","text":"bob came into the room."}
+```
+
+Messages from people, agents and replies stay messages of their own. Without it (the default) each event is a message, `[message from route:x]`. It's part of the type (a new version); unset, a type's id is unchanged.
 
 Every delivery is recorded (`deliveries` table: route, payload, one outcome per action) and streamed as a `delivery` notice. Counters per route (seen, filtered, deduped, debounced, throttled, delivered, errors) come from `list_routes`. Route state (throttle windows, dedupe keys, debounce timers, open batches) lives in memory on the leader; after a failover, open batches and debounce windows restart empty.
 

@@ -933,3 +933,31 @@ fn the_full_history_keeps_what_compaction_dropped() {
     h.text("hi");
     assert_eq!(Agent::full_history(h.a.id, h.a.spec.clone(), &h.log).messages, h.a.messages);
 }
+
+#[test]
+fn grouped_events_come_as_one_message_by_route() {
+    let mut h = H::new(Spec { group_events: true, ..spec() });
+    let route = |r: &str| Addr::Route(r.into());
+    // Busy with a task while events queue up.
+    assert_eq!(h.user("the task"), vec![Effect::CallLlm]);
+    for (r, e) in [("chat", r#"{"from": "alice",
+        "text": "hi"}"#), ("world", r#"{"event": "joined"}"#), ("chat", r#"{"from": "bob", "text": "yo"}"#), ("world", "not json\nat all")] {
+        h.ev(Event::Inbox { from: route(r), content: e.into(), reply: false });
+    }
+    h.ev(Event::Inbox { from: Addr::User("ann".into()), content: "a word".into(), reply: false });
+    h.text("ok");
+    h.done();
+    let c = h.contents();
+    let grouped = c.iter().find(|(_, t)| t.starts_with("[events from")).expect("one grouped message").1.clone();
+    assert_eq!(grouped, "[events from route:chat]\n{\"from\":\"alice\",\"text\":\"hi\"}\n{\"from\":\"bob\",\"text\":\"yo\"}\n\n[events from route:world]\n{\"event\":\"joined\"}\nnot json\\nat all");
+    assert!(c.iter().any(|(_, t)| t == "a word"), "messages from people stay their own");
+    assert_eq!(c.iter().filter(|(_, t)| t.contains("[message from route")).count(), 0);
+    // Without the flag, a message each, as before.
+    let mut h = H::new(spec());
+    h.user("the task");
+    h.ev(Event::Inbox { from: route("chat"), content: "{}".into(), reply: false });
+    h.ev(Event::Inbox { from: route("chat"), content: "{}".into(), reply: false });
+    h.text("ok");
+    h.done();
+    assert_eq!(h.contents().iter().filter(|(_, t)| t.starts_with("[message from route:chat]")).count(), 2);
+}
