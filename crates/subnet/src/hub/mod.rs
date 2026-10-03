@@ -1022,8 +1022,16 @@ impl Hub {
         for id in live {
             let spec = &st.agents[&id].a.spec;
             let mut tools = subnet_core::tools::builtin_tools();
-            // Built-ins its type adds (they're its version's, not a server's).
-            tools.extend(spec.tools.iter().filter(|t| t.name == "search_history").cloned());
+            // Built-ins its type adds: as its version defines them (the
+            // cluster's, if it's the current one), else as it has them.
+            let name = spec.ty.split('@').next().unwrap_or_default();
+            let history = match c.agents.get(name).filter(|_| c.agent_id(name).as_deref() == Some(spec.ty.as_str())) {
+                Some(def) => def.search_history,
+                None => spec.tools.iter().any(|t| t.name == "search_history"),
+            };
+            if history {
+                tools.push(subnet_core::tools::history_tool());
+            }
             let (mut idempotent, mut lazy) = (vec![], vec![]);
             let mut all_live = true;
             for (m, mid) in &spec.mcp {
@@ -1113,7 +1121,9 @@ impl Hub {
             spec.parent = if old == &id { None } else { spec.parent.and_then(|p| map.get(&p).copied()) };
             self.db.create_agent(new, &spec).await?;
             st.agents.insert(new, AgentRec { a: Agent::new(new, spec), seq: 0, epoch: 0, node: None });
-            let events: Vec<Event> = events.iter().map(remap).collect();
+            // Onto a new version, the old one's tool changes don't apply: its
+            // spec has the tools as they are now.
+            let events: Vec<Event> = events.iter().filter(|e| !(fresh && matches!(e, Event::ToolsChanged { .. }))).map(remap).collect();
             self.restore(st, new, events).await?;
         }
         let root = map[&id];

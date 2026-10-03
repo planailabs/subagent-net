@@ -565,4 +565,22 @@ async fn an_agent_learns_of_tools_its_server_grew() {
     let req = n.llm.requests().pop().unwrap();
     assert!(offered(&req).contains(&"t__shout".to_string()), "offered now");
     assert!(req.to_string().contains("[new tools you have now: t.shout]"), "and told: {req}");
+    // Upgraded onto a new version of its type that adds search_history: the
+    // copied history's old tool change doesn't take it away again.
+    let newer = cluster(&url, &["s"], &[], "lazy = false", "").replace("  model = \"mock\"", "  model = \"mock\"\n  search_history = true");
+    n.apply(&newer).await;
+    let mut up = n.hub.upgrade(&Addr::root(), id, false).await;
+    for _ in 0..200 {
+        if up.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        up = n.hub.upgrade(&Addr::root(), id, false).await;
+    }
+    let new = up.unwrap().id;
+    n.llm.say(SYS, &["both"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(new), content: "and now?".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "both");
+    let now = offered(&n.llm.requests().pop().unwrap());
+    assert!(now.contains(&"t__shout".to_string()) && now.contains(&"search_history".to_string()), "{now:?}");
 }
