@@ -354,6 +354,11 @@ async fn a_resident_follows_its_type_to_a_new_version() {
     assert_eq!(n.mail().await["content"], "still here");
     let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
     assert_eq!(msgs, 4, "system, start your shift, on duty, remember me?: the history moved along");
+    // A message to the old agent itself (an address resolved before the move) goes on to the copy.
+    n.llm.say(CONCIERGE, &["over here"]);
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(old), content: "hello?".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "over here");
+    assert_eq!(n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len(), 6, "in the copy's conversation");
     let agents = n.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
     let new = agents.as_array().unwrap().iter().find(|a| a["id"] != old.to_string()).unwrap();
     assert!(new.get("outdated").is_none(), "{new}");

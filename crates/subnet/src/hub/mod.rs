@@ -835,9 +835,15 @@ impl Hub {
         let mut st = self.st.lock().await;
         match &to {
             Addr::Agent(id) if st.agents.contains_key(id) => {
-                let mut events = self.route_tools(&st.agents[id].a, &content).await;
+                // An agent an upgrade moved gets its messages in its copy
+                // (a resident's address may have been resolved just before).
+                let mut id = *id;
+                while let Some(next) = st.agents[&id].a.superseded_by.filter(|n| st.agents.contains_key(n)) {
+                    id = next;
+                }
+                let mut events = self.route_tools(&st.agents[&id].a, &content).await;
                 events.push(Event::Inbox { from: caller.clone(), content, reply: false });
-                self.commit(&mut st, *id, events).await?
+                self.commit(&mut st, id, events).await?
             }
             Addr::Agent(id) => return no_agent(*id),
             other => self.put_mail(other, &Mail { from: caller.clone(), content, status: None }).await?,
@@ -943,16 +949,17 @@ impl Hub {
             return bad(format!("{id} is a child of {p}: upgrade the root of its tree (with tree)"));
         }
         let new = self.copy(&mut st, id, None, tree, true).await?;
-        // The old tree stops without reporting: its work goes on in the copy.
-        for old in self.targets(&st, caller, id, true)? {
-            self.commit(&mut st, old, vec![Event::Superseded { by: new.id }]).await?;
-        }
-        drop(st);
+        // A resident follows the copy before the old one stops, so nothing
+        // sent to it in between goes to the old agent.
         for (name, rid) in self.db.residents().await? {
             if rid == id {
                 self.db.set_resident(&name, new.id).await?;
                 tracing::info!(resident = %name, from = %id, to = %new.id, ty = %new.ty, "resident upgraded");
             }
+        }
+        // The old tree stops without reporting: its work goes on in the copy.
+        for old in self.targets(&st, caller, id, true)? {
+            self.commit(&mut st, old, vec![Event::Superseded { by: new.id }]).await?;
         }
         Ok(new)
     }
