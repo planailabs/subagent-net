@@ -380,6 +380,12 @@ pub struct MailArgs {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HoldArgs {
+    /// A hold some route goes through.
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct InjectArgs {
     /// A sense declared in the cluster.
     pub sense: String,
@@ -459,6 +465,9 @@ op!(RevokeTokens, "revoke_tokens", Admin, Some((Method::Post, "/v1/tokens/revoke
 op!(WhoAmIOp, "whoami", Viewer, Some((Method::Get, "/v1/whoami")), NoArgs, WhoAmI, "Who the hub thinks you are.");
 op!(ListRoutes, "list_routes", Viewer, Some((Method::Get, "/v1/routes")), NoArgs, Vec<crate::hub::switchboard::RouteSummary>, "Switchboard routes with their counters.");
 op!(ListDeliveries, "list_deliveries", Viewer, Some((Method::Get, "/v1/deliveries")), DeliveriesArgs, Vec<crate::hub::db::DeliveryRow>, "Recent switchboard deliveries and their outcomes.");
+op!(ListHolds, "list_holds", Viewer, Some((Method::Get, "/v1/holds")), NoArgs, Vec<crate::hub::switchboard::HoldSummary>, "Holds: whether each is frozen, since when, how many deliveries wait in it, and its routes.");
+op!(FreezeHold, "freeze_hold", Operator, Some((Method::Post, "/v1/holds/{name}/freeze")), HoldArgs, crate::hub::switchboard::HoldSummary, "Freeze a hold: the deliveries of routes going through it wait in it until it's released.");
+op!(ReleaseHold, "release_hold", Operator, Some((Method::Post, "/v1/holds/{name}/release")), HoldArgs, crate::hub::switchboard::HoldSummary, "Release a hold: what it kept is delivered, in order, and its routes deliver again.");
 op!(ListSenses, "list_senses", Viewer, Some((Method::Get, "/v1/senses")), NoArgs, Vec<SenseSummary>, "Senses of the cluster and whether they run.");
 op!(PeekMail, "peek_mail", Operator, Some((Method::Get, "/v1/mail")), MailArgs, Vec<Mail>, "Pending messages at any address (not taken).");
 op!(InjectEvent, "inject_event", Operator, Some((Method::Post, "/v1/senses/{sense}/events")), InjectArgs, Injected, "Feed an event into the switchboard as if the sense had produced it.");
@@ -494,6 +503,9 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<WhoAmIOp>(),
         OpMeta::of::<ListRoutes>(),
         OpMeta::of::<ListDeliveries>(),
+        OpMeta::of::<ListHolds>(),
+        OpMeta::of::<FreezeHold>(),
+        OpMeta::of::<ReleaseHold>(),
         OpMeta::of::<ListSenses>(),
         OpMeta::of::<PeekMail>(),
         OpMeta::of::<InjectEvent>(),
@@ -632,6 +644,21 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<PeekMail, _, _>(move |_, a| {
         let h = h.clone();
         async move { Ok(h.peek_mail(&a.addr, a.max.unwrap_or(50)).await?) }
+    });
+    let h = hub.clone();
+    r.add::<ListHolds, _, _>(move |_, _: NoArgs| {
+        let h = h.clone();
+        async move { Ok(h.list_holds()) }
+    });
+    let h = hub.clone();
+    r.add::<FreezeHold, _, _>(move |_, a: HoldArgs| {
+        let h = h.clone();
+        async move { Ok(h.set_hold(&a.name, true)?) }
+    });
+    let h = hub.clone();
+    r.add::<ReleaseHold, _, _>(move |_, a: HoldArgs| {
+        let h = h.clone();
+        async move { Ok(h.set_hold(&a.name, false)?) }
     });
     let h = hub.clone();
     r.add::<InjectEvent, _, _>(move |_, a| {

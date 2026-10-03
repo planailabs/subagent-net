@@ -150,6 +150,21 @@ route "log-everything" {
     mcp = { server = "memory", tool = "store", args = "{'events': batch}" }
   }
 }
+route "night-desk" {                          # through a hold: kept while it's frozen
+  from = "door"
+  hold = "night"
+  deliver { send = "concierge" }
+}
+route "lights-out" {
+  from = "door"
+  when = "event.state == 'locked'"
+  deliver { freeze = "night" }
+}
+route "morning" {
+  from = "door"
+  when = "event.state == 'unlocked'"
+  deliver { release = "night" }
+}
 ```
 
 - Identity of an agent type or MCP type is `name@hash`. The hash covers everything except resolved secrets and `nodes`. An agent is only ever resumed on a node offering the same hash: changing an agent type (or an MCP server of its mixture) in the cluster leaves existing agents of the old version pending. They're listed `outdated`; `upgrade` moves one onto the current version (see Forking and upgrading). Residents move by themselves.
@@ -378,6 +393,9 @@ CEL expressions in routes see `event` (the event data), `sense`, `at` (unix ms) 
    - `mailbox = "<name>"`: durable queue; agents read it with `mailbox_take`.
    - `mcp { server, tool, args = CEL }`: a direct tool call on any node running the server; idempotent tools are retried (3 attempts). Without `args` the tool gets `{"event", "batch"}`.
    - `max_active` counts a route's spawned agents until their first answer; slots are reserved atomically, excess spawns wait in the route's queue.
+   - `freeze = "<hold>"` / `release = "<hold>"`: freeze or release a hold (below).
+
+**Holds (freeze and release).** A route with `hold = "<name>"` delivers through that hold. While the hold is **frozen**, the route's deliveries (after its flow control) are kept in it instead, in the order they came, across all its routes (at most 1000; the oldest go and are counted as dropped); when it's **released**, what it kept is delivered, in that order, and its routes deliver again. Every route through a hold delivers through one lane, in the order dispatched, so a release's backlog always arrives before anything after it. Holds are frozen and released by deliveries (`freeze`, `release`: a route that does so can't itself go through a hold, and its hold must be one some route goes through) or by hand (`freeze_hold`, `release_hold`; `list_holds` shows each hold: frozen, since, how many wait, dropped, its routes). An event's freezes and releases happen before its other deliveries: an event that releases a hold arrives after what the hold kept, and one that freezes it is itself kept. Holds and what they keep are in Postgres (`holds`, `held`), written in order; a new leader picks them up. A use: two residents chatting can be frozen once they've said enough, everything for them (their lines, world events, timers) waiting, and released when a person speaks.
 
 **Grouped events:** an agent type with `group_events = true` gets the events routes `send` it together: everything queued for its next model call from routes becomes one message, grouped by route in the order they first came, each event on its own line (JSON compacted; other text with its line breaks escaped), the groups separated by a blank line:
 
@@ -447,7 +465,7 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - **Park:** agents laid out as *plots*. Each root agent and its descendants form a bordered block (a tree in spawn order), and plots flow in a responsive grid with live plots first. Tiles show glyph, type, a token bar and the last line of output (streaming, else the last answer), updating live from the event stream. A text filter matches type, id, phase, node and "paused". `#park/<id>` opens an agent.
   - **Agent panel:** live transcript with the streaming partial, tool calls and results, pending approval (approve/deny), a failed agent's reason (`error`) with resume, pause (safe/quick/hard), resume, compact, fork, cancel, an upgrade button when the agent is outdated (the park marks it ⇡), and a message box.
   - **Senses:** live event feed per sense, and stream status (rate, subscribers).
-  - **Switchboard:** routes with counters (matched, dropped, throttled, delivered), and the latest deliveries.
+  - **Switchboard:** routes with counters (matched, dropped, throttled, delivered), the holds (frozen or open, how many wait, a freeze/release button), and the latest deliveries.
   - **Cluster:** nodes and what they run, current spec version, diff and apply (admin), history.
   - **Inbox:** mail for the logged-in principal.
 
@@ -488,7 +506,7 @@ Everything in this document is implemented, except what "Not in scope yet" lists
 - **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing.
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.
-- **Switchboard:** CEL, flow control, all delivery kinds, deliveries log.
+- **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in Postgres), deliveries log.
 - **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
 
 When something in this document changes, the change and its status land in the same commit.

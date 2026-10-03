@@ -418,6 +418,12 @@ pub struct Deliver {
     pub mailbox: Option<String>,
     #[serde(default)]
     pub mcp: Option<McpDeliver>,
+    /// Freezes a hold: routes through it keep their deliveries until it's released.
+    #[serde(default)]
+    pub freeze: Option<String>,
+    /// Releases a hold: what it kept is delivered, in order.
+    #[serde(default)]
+    pub release: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -438,6 +444,10 @@ pub struct RouteDef {
     pub dedupe: Option<Dedupe>,
     #[serde(default)]
     pub max_active: Option<u32>,
+    /// A hold this route's deliveries go through: while it's frozen they
+    /// wait in it (see `freeze`/`release`).
+    #[serde(default)]
+    pub hold: Option<String>,
     #[serde(deserialize_with = "one_or_many")]
     pub deliver: Vec<Deliver>,
 }
@@ -662,12 +672,20 @@ impl Cluster {
                 return invalid(format!("{ctx}: needs at least one deliver"));
             }
             for d in &r.deliver {
-                let n = [d.spawn.is_some(), d.send.is_some(), d.mailbox.is_some(), d.mcp.is_some()]
+                let n = [d.spawn.is_some(), d.send.is_some(), d.mailbox.is_some(), d.mcp.is_some(), d.freeze.is_some(), d.release.is_some()]
                     .iter()
                     .filter(|b| **b)
                     .count();
                 if n != 1 {
-                    return invalid(format!("{ctx}: each deliver needs exactly one of spawn, send, mailbox, mcp"));
+                    return invalid(format!("{ctx}: each deliver needs exactly one of spawn, send, mailbox, mcp, freeze, release"));
+                }
+                if let Some(h) = d.freeze.as_ref().or(d.release.as_ref()) {
+                    if r.hold.is_some() {
+                        return invalid(format!("{ctx}: a route that freezes or releases a hold can't go through one (it couldn't release it)"));
+                    }
+                    if !self.routes.values().any(|o| o.hold.as_deref() == Some(h)) {
+                        return invalid(format!("{ctx}: no route goes through hold {h:?}"));
+                    }
                 }
                 if d.prompt.is_some() && d.spawn.is_none() {
                     return invalid(format!("{ctx}: prompt goes with spawn"));

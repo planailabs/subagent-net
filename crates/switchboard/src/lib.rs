@@ -132,6 +132,19 @@ pub enum Action {
     Send { resident: String, content: String },
     Mailbox { name: String, content: String },
     Mcp { server: String, tool: String, args: Value },
+    Freeze { hold: String },
+    Release { hold: String },
+}
+
+impl Action {
+    /// Freezing or releasing a hold: done before an event's other deliveries.
+    pub fn controls(&self) -> Option<(&str, bool)> {
+        match self {
+            Action::Freeze { hold } => Some((hold, true)),
+            Action::Release { hold } => Some((hold, false)),
+            _ => None,
+        }
+    }
 }
 
 impl Route {
@@ -177,6 +190,10 @@ impl Route {
                     Action::Send { resident: r.clone(), content: text.clone() }
                 } else if let Some(n) = &d.mailbox {
                     Action::Mailbox { name: n.clone(), content: text.clone() }
+                } else if let Some(h) = &d.freeze {
+                    Action::Freeze { hold: h.clone() }
+                } else if let Some(h) = &d.release {
+                    Action::Release { hold: h.clone() }
                 } else {
                     let m = d.mcp.as_ref().expect("validated: exactly one deliver kind");
                     let args = rendered(e)?.unwrap_or_else(|| json!({"event": p.event, "batch": p.batch}));

@@ -275,6 +275,15 @@ impl Db {
     }
 }
 
+/// A hold as kept: frozen or not, since when (unix ms), and what waits in
+/// it (seq, route, payload), in order.
+pub struct HoldRow {
+    pub name: String,
+    pub frozen: bool,
+    pub since: Option<i64>,
+    pub held: Vec<(i64, String, serde_json::Value)>,
+}
+
 /// A recorded switchboard delivery.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeliveryRow {
@@ -288,6 +297,58 @@ pub struct DeliveryRow {
 }
 
 impl Db {
+    /// Every hold with what it keeps.
+    pub async fn holds(&self) -> Result<Vec<HoldRow>, sqlx::Error> {
+        let mut out: Vec<HoldRow> = sqlx::query("select name, frozen, (extract(epoch from since) * 1000)::bigint as since from holds order by name")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| HoldRow { name: r.get("name"), frozen: r.get("frozen"), since: r.get("since"), held: vec![] })
+            .collect();
+        for h in &mut out {
+            h.held = sqlx::query("select seq, route, payload from held where hold = $1 order by seq")
+                .bind(&h.name)
+                .fetch_all(&self.pool)
+                .await?
+                .iter()
+                .map(|r| (r.get("seq"), r.get("route"), r.get::<Json<serde_json::Value>, _>("payload").0))
+                .collect();
+        }
+        Ok(out)
+    }
+
+    /// Freezes a hold, or releases it (and forgets what it kept).
+    pub async fn set_hold(&self, name: &str, frozen: bool) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("insert into holds (name, frozen, since) values ($1, $2, case when $2 then now() end) on conflict (name) do update set frozen = $2, since = case when $2 then coalesce(holds.since, now()) end")
+            .bind(name)
+            .bind(frozen)
+            .execute(&mut *tx)
+            .await?;
+        if !frozen {
+            sqlx::query("delete from held where hold = $1").bind(name).execute(&mut *tx).await?;
+        }
+        tx.commit().await
+    }
+
+    /// Keeps a delivery in a hold.
+    pub async fn add_held(&self, hold: &str, seq: i64, route: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+        sqlx::query("insert into held (hold, seq, route, payload) values ($1, $2, $3, $4)")
+            .bind(hold)
+            .bind(seq)
+            .bind(route)
+            .bind(Json(payload))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Forgets a kept delivery (dropped: the hold was full).
+    pub async fn drop_held(&self, hold: &str, seq: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("delete from held where hold = $1 and seq = $2").bind(hold).bind(seq).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn add_delivery(&self, route: &str, payload: &serde_json::Value, outcomes: &serde_json::Value) -> Result<(), sqlx::Error> {
         sqlx::query("insert into deliveries (route, payload, outcomes) values ($1, $2, $3)")
             .bind(route)

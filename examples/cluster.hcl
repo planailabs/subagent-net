@@ -110,3 +110,18 @@ route "log-everything" {
     mcp = { server = "memory", tool = "store", args = "{'events': batch}" }
   }
 }
+route "night-desk" {                          # through a hold: kept while it's frozen
+  from = "door"
+  hold = "night"
+  deliver { send = "concierge" }
+}
+route "lights-out" {
+  from = "door"
+  when = "event.state == 'locked'"
+  deliver { freeze = "night" }
+}
+route "morning" {
+  from = "door"
+  when = "event.state == 'unlocked'"
+  deliver { release = "night" }
+}

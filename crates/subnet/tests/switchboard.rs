@@ -161,3 +161,87 @@ async fn invalid_cel_rejects_the_apply() {
     assert!(e.unwrap_err().to_string().contains("route \"r\""));
     assert!(n.hub.inject_event("x", json!({})).is_err(), "the bad version wasn't applied");
 }
+
+const HOLD_ROUTES: &str = "route \"log\" {\n  from = \"door\"\n  hold = \"quiet\"\n  deliver { mailbox = \"door-log\" }\n}\nroute \"hush\" {\n  from = \"door\"\n  when = \"event.n == 'freeze'\"\n  deliver { freeze = \"quiet\" }\n}\nroute \"wake\" {\n  from = \"door\"\n  when = \"event.n == 'release'\"\n  deliver { release = \"quiet\" }\n}\n";
+
+async fn door_log(hub: &subnet::hub::Hub, count: usize) -> Vec<String> {
+    for _ in 0..200 {
+        let mail = hub.peek_mail(&Addr::Mailbox("door-log".into()), 100).await.unwrap();
+        if mail.len() >= count {
+            return mail.iter().map(|m| serde_json::from_str::<Value>(&m.content).unwrap()["n"].as_str().unwrap().to_string()).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("fewer than {count} in the door log");
+}
+
+#[tokio::test]
+async fn a_hold_keeps_deliveries_while_frozen_and_lets_them_go_in_order() {
+    let n = net(HOLD_ROUTES).await;
+    let door = |s: &str| n.hub.inject_event("door", json!({"n": s})).unwrap();
+    door("a");
+    assert_eq!(door_log(&n.hub, 1).await, ["a"]);
+    // Frozen by an event: that event and the next ones wait.
+    door("freeze");
+    door("b");
+    door("c");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(door_log(&n.hub, 1).await, ["a"], "kept while frozen");
+    let h = &n.hub.list_holds()[0];
+    assert_eq!((h.name.as_str(), h.frozen, h.queued, h.routes.clone()), ("quiet", true, 3, vec!["log".to_string()]));
+    // Released by an event: what waited comes first, in order, then that event.
+    door("release");
+    door("d");
+    assert_eq!(door_log(&n.hub, 6).await, ["a", "freeze", "b", "c", "release", "d"]);
+    assert!(!n.hub.list_holds()[0].frozen);
+    // By hand (freeze_hold / release_hold), the same.
+    n.hub.set_hold("quiet", true).unwrap();
+    door("e");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(n.hub.list_holds()[0].queued, 1);
+    assert_eq!(n.hub.set_hold("quiet", false).unwrap().queued, 0);
+    assert_eq!(door_log(&n.hub, 7).await.last().unwrap(), "e");
+    assert!(n.hub.set_hold("nowhere", true).is_err(), "only holds routes go through");
+}
+
+#[tokio::test]
+async fn a_frozen_hold_and_what_it_keeps_outlive_the_hub() {
+    let url = common::db_url().await;
+    let text = cluster(HOLD_ROUTES).replace("{llm}", "http://127.0.0.1:9");
+    let start = || async {
+        let hub = subnet::hub::Hub::open(&url, None).await.unwrap();
+        hub.wait_leader().await;
+        hub.apply_cluster(vec![ClusterFile { name: "c.hcl".into(), text: text.clone() }], false, &Addr::root()).await.unwrap();
+        hub
+    };
+    let hub = start().await;
+    hub.set_hold("quiet", true).unwrap();
+    hub.inject_event("door", json!({"n": "kept"})).unwrap();
+    for _ in 0..200 {
+        if hub.list_holds()[0].queued == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Its writes are ordered and quick; give them a moment, then go.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    hub.shutdown();
+    drop(hub);
+    let hub = start().await;
+    let h = &hub.list_holds()[0];
+    assert!(h.frozen && h.queued == 1, "frozen with what it kept");
+    hub.set_hold("quiet", false).unwrap();
+    assert_eq!(door_log(&hub, 1).await, ["kept"]);
+}
+
+#[tokio::test]
+async fn holds_are_checked_when_applied() {
+    let n = net("").await;
+    let bad = |routes: &str| cluster(routes).replace("{llm}", &n.llm.url);
+    let root = Addr::root();
+    let apply = |t: String| n.hub.apply_cluster(vec![ClusterFile { name: "c.hcl".into(), text: t }], false, &root);
+    let e = apply(bad("route \"x\" {\n  from = \"door\"\n  deliver { freeze = \"nothing\" }\n}\n")).await.unwrap_err().to_string();
+    assert!(e.contains("no route goes through hold"), "{e}");
+    let e = apply(bad("route \"x\" {\n  from = \"door\"\n  hold = \"h\"\n  deliver { release = \"h\" }\n}\n")).await.unwrap_err().to_string();
+    assert!(e.contains("can't go through one"), "{e}");
+}

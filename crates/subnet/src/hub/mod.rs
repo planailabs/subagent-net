@@ -185,6 +185,8 @@ pub struct Hub {
     stop: tokio_util::sync::CancellationToken,
     /// Pre-loads lazy tools for mixtures with a `router`.
     router: std::sync::RwLock<Arc<router::Router>>,
+    /// Holds' changes, written to the database in the order they happened.
+    hold_writes: mpsc::UnboundedSender<switchboard::HoldWrite>,
 }
 
 /// Events only a node may propose; everything else originates at the hub.
@@ -219,6 +221,7 @@ impl Hub {
         if admin_token.is_none() {
             tracing::warn!("no admin token: open mode, every caller is user:root");
         }
+        let (hold_writes, hold_rx) = mpsc::unbounded_channel();
         let hub = Arc::new_cyclic(|me| Self {
             db,
             st: Mutex::new(State::default()),
@@ -238,7 +241,9 @@ impl Hub {
             fenced: Default::default(),
             stop: Default::default(),
             router: std::sync::RwLock::new(Arc::new(router::Router::default_e5())),
+            hold_writes,
         });
+        tokio::spawn(hub.clone().hold_writer(hold_rx));
         tokio::spawn(hub.clone().elect(db_url.to_string(), advertise.to_string()));
         tokio::spawn(hub.clone().board_timers());
         tokio::spawn(hub.clone().blob_gc());
@@ -259,6 +264,7 @@ impl Hub {
         }
         tracing::info!(agents = st.agents.len(), "hub loaded");
         *self.st.lock().await = st;
+        self.load_holds().await?;
         self.load_auth().await
     }
 

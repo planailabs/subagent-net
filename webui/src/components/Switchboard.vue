@@ -5,12 +5,24 @@ import { call } from "../lib/api.js";
 const live = inject("live");
 const routes = ref([]);
 const deliveries = ref([]);
+const holds = ref([]);
 const error = ref("");
 
 async function refresh() {
   try {
     routes.value = await call("list_routes");
     deliveries.value = await call("list_deliveries", { limit: 50 });
+    holds.value = await call("list_holds");
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
+/** Freezes or releases a hold by hand. */
+async function toggle(h) {
+  try {
+    await call(h.frozen ? "release_hold" : "freeze_hold", { name: h.name });
+    await refresh();
   } catch (e) {
     error.value = e.message;
   }
@@ -44,6 +56,20 @@ onUnmounted(() => clearInterval(poll));
       <td>{{ r.queued }}</td>
     </tr>
   </table>
+  <template v-if="holds.length">
+    <h2>holds</h2>
+    <table>
+      <tr><th>hold</th><th>state</th><th>waiting</th><th>dropped</th><th>routes</th><th></th></tr>
+      <tr v-for="h in holds" :key="h.name">
+        <td class="hi">{{ h.name }}</td>
+        <td>{{ h.frozen ? `frozen since ${new Date(h.since).toLocaleTimeString()}` : "open" }}</td>
+        <td>{{ h.queued }}</td>
+        <td>{{ h.dropped }}</td>
+        <td>{{ h.routes.join(", ") }}</td>
+        <td><button @click="toggle(h)">{{ h.frozen ? "release" : "freeze" }}</button></td>
+      </tr>
+    </table>
+  </template>
   <h2>deliveries</h2>
   <div class="feed">
     <table>
