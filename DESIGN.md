@@ -220,6 +220,7 @@ Each LLM call reports its context size (prompt + completion tokens). Before the 
 - **Nothing is deleted:** compaction changes what the model is sent, not the log. Every event stays in `events` (append-only), so the whole conversation can be read back: `transcript` and `watch_agent` with `full = true` replay the log (`Agent::full_history`) into the messages as they happened, compacted ones included (each compaction's own notes left out), and `compacted: [{from, to, summary}]` says which were replaced by which summary. A full transcript only grows, so a full watcher's cursor never goes back. The web UI's agent panel shows it, each compaction folded (its summary, then the messages it replaced). Blobs an agent's log mentions (`blob:<sha256>`) aren't collected, so its pictures stay too.
 - Watchers (not `full`) whose cursor is past the end of a compacted transcript start again from the top. Agent summaries show `compactions`.
 - `compact { enabled = false }` turns it off for a type; external executors never compact (their brain owns its context).
+- **Compacting by hand:** `compact(id)` (API `POST /v1/agents/{id}/compact`, the CLI, MCP; the web UI's agent panel; `c` in the TUI) logs `CompactRequested`: a compaction regardless of the context's size (with compaction off too, keeping the last `DEFAULT_KEEP` = 8 messages). An idle agent compacts at once and is idle again after (no model call follows unless messages came meanwhile; after a crash only the compaction is asked for again); a busy one compacts before its next model call. With too little to summarise, nothing happens.
 
 ### Executors
 
@@ -241,6 +242,8 @@ A request has a mode and a scope (`tree` = the agent and all descendants). It is
 | `safe`  | the whole turn | turn boundary (`Idle`) |
 | `quick` | the in-flight LLM stream or tool calls; nothing new starts | next step boundary |
 | `hard`  | nothing. The stream is dropped; MCP calls get `notifications/cancelled` | immediately |
+
+**Failing and resuming.** An agent fails when a model call fails for good (after the client's retries, or at once for an error that won't pass, like a provider's "insufficient balance"), or when its budget is used up. Agent summaries say why (`error`; the web UI and TUI show it). `resume` goes on from where it failed, the partial answer and the queued messages included: once the cause is gone (the provider has credit again), nothing is lost. A resident whose agent failed stays failed until someone resumes it; upgrading it carries the failed state over (resume the new agent).
 
 **Half-responses are kept.** Streamed deltas are logged in batches, so after a hard pause or crash the partial message is whatever was committed. On resume the partial is continued: natively with `prefill = true` (vLLM `continue_final_message`), otherwise it is marked `[interrupted]` and the model is asked to go on. Half-streamed tool calls are never executed. An aborted tool call becomes `ToolAborted`; after a crash it is re-run only if it is idempotent.
 
@@ -415,7 +418,7 @@ The web UI and the TUI use the same API.
 
 - Principals are declared in the cluster file: `user`, `client`, `node`. Each has a role:
   - `admin`: apply cluster files, issue tokens, everything else
-  - `operator`: spawn, send, pause, resume, cancel, approve, fork, upgrade
+  - `operator`: spawn, send, pause, resume, cancel, compact, approve, fork, upgrade
   - `viewer`: read only
   - nodes: the node protocol only
 - `subnet issue-token <kind> <name>` (admin) creates a random token. The hub stores only its SHA-256.
@@ -442,7 +445,7 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 - **Design:** monochrome and dark. Black background, white/grey text, no colour. State is shown by glyph and pattern: `●` thinking, `▣` tools, `○` idle, `‖` paused, `✕` failed, `·` cancelled. Monospace type throughout.
 - **Views:**
   - **Park:** agents laid out as *plots*. Each root agent and its descendants form a bordered block (a tree in spawn order), and plots flow in a responsive grid with live plots first. Tiles show glyph, type, a token bar and the last line of output (streaming, else the last answer), updating live from the event stream. A text filter matches type, id, phase, node and "paused". `#park/<id>` opens an agent.
-  - **Agent panel:** live transcript with the streaming partial, tool calls and results, pending approval (approve/deny), pause (safe/quick/hard), resume, fork, cancel, an upgrade button when the agent is outdated (the park marks it ⇡), and a message box.
+  - **Agent panel:** live transcript with the streaming partial, tool calls and results, pending approval (approve/deny), a failed agent's reason (`error`) with resume, pause (safe/quick/hard), resume, compact, fork, cancel, an upgrade button when the agent is outdated (the park marks it ⇡), and a message box.
   - **Senses:** live event feed per sense, and stream status (rate, subscribers).
   - **Switchboard:** routes with counters (matched, dropped, throttled, delivered), and the latest deliveries.
   - **Cluster:** nodes and what they run, current spec version, diff and apply (admin), history.
@@ -454,7 +457,7 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 
 - a park view: plots as headed groups, agents as tree rows with glyph, type, token bar and last line
 - an agent pane: transcript, streaming partial and pending approval, scrolled to the end
-- keys: `j`/`k` select, `s`/`q`/`h` pause safe/quick/hard, `r` resume, `x` cancel, `a`/`d` approve/deny, `m` message, `f` fork, `esc` quit
+- keys: `j`/`k` select, `s`/`q`/`h` pause safe/quick/hard, `r` resume, `x` cancel, `c` compact, `a`/`d` approve/deny, `m` message, `f` fork, `esc` quit
 
 State and key handling (`tui::App`) are pure and tested; rendering is tested against ratatui's `TestBackend`.
 

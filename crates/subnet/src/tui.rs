@@ -170,6 +170,7 @@ impl App {
             KeyCode::Char('h') => Action::Op("pause", json!({"mode": "hard"})),
             KeyCode::Char('r') => Action::Op("resume", json!({})),
             KeyCode::Char('x') => Action::Op("cancel", json!({})),
+            KeyCode::Char('c') => Action::Op("compact", json!({})),
             KeyCode::Char('f') => Action::Op("fork", json!({})),
             KeyCode::Char(c @ ('a' | 'd')) => match approval {
                 Some(call) => Action::Op("approve", json!({"call_id": call.id, "approved": c == 'a'})),
@@ -269,6 +270,9 @@ pub fn draw(f: &mut Frame, app: &App) {
             ),
             dim,
         ));
+        if let Some(e) = &s.error {
+            lines.push(Line::styled(format!("failed: {e}  [r]esume to try again"), bold));
+        }
         if let Some(c) = &s.awaiting_approval {
             lines.push(Line::styled(format!("? approve {}({})  [a]pprove / [d]eny", c.function.name, c.function.arguments), bold));
         }
@@ -304,7 +308,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Some(t) => Line::from(vec![Span::styled("message: ", bold), Span::raw(t.clone()), Span::raw("▏")]),
         None if !app.status.is_empty() => Line::styled(app.status.clone(), dim),
         None => Line::styled(
-            "j/k select · s/q/h pause safe/quick/hard · r resume · x cancel · a/d approve/deny · m message · f fork · esc quit",
+            "j/k select · s/q/h pause safe/quick/hard · r resume · x cancel · c compact · a/d approve/deny · m message · f fork · esc quit",
             dim,
         ),
     };
@@ -423,6 +427,7 @@ mod tests {
             ty: "worker@abc".into(),
             parent: parent.map(AgentId::from_u128),
             phase: phase.into(),
+            error: None,
             pause: None,
             paused: false,
             node: None,
@@ -466,6 +471,7 @@ mod tests {
         app.set_agents(vec![agent(1, None, "thinking")]);
         assert_eq!(app.on_key(key(KeyCode::Char('h'))), Action::Op("pause", json!({"mode":"hard"})));
         assert_eq!(app.on_key(key(KeyCode::Char('r'))), Action::Op("resume", json!({})));
+        assert_eq!(app.on_key(key(KeyCode::Char('c'))), Action::Op("compact", json!({})));
         assert_eq!(app.on_key(key(KeyCode::Char('a'))), Action::None, "nothing to approve");
         let mut a = agent(1, None, "tools");
         a.awaiting_approval = Some(ToolCall::new("c7", "rm", "{}"));

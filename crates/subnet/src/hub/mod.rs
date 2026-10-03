@@ -892,6 +892,11 @@ impl Hub {
         Ok(done)
     }
 
+    /// Asks an agent to compact its conversation now (`CompactRequested`).
+    pub async fn compact(&self, caller: &Addr, id: AgentId) -> Result<Done, HubError> {
+        self.control(caller, id, false, Event::CompactRequested).await
+    }
+
     pub async fn approve(&self, caller: &Addr, id: AgentId, call_id: String, approved: bool) -> Result<Done, HubError> {
         self.control(caller, id, false, Event::Approval { call_id, approved }).await
     }
@@ -1335,6 +1340,10 @@ fn summary(st: &State, c: &subnet_cluster::Cluster, id: AgentId, r: &AgentRec) -
         ty: r.a.spec.ty.clone(),
         parent: r.a.spec.parent,
         phase,
+        error: match &r.a.phase {
+            subnet_core::agent::Phase::Failed { error } => Some(error.clone()),
+            _ => None,
+        },
         pause: r.a.pause,
         paused: r.a.is_paused(),
         node: r.node.and_then(|c| st.nodes.get(&c)).map(|s| s.name.clone()),

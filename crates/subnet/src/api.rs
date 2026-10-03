@@ -25,6 +25,10 @@ pub struct AgentSummary {
     pub parent: Option<AgentId>,
     /// idle, thinking, tools, failed or cancelled.
     pub phase: String,
+    /// Why it failed (a model call that kept failing, a budget used up…):
+    /// `resume` tries again from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub pause: Option<PauseMode>,
     /// Paused and nothing left to finish.
     pub paused: bool,
@@ -444,6 +448,7 @@ op!(WaitInbox, "wait_inbox", Viewer, Some((Method::Get, "/v1/inbox")), InboxArgs
 op!(Pause, "pause", Operator, Some((Method::Post, "/v1/agents/{id}/pause")), PauseArgs, Done, "Pause an agent: safe (finish turn), quick (finish in-flight call) or hard (abort, keep partial output).");
 op!(Resume, "resume", Operator, Some((Method::Post, "/v1/agents/{id}/resume")), ResumeArgs, Done, "Resume a paused or failed agent.");
 op!(Cancel, "cancel", Operator, Some((Method::Post, "/v1/agents/{id}/cancel")), IdArgs, Done, "Cancel an agent and all its descendants.");
+op!(Compact, "compact", Operator, Some((Method::Post, "/v1/agents/{id}/compact")), IdArgs, Done, "Compact an agent's conversation now, whatever its size: an idle agent at once (and it stays idle), a busy one before its next model call. Nothing is lost: transcript with full shows everything.");
 op!(Approve, "approve", Operator, Some((Method::Post, "/v1/agents/{id}/approve")), ApproveArgs, Done, "Approve or deny the tool call an agent is waiting on.");
 op!(ApplyCluster, "apply_cluster", Admin, Some((Method::Put, "/v1/cluster")), ApplyArgs, Applied, "Validate cluster files and make them the desired state (or just diff with dry_run).");
 op!(GetCluster, "get_cluster", Viewer, Some((Method::Get, "/v1/cluster")), NoArgs, ClusterView, "The applied cluster files and their version.");
@@ -469,6 +474,7 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<ListNodes>(),
         OpMeta::of::<ListAgents>(),
         OpMeta::of::<GetAgent>(),
+        OpMeta::of::<Compact>(),
         OpMeta::of::<WatchAgent>(),
         OpMeta::of::<Spawn>(),
         OpMeta::of::<Send>(),
@@ -552,6 +558,11 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<Cancel, _, _>(move |c, a| {
         let h = h.clone();
         async move { Ok(h.cancel(&c.addr, a.id).await?) }
+    });
+    let h = hub.clone();
+    r.add::<Compact, _, _>(move |c, a| {
+        let h = h.clone();
+        async move { Ok(h.compact(&c.addr, a.id).await?) }
     });
     let h = hub.clone();
     r.add::<Approve, _, _>(move |c, a| {

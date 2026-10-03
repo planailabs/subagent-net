@@ -502,3 +502,44 @@ async fn long_conversations_are_compacted() {
     assert_eq!(w.next as usize, msgs.len());
     assert_eq!(w.compacted.len(), 1);
 }
+
+#[tokio::test]
+async fn compaction_can_be_asked_for() {
+    let n = Net::new(&cluster("  compact = { at_tokens = 1000000, keep = 2 }")).await; // the threshold far away
+    n.node("s").await;
+    for i in 0..5 {
+        n.llm.push(WORKER, move |_| text(&[&format!("answer {i}")]));
+    }
+    let id = n.spawn("worker", "look around").await;
+    n.mail().await;
+    for i in 1..5 {
+        n.hub.send(&Addr::root(), Addr::Agent(id), format!("and {i}?")).await.unwrap();
+        n.mail().await;
+    }
+    n.llm.say(subnet_core::agent::COMPACT_PROMPT, &["we talked five times"]);
+    let calls = n.llm.requests().len();
+    n.hub.compact(&Addr::root(), id).await.unwrap();
+    let t = n.until(id, "compacted", |t| t["compactions"] == 1 && t["phase"] == "idle").await;
+    assert!(t["messages"].as_array().unwrap().iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("we talked five times"))));
+    assert_eq!(n.llm.requests().len(), calls + 1, "only the summary: no turn after it");
+    // Nothing lost.
+    let full = n.hub.transcript_of(id, true).await.unwrap();
+    assert!(full.messages.iter().any(|m| m.content.as_deref() == Some("answer 0")));
+}
+
+#[tokio::test]
+async fn a_failed_model_call_is_resumed_and_says_why() {
+    let n = Net::new(&cluster("")).await;
+    n.node("s").await;
+    // No scripted reply: the model answers 500 until it gives up.
+    let id = n.spawn("worker", "look around").await;
+    let t = n.until(id, "failed", |t| t["phase"] == "failed").await;
+    assert!(t["error"].as_str().is_some_and(|e| e.contains("no scripted reply")), "{t}");
+    assert!(n.mail().await["content"].as_str().unwrap().contains("no scripted reply"), "the failure is reported");
+    // The model is back: resume goes on from there.
+    n.llm.push(WORKER, |_| text(&["looked"]));
+    n.hub.resume(&Addr::root(), id, false).await.unwrap();
+    assert_eq!(n.mail().await["content"], "looked");
+    let t = n.t(id).await;
+    assert!(t["error"].is_null() && t["phase"] == "idle");
+}

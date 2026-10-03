@@ -961,3 +961,85 @@ fn grouped_events_come_as_one_message_by_route() {
     h.done();
     assert_eq!(h.contents().iter().filter(|(_, t)| t.starts_with("[message from route:chat]")).count(), 2);
 }
+
+/// Turns of "hi"/"hello" until the conversation has `n` user messages.
+fn chatted(h: &mut H, n: usize) {
+    for i in 0..n {
+        h.user(&format!("hi {i}"));
+        h.text("hello");
+        h.done();
+    }
+}
+
+#[test]
+fn a_compaction_asked_for_while_idle_happens_now_and_stays_idle() {
+    let mut h = H::new(compacting_spec()); // at 1000 tokens, keep 2
+    chatted(&mut h, 3);
+    assert_eq!(h.a.phase, Phase::Idle);
+    // Far below the threshold, but asked for.
+    let fx = h.ev(Event::CompactRequested);
+    assert_eq!(fx, vec![Effect::Compact { upto: 4 }]);
+    assert_eq!(h.a.phase, Phase::Thinking { running: true });
+    // A crash while summarising: it's asked for again, and only that.
+    assert_eq!(h.crash(), vec![Effect::Compact { upto: 4 }]);
+    // A message comes meanwhile: answered after.
+    assert!(h.user("still there?").is_empty());
+    let fx = h.ev(Event::Compacted { upto: 4, summary: "we said hello".into(), usage: None });
+    assert_eq!(fx, vec![Effect::CallLlm], "the message, now");
+    assert_eq!(h.a.compactions, 1);
+    assert!(!h.a.compact_then_idle && !h.a.compact_asked);
+    h.text("yes");
+    h.done();
+    assert_eq!(h.a.phase, Phase::Idle);
+    // Asked for with nothing new: compacted, then idle (no model call).
+    chatted(&mut h, 2);
+    let fx = h.ev(Event::CompactRequested);
+    let upto = match fx.as_slice() {
+        [Effect::Compact { upto }] => *upto,
+        other => panic!("{other:?}"),
+    };
+    assert!(h.ev(Event::Compacted { upto, summary: "more hellos".into(), usage: None }).is_empty());
+    assert_eq!(h.a.phase, Phase::Idle);
+    // A failed one goes back to idle too.
+    chatted(&mut h, 2);
+    h.ev(Event::CompactRequested);
+    assert!(h.ev(Event::CompactFailed { error: "down".into() }).is_empty());
+    assert_eq!(h.a.phase, Phase::Idle);
+    h.crash();
+}
+
+#[test]
+fn a_compaction_asked_for_while_busy_comes_before_the_next_call() {
+    let mut h = H::new(compacting_spec());
+    chatted(&mut h, 2);
+    h.user("one more");
+    assert!(h.ev(Event::CompactRequested).is_empty(), "the call in flight finishes");
+    // A tool call it can't make (a lazy tool, unloaded): its error comes
+    // back at once, and the next model call is due.
+    h.call(0, "c1", "srv.t", "{}");
+    let fx = h.done();
+    assert!(matches!(fx.as_slice(), [Effect::Compact { .. }]), "compacted first: {fx:?}");
+    assert!(!h.a.compact_asked, "asked for once");
+}
+
+#[test]
+fn nothing_to_compact_is_no_compaction() {
+    let mut h = H::new(compacting_spec());
+    chatted(&mut h, 1);
+    assert!(h.ev(Event::CompactRequested).is_empty());
+    assert_eq!(h.a.phase, Phase::Idle);
+    assert!(!h.a.compact_asked && !h.a.compact_then_idle);
+    // Cancelled agents don't.
+    let mut h = H::new(compacting_spec());
+    chatted(&mut h, 3);
+    h.ev(Event::Cancelled);
+    assert!(h.ev(Event::CompactRequested).is_empty());
+}
+
+#[test]
+fn compaction_off_can_still_be_asked_for() {
+    let mut h = H::new(spec()); // no compact
+    chatted(&mut h, 6);
+    let fx = h.ev(Event::CompactRequested);
+    assert_eq!(fx, vec![Effect::Compact { upto: h.a.messages.len() - DEFAULT_KEEP }]);
+}

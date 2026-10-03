@@ -25,6 +25,10 @@ Drop small talk, repetition and raw tool output that no longer matters. Be compl
 /// own `prompt` (the built-in `COMPACT_PROMPT` says it already).
 pub const COMPACT_CONTRACT: &str = "The agent will continue from your summary plus its most recent messages, which it keeps verbatim; the rest is gone. Answer with the summary only.";
 
+/// Messages kept verbatim by a compaction asked for when the type has
+/// compaction off.
+pub const DEFAULT_KEEP: usize = 8;
+
 /// Name of the one built-in tool the state machine handles itself.
 pub const WAIT_FOR: &str = "wait_for";
 /// Loads lazy tools' schemas; resolved by the state machine itself.
@@ -272,6 +276,10 @@ pub enum Event {
     CompactFailed {
         error: String,
     },
+    /// Someone asked for a compaction now (`compact`), whatever the
+    /// context's size: an idle agent compacts at once and stays idle; a busy
+    /// one before its next model call.
+    CompactRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -389,6 +397,12 @@ pub struct Agent {
     /// How often the conversation was compacted.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub compactions: u32,
+    /// A compaction was asked for (`CompactRequested`) and is still to come.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_asked: bool,
+    /// The compaction under way was asked for while idle: idle again after.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_then_idle: bool,
     /// The agent its work moved to (an upgrade), once it's superseded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<AgentId>,
@@ -418,6 +432,8 @@ impl Agent {
             context: 0,
             compact_skip: false,
             compactions: 0,
+            compact_asked: false,
+            compact_then_idle: false,
             superseded_by: None,
         }
     }
@@ -469,7 +485,31 @@ impl Agent {
 
     /// Whatever was in flight is gone: mark it so and return the effects that
     /// continue from here. Applied via `Event::Recovered`.
+    /// After a compaction (or a failed one): on to the model call it came
+    /// before, or idle again if it was asked for while idle.
+    fn after_compaction(&mut self, fx: &mut Vec<Effect>) {
+        self.phase = if std::mem::take(&mut self.compact_then_idle) { Phase::Idle } else { Phase::Thinking { running: false } };
+        self.advance(fx);
+    }
+
     fn recover(&mut self) -> Vec<Effect> {
+        // A compaction asked for while idle is asked for again, nothing more.
+        if self.compact_then_idle && matches!(self.phase, Phase::Thinking { .. }) {
+            self.acc = Accumulator::default();
+            return match self.compact_point() {
+                Some(upto) => {
+                    self.phase = Phase::Thinking { running: true };
+                    vec![Effect::Compact { upto }]
+                }
+                None => {
+                    self.compact_then_idle = false;
+                    self.phase = Phase::Idle;
+                    let mut fx = vec![];
+                    self.advance(&mut fx);
+                    fx
+                }
+            };
+        }
         match &mut self.phase {
             Phase::Thinking { running } => *running = false,
             Phase::Tools { calls } => {
@@ -548,12 +588,20 @@ impl Agent {
     /// `1..upto` go (the first, the task, stays), the last `keep` stay, and
     /// the kept part never starts with a tool result (its call must stay
     /// with it).
+    /// One asked for (`compact_asked`) needn't wait for the threshold, and
+    /// works with compaction off too (keeping `DEFAULT_KEEP`).
     fn compact_point(&self) -> Option<usize> {
-        let c = self.spec.compact.as_ref()?;
-        if self.compact_skip || self.context < c.at_tokens || !self.acc.is_empty() {
+        let asked = self.compact_asked || self.compact_then_idle;
+        let keep = match self.spec.compact.as_ref() {
+            Some(c) if asked => c.keep,
+            Some(c) if !self.compact_skip && self.context >= c.at_tokens => c.keep,
+            None if asked => DEFAULT_KEEP,
+            _ => return None,
+        };
+        if !self.acc.is_empty() {
             return None;
         }
-        let mut upto = self.messages.len().saturating_sub(c.keep);
+        let mut upto = self.messages.len().saturating_sub(keep);
         while upto > 1 && self.messages.get(upto).is_some_and(|m| m.role == crate::chat::Role::Tool) {
             upto -= 1;
         }
@@ -880,13 +928,29 @@ impl Agent {
                     self.compactions += 1;
                     self.context = 0;
                 }
-                self.phase = Phase::Thinking { running: false };
-                self.advance(&mut fx);
+                self.after_compaction(&mut fx);
             }
             Event::CompactFailed { .. } => {
                 self.compact_skip = true;
-                self.phase = Phase::Thinking { running: false };
-                self.advance(&mut fx);
+                self.after_compaction(&mut fx);
+            }
+            Event::CompactRequested => {
+                if self.terminal() {
+                    return fx;
+                }
+                self.compact_asked = true;
+                // Idle: now, and idle again after; busy: before the next call.
+                if self.phase == Phase::Idle {
+                    self.compact_asked = false;
+                    self.compact_then_idle = true;
+                    match self.compact_point() {
+                        Some(upto) => {
+                            self.phase = Phase::Thinking { running: true };
+                            fx.push(Effect::Compact { upto });
+                        }
+                        None => self.compact_then_idle = false,
+                    }
+                }
             }
             Event::Cancelled => {
                 if self.terminal() {
@@ -938,6 +1002,8 @@ impl Agent {
                         Some(upto) => fx.push(Effect::Compact { upto }),
                         None => fx.push(Effect::CallLlm),
                     }
+                    // Asked for or not, it's done (or there was nothing to compact).
+                    self.compact_asked = false;
                     return;
                 }
                 Phase::Tools { calls } => {

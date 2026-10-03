@@ -84,9 +84,14 @@ const content = (m) => m.content ?? (m.tool_calls?.length ? m.tool_calls.map((c)
       <button @click="act('pause', { mode: 'quick' })">quick</button>
       <button @click="act('pause', { mode: 'hard' })">hard</button>
       <button @click="act('resume')">resume</button>
+      <button title="summarise its conversation now (nothing is lost: the full transcript keeps it)" @click="act('compact')">compact</button>
       <button @click="fork(false)">fork</button>
       <button @click="fork(true)">fork tree</button>
       <button @click="act('cancel')">cancel</button>
+    </div>
+    <div v-if="t?.error" class="err">
+      failed: {{ t.error }}
+      <button @click="act('resume')">resume</button>
     </div>
     <div v-if="t?.awaiting_approval" class="err">
       waiting for approval: <span class="hi">{{ t.awaiting_approval.function.name }}</span>
