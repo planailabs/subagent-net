@@ -27,6 +27,10 @@ pub struct Message {
     /// logged: the node attaches them for one call).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<Image>,
+    /// A tool result cut for the model (`grep_results`): the whole of it,
+    /// for `grep_result`. Never sent to a model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -40,7 +44,7 @@ pub struct Image {
 
 impl Message {
     fn text(role: Role, content: impl Into<String>) -> Self {
-        Self { role, content: Some(content.into()), tool_calls: vec![], tool_call_id: None, images: vec![], extra: Map::new() }
+        Self { role, content: Some(content.into()), tool_calls: vec![], tool_call_id: None, images: vec![], full: None, extra: Map::new() }
     }
     pub fn system(c: impl Into<String>) -> Self {
         Self::text(Role::System, c)

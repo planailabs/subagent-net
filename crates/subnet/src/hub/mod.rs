@@ -768,6 +768,7 @@ impl Hub {
             Op::MailboxPeek { name, max } => j(self.mailbox(caller, &name, max, false).await),
             Op::BlobGet { reference } => j(self.blob_for_model(&reference).await),
             Op::SearchHistory { pattern, page } => j(self.search_history(caller, &pattern, page).await),
+            Op::GrepResult { call, pattern, context, page } => j(self.grep_result(caller, &call, &pattern, context, page).await),
             Op::BlobRaw { reference } => j(self.get_blob(&reference).await.map(|(mime, data)| serde_json::json!({"mime": mime, "base64": blobs::encode_b64(&data)}))),
         }
     }
@@ -876,6 +877,43 @@ impl Hub {
         let total = hits.len();
         let shown: Vec<Value> = hits.into_iter().skip((page - 1) * HISTORY_PAGE).take(HISTORY_PAGE).collect();
         Ok(serde_json::json!({"pattern": pattern, "matches": total, "page": page, "pages": pages, "messages": t.messages.len(), "hits": shown}))
+    }
+
+    /// An agent searching one of its tool results, the whole of it (what the
+    /// model saw may be cut: `grep_results`): matching lines with their
+    /// numbers and `context` lines around, `GREP_PAGE` matches a page.
+    pub async fn grep_result(&self, caller: &Addr, call: &str, pattern: &str, context: u32, page: u32) -> Result<Value, HubError> {
+        const GREP_PAGE: usize = 30;
+        const LINE: usize = 500;
+        let Addr::Agent(id) = caller else { return bad("only an agent searches its own tool results") };
+        let re = regex::RegexBuilder::new(pattern).case_insensitive(true).size_limit(1 << 20).build().map_err(|e| HubError::Bad(format!("bad pattern: {e}")))?;
+        let t = self.transcript_of(*id, true).await?;
+        let m = t.messages.iter().find(|m| m.tool_call_id.as_deref() == Some(call)).ok_or_else(|| HubError::NotFound(format!("no result of a tool call {call:?} (the id is in the cut note)")))?;
+        let text = m.full.as_deref().or(m.content.as_deref()).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        let hits: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| re.is_match(l)).map(|(i, _)| i).collect();
+        let pages = hits.len().div_ceil(GREP_PAGE).max(1);
+        let page = (page as usize).clamp(1, pages);
+        let c = context as usize;
+        // Each match with its context; a long line cut around the match.
+        let shown: Vec<Value> = hits
+            .iter()
+            .skip((page - 1) * GREP_PAGE)
+            .take(GREP_PAGE)
+            .map(|&i| {
+                let around: Vec<Value> = (i.saturating_sub(c)..(i + c + 1).min(lines.len()))
+                    .map(|k| {
+                        let l = lines[k];
+                        let at = if k == i { re.find(l).map_or(0, |f| f.start()) } else { 0 };
+                        let start = l.floor_char_boundary(at.saturating_sub(LINE / 2));
+                        let end = l.ceil_char_boundary((start + LINE).min(l.len()));
+                        serde_json::json!({"line": k + 1, "text": format!("{}{}{}", if start > 0 { "…" } else { "" }, &l[start..end], if end < l.len() { "…" } else { "" })})
+                    })
+                    .collect();
+                serde_json::json!({"line": i + 1, "lines": around})
+            })
+            .collect();
+        Ok(serde_json::json!({"call": call, "pattern": pattern, "matches": hits.len(), "page": page, "pages": pages, "lines": lines.len(), "characters": text.chars().count(), "hits": shown}))
     }
 
     pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {
@@ -1034,12 +1072,13 @@ impl Hub {
             // Built-ins its type adds: as its version defines them (the
             // cluster's, if it's the current one), else as it has them.
             let name = spec.ty.split('@').next().unwrap_or_default();
-            let history = match c.agents.get(name).filter(|_| c.agent_id(name).as_deref() == Some(spec.ty.as_str())) {
-                Some(def) => def.search_history,
-                None => spec.tools.iter().any(|t| t.name == "search_history"),
-            };
-            if history {
+            let def = c.agents.get(name).filter(|_| c.agent_id(name).as_deref() == Some(spec.ty.as_str()));
+            let has = |t: &str| spec.tools.iter().any(|d| d.name == t);
+            if def.map_or(has("search_history"), |d| d.search_history) {
                 tools.push(subnet_core::tools::history_tool());
+            }
+            if def.map_or(has("grep_result"), |d| d.grep_results.is_some()) {
+                tools.push(subnet_core::tools::grep_tool());
             }
             let (mut idempotent, mut lazy) = (vec![], vec![]);
             let mut all_live = true;
@@ -1227,6 +1266,9 @@ impl Hub {
         if def.search_history {
             tools.push(subnet_core::tools::history_tool());
         }
+        if def.grep_results.is_some() {
+            tools.push(subnet_core::tools::grep_tool());
+        }
         let mut mcp = std::collections::BTreeMap::new();
         let mut idempotent = vec![];
         let mut lazy = vec![];
@@ -1292,7 +1334,7 @@ impl Hub {
             None => tenant,
         };
         let hooks = def.hooks.iter().filter_map(|h| c.hooks.get(h).map(|d| d.spec(h))).collect();
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results };
         Ok((spec, reserved))
     }
 

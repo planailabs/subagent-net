@@ -134,6 +134,10 @@ pub struct AgentDef {
     /// summarised away too, searchable.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub search_history: bool,
+    /// Its agents' tool results longer than this many characters reach the
+    /// model cut, with a note, and `grep_result` searches them whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grep_results: Option<usize>,
     /// Hooks (`hook` blocks) deciding at points of its agents' loop, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
@@ -632,6 +636,11 @@ impl Cluster {
             if self.nodes.contains_key(n) { Ok(()) } else { invalid(format!("{ctx}: unknown node {n:?}")) }
         };
         let spawnable = |n: &str| self.mixtures.contains_key(n) || self.agents.contains_key(n);
+        for (name, a) in &self.agents {
+            if a.grep_results.is_some_and(|n| n < 500) {
+                return invalid(format!("agent {name:?}: grep_results cuts results at 500 characters or more"));
+            }
+        }
         for (name, h) in &self.hooks {
             use subnet_core::hooks::{HookPoint, OnLost};
             let ctx = format!("hook {name:?}");

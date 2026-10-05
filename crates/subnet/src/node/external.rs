@@ -156,7 +156,9 @@ impl External {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
         self.waiters.lock().unwrap().insert(id, tx);
-        if let Err(e) = self.send(&ToProc::Think { id, agent, system, messages, tools }).await {
+        // A cut result's whole is for grep_result, not the model.
+        let messages: Vec<Message> = messages.iter().map(|m| Message { full: None, ..m.clone() }).collect();
+        if let Err(e) = self.send(&ToProc::Think { id, agent, system, messages: &messages, tools }).await {
             self.waiters.lock().unwrap().remove(&id);
             return Err(e);
         }

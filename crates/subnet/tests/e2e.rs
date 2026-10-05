@@ -593,11 +593,46 @@ async fn an_agent_searches_what_was_summarised_away() {
 }
 
 #[tokio::test]
+async fn a_long_tool_result_reaches_it_cut_and_it_greps_the_rest() {
+    let n = Net::new(&format!("{}mixture \"picker\" {{\n  agent = \"worker\"\n  mailboxes = [\"box\"]\n}}\n", cluster("  grep_results = 600"))).await;
+    n.node("s").await;
+    // A long message in a mailbox: what it peeks at is long.
+    let long: String = (1..=400).map(|i| if i == 321 { "line 321: the needle is here\n".to_string() } else { format!("line {i}: hay\n") }).collect();
+    n.hub.send(&Addr::root(), Addr::Mailbox("box".into()), long).await.unwrap();
+    n.llm.push(WORKER, |body| {
+        assert!(body["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "grep_result"));
+        tool_call("c1", "mailbox_peek", json!({"name": "box"}))
+    });
+    n.llm.push(WORKER, |body| {
+        let seen = last_tool_result(body);
+        assert!(seen.chars().count() < 800 && !seen.contains("needle"), "cut: {seen}");
+        assert!(seen.contains("grep_result(call: \"c1\""), "{seen}");
+        assert!(body["messages"].as_array().unwrap().iter().all(|m| m.get("full").is_none()), "the whole isn't sent");
+        tool_call("c2", "grep_result", json!({"call": "c1", "pattern": "NEEDLE"}))
+    });
+    n.llm.push(WORKER, |body| {
+        let r: Value = serde_json::from_str(&last_tool_result(body)).unwrap();
+        assert_eq!(r["matches"], 1, "{r}");
+        assert!(r["hits"][0]["lines"].as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("the needle is here")), "{r}");
+        tool_call("c3", "grep_result", json!({"call": "nope", "pattern": "x"}))
+    });
+    n.llm.push(WORKER, |body| {
+        assert!(last_tool_result(body).contains("no result of a tool call"), "{}", last_tool_result(body));
+        text(&["found it"])
+    });
+    let id = n.spawn("picker", "what's in the box?").await;
+    assert_eq!(n.mail().await["content"], "found it");
+    // The transcript keeps the whole.
+    let t = n.hub.transcript_of(id, true).await.unwrap();
+    assert!(t.messages.iter().any(|m| m.full.as_deref().is_some_and(|f| f.contains("needle"))));
+}
+
+#[tokio::test]
 async fn without_search_history_there_is_no_such_tool() {
     let n = Net::new(&cluster("")).await;
     n.node("s").await;
     n.llm.push(WORKER, |body| {
-        assert!(!body["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "search_history"));
+        assert!(!body["tools"].as_array().unwrap().iter().any(|t| matches!(t["function"]["name"].as_str(), Some("search_history" | "grep_result"))));
         text(&["fine"])
     });
     n.spawn("worker", "hi").await;

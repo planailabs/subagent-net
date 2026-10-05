@@ -77,6 +77,16 @@ pub fn history_tool() -> ToolDef {
     )
 }
 
+/// The built-in tool of an agent type with `grep_results`: searching a
+/// tool result that reached it cut (or any of its tool results).
+pub fn grep_tool() -> ToolDef {
+    def(
+        "grep_result",
+        "Search one of your tool results, all of it (a long one reaches you cut), for words or a regex (case-insensitive): the matching lines with their numbers and `context` lines around (default 2), 30 matches a page. `call` is the tool call's id, as the cut note says.",
+        obj(json!({"call":{"type":"string"},"pattern":{"type":"string"},"context":{"type":"integer","minimum":0,"maximum":20},"page":{"type":"integer","minimum":1}}), &["call", "pattern"]),
+    )
+}
+
 /// Maps a built-in tool call to a hub op. `None` = not a built-in (an MCP tool).
 pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
     fn parse<T: for<'de> Deserialize<'de>>(args: &str) -> Result<T, String> {
@@ -135,6 +145,18 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
     fn one() -> u32 {
         1
     }
+    #[derive(Deserialize)]
+    struct Grep {
+        call: String,
+        pattern: String,
+        #[serde(default = "two")]
+        context: u32,
+        #[serde(default = "one")]
+        page: u32,
+    }
+    fn two() -> u32 {
+        2
+    }
     let a = &call.function.arguments;
     Some(match call.function.name.as_str() {
         "spawn_agent" => parse::<Spawn>(a).map(|s| Op::Spawn { ty: s.ty, prompt: s.prompt, tenant: None }),
@@ -148,6 +170,7 @@ pub fn builtin_op(call: &ToolCall) -> Option<Result<Op, String>> {
         "mailbox_take" => parse::<Mailbox>(a).map(|m| Op::MailboxTake { name: m.name, max: m.max.max(1) }),
         "mailbox_peek" => parse::<Mailbox>(a).map(|m| Op::MailboxPeek { name: m.name, max: m.max.max(1) }),
         "search_history" => parse::<Search>(a).map(|s| Op::SearchHistory { pattern: s.pattern, page: s.page.max(1) }),
+        "grep_result" => parse::<Grep>(a).map(|g| Op::GrepResult { call: g.call, pattern: g.pattern, context: g.context.min(20), page: g.page.max(1) }),
         _ => return None,
     })
 }

@@ -67,6 +67,8 @@ pub enum Op {
     BlobGet { reference: String },
     /// Search the caller's own whole conversation (`search_history`).
     SearchHistory { pattern: String, page: u32 },
+    /// Search one of the caller's tool results, all of it (`grep_result`).
+    GrepResult { call: String, pattern: String, context: u32, page: u32 },
     /// A whole blob, as `{mime, base64}` (nodes fetching images for a model;
     /// not a tool).
     BlobRaw { reference: String },

@@ -166,6 +166,10 @@ pub struct Spec {
     /// Decisions made outside it at points of its loop (`hooks`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookSpec>,
+    /// Tool results longer than this (characters) reach the model cut to it,
+    /// with a note; `grep_result` searches the whole. `None`: never cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grep_results: Option<usize>,
 }
 
 impl Spec {
@@ -186,6 +190,7 @@ impl Spec {
             vision: None,
             group_events: false,
             hooks: vec![],
+            grep_results: None,
         }
     }
 }
@@ -1566,7 +1571,17 @@ impl Agent {
     /// Marks a call done and records its result in the transcript.
     fn finish_call(&mut self, call_id: &str, content: String) {
         self.set_call(call_id, CallState::Done);
-        self.messages.push(Message::tool(call_id, content));
+        let message = match self.spec.grep_results {
+            // Searching results isn't cut again (they're paged).
+            Some(over) if content.chars().count() > over && !self.is_search(call_id) => cut_result(call_id, content, over),
+            _ => Message::tool(call_id, content),
+        };
+        self.messages.push(message);
+    }
+
+    /// A call of `grep_result` or `search_history`.
+    fn is_search(&self, call_id: &str) -> bool {
+        self.messages.iter().rev().flat_map(|m| &m.tool_calls).find(|c| c.id == call_id).is_some_and(|c| matches!(c.function.name.as_str(), "grep_result" | "search_history"))
     }
 
     fn wait_ids(children: &BTreeMap<AgentId, Vec<Report>>, call: &ToolCall) -> Result<Vec<AgentId>, String> {
@@ -1767,3 +1782,24 @@ fn first_sentence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// A tool result cut to its first `over` characters (on a line's end when
+/// one is near), with a note saying how to search the rest; the whole is kept
+/// in `full`.
+pub fn cut_result(call_id: &str, content: String, over: usize) -> Message {
+    let total = content.chars().count();
+    let end = content.char_indices().nth(over).map_or(content.len(), |(i, _)| i);
+    let head = &content[..end];
+    // Back to the last line break in the last fifth, so lines stay whole.
+    let head = match head.rfind('\n') {
+        Some(i) if i >= end - end / 5 => &head[..i],
+        _ => head,
+    };
+    let lines = content.lines().count();
+    let shown = format!(
+        "{head}\n[cut: this result is {total} characters ({lines} lines); you see the first {}. grep_result(call: {call_id:?}, pattern: …) searches all of it]",
+        head.chars().count()
+    );
+    Message { full: Some(content), ..Message::tool(call_id, shown) }
+}
+

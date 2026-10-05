@@ -101,6 +101,10 @@ impl Client {
                     *n = wire_name(n);
                 }
             }
+            // A cut result's whole is for grep_result, not the model.
+            if let Some(o) = m.as_object_mut() {
+                o.remove("full");
+            }
             // Images go out as content parts after the text (OpenAI's form).
             if let Some(Value::Array(images)) = m.as_object_mut().and_then(|o| o.remove("images")) {
                 let text = m.get("content").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -343,6 +347,15 @@ mod tests {
         assert_eq!(parts[0], json!({"type": "text", "text": "what's this?"}));
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,iVBO");
         assert!(b["messages"][0].get("images").is_none());
+    }
+
+    #[test]
+    fn a_cut_results_whole_stays_home() {
+        let c = Client::new(cfg(false), None);
+        let m = subnet_core::chat::Message { full: Some("all of it".into()), ..Message::tool("c1", "some [cut]") };
+        let b = c.body(&[Message::user("go"), m], &[]);
+        assert_eq!(b["messages"][1]["content"], "some [cut]");
+        assert!(b["messages"][1].get("full").is_none());
     }
 
     #[test]

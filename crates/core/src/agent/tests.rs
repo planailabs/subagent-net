@@ -1247,3 +1247,16 @@ fn lost_hooks_run_again_or_on_lost_decides_and_bad_answers_count_as_errors() {
     assert!(h.hook_done("h9.0", Outcome::allow()).is_empty());
     h.crash();
 }
+
+#[test]
+fn a_long_result_is_cut_on_a_line_with_the_whole_kept() {
+    let content: String = (0..100).map(|i| format!("row {i:03}\n")).collect();
+    let m = super::cut_result("c7", content.clone(), 50);
+    let shown = m.content.unwrap();
+    assert!(shown.starts_with("row 000\nrow 001") && !shown.contains("row 007"), "{shown}");
+    assert!(shown.contains("this result is 800 characters (100 lines); you see the first 47. grep_result(call: \"c7\""), "{shown}");
+    assert_eq!(m.full.as_deref(), Some(content.as_str()));
+    // No line break near the end: cut where it is, on a character.
+    let m = super::cut_result("c8", "ä".repeat(30), 10);
+    assert!(m.content.unwrap().starts_with(&format!("{}\n[cut", "ä".repeat(10))));
+}
