@@ -1,6 +1,7 @@
 //! Hooks: decisions made outside an agent at points of its own loop (before
-//! a tool runs, after it ran, before a message reaches the model, when a
-//! turn ends, before a compaction). A hook run is an effect (`RunHook`) and
+//! a tool runs, after it ran, before a message reaches the model, before
+//! each model call, when a turn ends, before a compaction). Any hook may
+//! also inject messages: they reach the model before its next call. A hook run is an effect (`RunHook`) and
 //! its answer an event (`HookDone`): replays fold the answer and never run
 //! the hook again; a hook that was running when its runner died is run
 //! again if it's idempotent, else its `on_lost` decides. No I/O here.
@@ -20,6 +21,9 @@ pub enum HookPoint {
     PostTool,
     /// A message is about to reach the model: pass it, drop it, rewrite it, or add a note.
     OnMessage,
+    /// The model is about to be called (every call, after tool results
+    /// too): let it, injecting messages for this call (context from outside).
+    PreModel,
     /// The model ended its turn: let it end, or continue with a message.
     OnTurnEnd,
     /// The turn's answer is about to go out: pass it or rewrite it.
@@ -34,6 +38,7 @@ impl HookPoint {
             HookPoint::PreTool => "pre_tool",
             HookPoint::PostTool => "post_tool",
             HookPoint::OnMessage => "on_message",
+            HookPoint::PreModel => "pre_model",
             HookPoint::OnTurnEnd => "on_turn_end",
             HookPoint::OnReport => "on_report",
             HookPoint::PreCompact => "pre_compact",
@@ -48,7 +53,7 @@ impl HookPoint {
             HookPoint::PostTool | HookPoint::OnMessage => matches!(d, Allow | Deny | Rewrite),
             HookPoint::OnTurnEnd => matches!(d, Allow | Continue),
             HookPoint::OnReport => matches!(d, Allow | Rewrite),
-            HookPoint::PreCompact => matches!(d, Allow),
+            HookPoint::PreCompact | HookPoint::PreModel => matches!(d, Allow),
         }
     }
 }
@@ -142,15 +147,19 @@ pub struct Outcome {
     /// Allow: something to add (to a result, a message).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Any decision but an error: messages for the model, added before its
+    /// next call (`[from hook <name>]` each).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inject: Vec<String>,
 }
 
 impl Outcome {
     pub fn allow() -> Self {
-        Outcome { decision: Decision::Allow, reason: None, args: None, text: None, note: None }
+        Outcome { decision: Decision::Allow, reason: None, args: None, text: None, note: None, inject: vec![] }
     }
 
     pub fn error(reason: impl Into<String>) -> Self {
-        Outcome { decision: Decision::Error, reason: Some(reason.into()), args: None, text: None, note: None }
+        Outcome { decision: Decision::Error, reason: Some(reason.into()), ..Outcome::allow() }
     }
 
     /// The outcome that stands in for a lost or failed one, by `on_lost`.
@@ -165,7 +174,7 @@ impl Outcome {
             },
             OnLost::Fail => Decision::Error,
         };
-        Outcome { decision, reason: Some(format!("hook {} couldn't decide: {why}", h.name)), args: None, text: None, note: None }
+        Outcome { decision, reason: Some(format!("hook {} couldn't decide: {why}", h.name)), ..Outcome::allow() }
     }
 }
 

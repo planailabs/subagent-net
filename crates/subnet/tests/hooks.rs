@@ -79,6 +79,26 @@ async fn a_url_hook_denies_a_call_continues_a_turn_and_signs_the_answer() {
 }
 
 #[tokio::test]
+async fn a_pre_model_hook_injects_context_the_model_reads() {
+    let (url, seen) = hook_server(|q| match q["point"].as_str().unwrap() {
+        "pre_model" => json!({"decision": "allow", "inject": [format!("The time is 09:00 (call {}).", q["input"]["messages"])]}),
+        _ => json!({"decision": "allow"}),
+    })
+    .await;
+    let hooks = format!("hook \"clock\" {{\n  on = \"pre_model\"\n  run {{ url = {url:?} }}\n}}\n");
+    let n = Net::new(&cluster(&hooks, &["clock"])).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |body| {
+        let last = body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().to_string();
+        assert!(last.starts_with("[from hook clock]\nThe time is 09:00"), "{last}");
+        text(&["it's nine"])
+    });
+    n.spawn("worker", "what time is it?").await;
+    assert_eq!(n.mail().await["content"], "it's nine");
+    assert_eq!(seen.lock().unwrap().iter().filter(|q| q["point"] == "pre_model").count(), 1);
+}
+
+#[tokio::test]
 async fn when_false_lets_it_through_without_asking() {
     let (url, seen) = hook_server(|_| json!({"decision": "deny"})).await;
     let hooks = format!("hook \"policy\" {{\n  on = \"pre_tool\"\n  when = \"input.args.size() > 0\"\n  run {{ url = {url:?} }}\n}}\n");
@@ -149,7 +169,7 @@ async fn a_person_settles_a_waiting_hook() {
     assert_eq!((t["hooks"][0]["name"].as_str(), t["hooks"][0]["run"].as_str()), (Some("gate"), Some("h1.0")));
     // Only a run it waits for.
     assert!(n.hub.settle_hook(id, "h9.0", subnet_core::hooks::Outcome::allow()).await.is_err());
-    let deny = subnet_core::hooks::Outcome { decision: subnet_core::hooks::Decision::Deny, reason: Some("no thanks".into()), args: None, text: None, note: None };
+    let deny = subnet_core::hooks::Outcome { decision: subnet_core::hooks::Decision::Deny, reason: Some("no thanks".into()), args: None, text: None, note: None, inject: vec![] };
     n.hub.settle_hook(id, "h1.0", deny).await.unwrap();
     assert_eq!(n.mail().await["content"], "fine");
 }

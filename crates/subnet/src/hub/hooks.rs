@@ -22,6 +22,7 @@ fn decisions(p: HookPoint) -> &'static str {
         HookPoint::OnTurnEnd => "\"allow\" (the turn ends) or \"continue\" (with a \"text\": what the agent should do next)",
         HookPoint::OnReport => "\"allow\" or \"rewrite\" (the answer as \"text\")",
         HookPoint::PreCompact => "\"allow\" (optionally with \"text\": instructions for the summary)",
+        HookPoint::PreModel => "\"allow\" (with \"inject\": a list of messages it should read before this call, if any)",
     }
 }
 
@@ -86,7 +87,7 @@ impl Hub {
     async fn hook_agent(&self, agent: AgentId, hook: &HookSpec, mixture: &str, question: &Value) -> Result<Outcome, String> {
         let inbox = Addr::Mailbox(format!("hook:{agent}:{}:{}", hook.name, uuid::Uuid::new_v4().simple()));
         let prompt = format!(
-            "You decide for a hook ({}, at {}) of the agent {agent}: something in its work waits for your decision.\n\n{}\n\nAnswer with only a JSON object: {{\"decision\": …, \"reason\": …}} where decision is {}.",
+            "You decide for a hook ({}, at {}) of the agent {agent}: something in its work waits for your decision.\n\n{}\n\nAnswer with only a JSON object: {{\"decision\": …, \"reason\": …}} where decision is {}. Any decision may also carry \"inject\": a list of messages the agent reads before its next model call.",
             hook.name,
             hook.on.name(),
             serde_json::to_string_pretty(question).unwrap_or_default(),

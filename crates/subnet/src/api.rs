@@ -680,7 +680,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<SettleHook, _, _>(move |_, a: SettleArgs| {
         let h = h.clone();
         async move {
-            let outcome = subnet_core::hooks::Outcome { decision: a.decision, reason: a.reason, args: a.args, text: a.text, note: None };
+            let outcome = subnet_core::hooks::Outcome { decision: a.decision, reason: a.reason, args: a.args, text: a.text, note: None, inject: vec![] };
             Ok(h.settle_hook(a.id, &a.run, outcome).await?)
         }
     });

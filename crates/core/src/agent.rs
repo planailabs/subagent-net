@@ -368,6 +368,8 @@ pub enum HookAt {
     TurnEnd { content: String },
     /// Compact up to here (`pre_compact`).
     Compact { upto: usize },
+    /// Call the model (`pre_model`).
+    Model,
 }
 
 /// Where one tool call of the current assistant message stands.
@@ -500,6 +502,10 @@ pub struct Agent {
     /// `pre_compact` hooks' instructions for the coming summary.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compact_notes: Vec<String>,
+    /// The coming model call's `pre_model` hooks have run (what they
+    /// injected is in): a retry of the call (a recovery) doesn't run them again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_hooked: bool,
 }
 
 fn is_zero64(n: &u64) -> bool {
@@ -537,6 +543,7 @@ impl Agent {
             hook_runs: 0,
             continues: 0,
             compact_notes: vec![],
+            model_hooked: false,
         }
     }
 
@@ -716,6 +723,30 @@ impl Agent {
         self.phase = Phase::Hooking { chain, at: HookAt::Compact { upto } };
     }
 
+    /// The model is to be called: its `pre_model` hooks first, if it has any.
+    fn begin_call(&mut self, fx: &mut Vec<Effect>) {
+        let hooks = crate::hooks::at(&self.spec.hooks, HookPoint::PreModel, "");
+        if hooks.is_empty() || self.model_hooked {
+            self.phase = Phase::Thinking { running: true };
+            fx.push(Effect::CallLlm);
+            return;
+        }
+        let last = self.messages.last().map(|m| json!({"role": m.role, "content": m.content}));
+        let chain = self.chain(hooks, json!({"messages": self.messages.len(), "last": last}));
+        self.run_hook(&chain, fx);
+        self.phase = Phase::Hooking { chain, at: HookAt::Model };
+    }
+
+    /// What a hook's answer injects: messages for the model's next call.
+    fn injected(&mut self, h: &HookSpec, o: &Outcome) {
+        if o.decision == Decision::Error {
+            return;
+        }
+        for t in o.inject.iter().filter(|t| !t.trim().is_empty()) {
+            self.notes.push(format!("[from hook {}]\n{t}", h.name));
+        }
+    }
+
     /// Lets held messages through, in order: the first one's hooks start;
     /// one without hooks goes on to the inbox.
     fn screen(&mut self, fx: &mut Vec<Effect>) {
@@ -808,6 +839,7 @@ impl Agent {
     fn pre_tool_done(&mut self, call_id: &str, mut chain: HookChain, outcome: Outcome, fx: &mut Vec<Effect>) {
         let h = self.hook_of(&chain).clone();
         let o = judged(&h, outcome);
+        self.injected(&h, &o);
         match o.decision {
             Decision::Allow | Decision::Rewrite => {
                 if o.decision == Decision::Rewrite
@@ -840,6 +872,7 @@ impl Agent {
     fn post_tool_done(&mut self, call_id: &str, mut chain: HookChain, result: String, outcome: Outcome, fx: &mut Vec<Effect>) {
         let h = self.hook_of(&chain).clone();
         let o = judged(&h, outcome);
+        self.injected(&h, &o);
         match o.decision {
             Decision::Allow | Decision::Rewrite => {
                 let mut result = if o.decision == Decision::Rewrite { o.text.unwrap_or(result) } else { result };
@@ -866,6 +899,7 @@ impl Agent {
         let mut chain = s.chain.take().expect("checked by hook_done");
         let h = self.hook_of(&chain).clone();
         let o = judged(&h, outcome);
+        self.injected(&h, &o);
         match o.decision {
             Decision::Allow | Decision::Rewrite => {
                 if o.decision == Decision::Rewrite
@@ -898,6 +932,7 @@ impl Agent {
         let Phase::Hooking { mut chain, at } = std::mem::replace(&mut self.phase, Phase::Idle) else { unreachable!("checked by hook_done") };
         let h = self.hook_of(&chain).clone();
         let o = judged(&h, outcome);
+        self.injected(&h, &o);
         match (at, o.decision) {
             (HookAt::TurnEnd { .. }, Decision::Continue) if self.continues < h.max_continue => {
                 self.continues += 1;
@@ -917,6 +952,17 @@ impl Agent {
                 } else {
                     self.end_turn(Status::Idle, content, fx);
                     self.advance(fx);
+                }
+            }
+            (HookAt::Model, Decision::Allow) => {
+                if self.next_hook(&mut chain, fx) {
+                    self.phase = Phase::Hooking { chain, at: HookAt::Model };
+                } else {
+                    // What the hooks injected (and what came meanwhile) goes in now.
+                    self.inject_pending();
+                    self.model_hooked = true;
+                    self.phase = Phase::Thinking { running: true };
+                    fx.push(Effect::CallLlm);
                 }
             }
             (HookAt::Compact { upto }, Decision::Allow) => {
@@ -1229,6 +1275,7 @@ impl Agent {
             }
             Event::LlmDelta { delta } => self.acc.push(delta),
             Event::LlmDone => {
+                self.model_hooked = false;
                 if let Some(u) = self.acc.usage.take() {
                     self.usage.prompt_tokens += u.prompt_tokens;
                     self.usage.completion_tokens += u.completion_tokens;
@@ -1436,10 +1483,7 @@ impl Agent {
                     }
                     match self.compact_point() {
                         Some(upto) => self.begin_compaction(upto, fx),
-                        None => {
-                            self.phase = Phase::Thinking { running: true };
-                            fx.push(Effect::CallLlm);
-                        }
+                        None => self.begin_call(fx),
                     }
                     // Asked for or not, it's done (or there was nothing to compact).
                     self.compact_asked = false;

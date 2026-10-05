@@ -311,7 +311,7 @@ A **hook** is a decision made outside an agent at a point of its own loop. Hooks
 
 ```hcl
 hook "no-force-push" {
-  on         = "pre_tool"            # pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact
+  on         = "pre_tool"            # pre_tool, post_tool, on_message, pre_model, on_turn_end, on_report, pre_compact
   tools      = ["shell.*"]           # pre/post_tool: the tools it's for (`*` patterns; none: all)
   # from     = ["user:*"]            # on_message: the senders it's for
   when       = "input.args.cmd.contains('--force')"   # optional CEL over point, input, agent
@@ -328,13 +328,16 @@ hook "no-force-push" {
 | `pre_tool` | `{tool, args, call_id}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`); `rewrite` with new `args` |
 | `post_tool` | `{tool, args, call_id, result}` | `allow` (a `note` is added to the result); `deny` (the result is withheld); `rewrite` (`text` replaces it) |
 | `on_message` | `{from, content, reply}`, before a message reaches the model; messages behind a held one wait, so order is kept | `allow` (with a `note`); `deny` (dropped); `rewrite` (`text`) |
+| `pre_model` | `{messages, last: {role, content}}`, before every model call (after tool results too; once a call: a retried call after a recovery doesn't ask again) | `allow`, with `inject`: context for this call (the time, what a memory recalls, state from outside) |
 | `on_turn_end` | `{content}`, when the model ends its turn | `allow`; `continue` with `text`: the model goes on with `[from hook x]` and the text, at most `max_continue` times per turn |
 | `on_report` | `{content}`, the answer about to go out (after `on_turn_end`) | `allow`; `rewrite` (`text`) |
 | `pre_compact` | `{upto, messages}`, before a compaction | `allow`, with `text`: instructions added to that summary's request |
 
-Several hooks at a point run one after the other, each seeing what the one before decided (rewritten arguments, results, messages). An outcome is `{decision, reason?, args?, text?, note?}`.
+Several hooks at a point run one after the other, each seeing what the one before decided (rewritten arguments, results, messages). An outcome is `{decision, reason?, args?, text?, note?, inject?}`.
 
-**Replayable and resumable.** A hook run is an effect (`RunHook { id, hook, input }`, ids `h<n>.<k>`, deterministic) and its answer an event (`HookDone { id, outcome }`); `Agent::apply` stays pure. While it waits the agent is in an explicit state: a tool call `pre_hook` or `post_hook` (then `cleared` to start), a held message in `screening`, or the phase `hooking` (turn end, compaction). Replays fold the answers and never run a hook again; forks and upgrades copy them. `Recovered` runs a hook that was running again if it's `idempotent`, else settles it by `on_lost` (deterministically, in `apply`); after a restart the hub recovers agents waiting for hooks that no node will place. An answer that's late, broken or a decision its point doesn't take counts as an error: `on_lost` decides (`deny` is the careful side: a call denied, a result withheld, a message dropped, a turn just ends; `fail`: the agent fails, a tool call first getting the hook's error as its result).
+**Injecting messages:** any hook's answer (at any point, any decision but an error) may carry `inject: ["…", …]`: each becomes a message the model reads before its next call (`[from hook <name>]` and the text), after what it's already been given (a tool's result, the turn's messages). `pre_model` is the point for it: its hooks run before every call, so what they inject is there for that call. Injected messages are part of the conversation (replayed, compacted and searched like any other); one from a hook at a turn's end waits for the next turn.
+
+**Replayable and resumable.** A hook run is an effect (`RunHook { id, hook, input }`, ids `h<n>.<k>`, deterministic) and its answer an event (`HookDone { id, outcome }`); `Agent::apply` stays pure. While it waits the agent is in an explicit state: a tool call `pre_hook` or `post_hook` (then `cleared` to start), a held message in `screening`, or the phase `hooking` (turn end, compaction, a model call). Replays fold the answers and never run a hook again; forks and upgrades copy them. `Recovered` runs a hook that was running again if it's `idempotent`, else settles it by `on_lost` (deterministically, in `apply`); after a restart the hub recovers agents waiting for hooks that no node will place. An answer that's late, broken or a decision its point doesn't take counts as an error: `on_lost` decides (`deny` is the careful side: a call denied, a result withheld, a message dropped, a turn just ends; `fail`: the agent fails, a tool call first getting the hook's error as its result).
 
 **Where hooks run:** the hub runs `RunHook` from its own replica (like reports): `when` first (false: allowed, the hook isn't asked; checked when the cluster is applied), then the hook: an MCP tool on any node running its server (waited for after a restart, within the timeout), an HTTP POST, or an agent spawned with the question and the decisions its point takes, whose answer (a JSON object, words around it allowed) is the outcome; it's cancelled after. Each gets `{hook, point, agent: {id, type}, input}`; the timeout bounds it all.
 

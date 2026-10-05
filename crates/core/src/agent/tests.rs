@@ -1260,3 +1260,52 @@ fn a_long_result_is_cut_on_a_line_with_the_whole_kept() {
     let m = super::cut_result("c8", "ä".repeat(30), 10);
     assert!(m.content.unwrap().starts_with(&format!("{}\n[cut", "ä".repeat(10))));
 }
+
+#[test]
+fn pre_model_hooks_inject_context_before_every_model_call() {
+    let mut h = hooked(vec![hook("clock", HookPoint::PreModel, &[]), hook("memory", HookPoint::PreModel, &[])]);
+    // Before the first call: both hooks, in order, then the model.
+    let fx = h.user("what's on today?");
+    let r = runs(&fx);
+    assert_eq!((r[0].0.as_str(), r[0].1.as_str()), ("h1.0", "clock"));
+    assert_eq!(r[0].2["last"]["content"], "what's on today?");
+    assert!(!fx.contains(&Effect::CallLlm), "the model waits for its hooks");
+    let fx = h.hook_done("h1.0", Outcome { inject: vec!["It's Monday, 09:00.".into()], ..Outcome::allow() });
+    assert_eq!(runs(&fx)[0].0, "h1.1");
+    let fx = h.hook_done("h1.1", Outcome { inject: vec!["You promised to call Ann.".into(), " ".into()], ..Outcome::allow() });
+    assert!(fx.contains(&Effect::CallLlm));
+    let c = h.contents();
+    assert_eq!(c[c.len() - 2..].iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["[from hook clock]\nIt's Monday, 09:00.", "[from hook memory]\nYou promised to call Ann."]);
+    // Its node dies mid-call: the call is made again, without asking the hooks again.
+    let fx = h.crash();
+    assert!(fx.contains(&Effect::CallLlm) && runs(&fx).is_empty(), "{fx:?}");
+    // After a tool's result, before the next call: again.
+    h.call(0, "c1", "cal.today", "{}");
+    h.done();
+    let fx = h.result("c1", "dentist at 11");
+    assert_eq!(runs(&fx)[0].0, "h2.0");
+    // A deny isn't a pre_model decision: on_lost (deny) lets the call go on, nothing injected.
+    let fx = h.hook_done("h2.0", Outcome { decision: Decision::Deny, inject: vec!["ignored".into()], ..Outcome::allow() });
+    assert_eq!(runs(&fx)[0].0, "h2.1");
+    let fx = h.hook_done("h2.1", Outcome::allow());
+    assert!(fx.contains(&Effect::CallLlm));
+    assert!(!h.contents().iter().any(|(_, t)| t.contains("ignored")));
+    h.crash();
+}
+
+#[test]
+fn any_hook_can_inject_messages_for_the_next_call() {
+    let mut h = hooked(vec![hook("watch", HookPoint::PostTool, &["*"])]);
+    h.user("go");
+    h.call(0, "c1", "shell.run", "{}");
+    h.done();
+    let fx = h.result("c1", "exit 1");
+    assert_eq!(runs(&fx)[0].0, "h1.0");
+    let fx = h.hook_done("h1.0", Outcome { inject: vec!["That command failed before: check the path.".into()], ..Outcome::allow() });
+    assert!(fx.contains(&Effect::CallLlm));
+    let c = h.contents();
+    assert_eq!(c[c.len() - 2].1, "exit 1", "the result as it was");
+    assert_eq!(c[c.len() - 1].1, "[from hook watch]\nThat command failed before: check the path.");
+    h.crash();
+}
+
