@@ -45,6 +45,9 @@ pub async fn wait_configured(hub: &Hub, name: &str) {
 pub struct Net {
     pub hub: Arc<Hub>,
     pub llm: MockLlm,
+    /// Mail the inbox handed over with the one `mail` returned (it gives
+    /// all that's waiting at once): the next calls return it, in order.
+    pending: std::sync::Mutex<std::collections::VecDeque<Value>>,
 }
 
 impl Net {
@@ -52,7 +55,7 @@ impl Net {
     pub async fn new(cluster: &str) -> Self {
         let llm = MockLlm::start().await;
         let hub = Hub::open(&db_url().await, None).await.unwrap();
-        let net = Self { hub, llm };
+        let net = Self { hub, llm, pending: Default::default() };
         net.apply(cluster).await;
         net
     }
@@ -73,13 +76,19 @@ impl Net {
         super::id_of(&v)
     }
 
+    /// The next mail to root, oldest first (waiting up to 10 s for one).
     pub async fn mail(&self) -> Value {
+        if let Some(m) = self.pending.lock().unwrap().pop_front() {
+            return m;
+        }
         let m = self.hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
-        if m.as_array().unwrap().is_empty() {
+        let mut all: std::collections::VecDeque<Value> = m.as_array().unwrap().iter().cloned().collect();
+        let Some(first) = all.pop_front() else {
             let agents = self.hub.op(&Addr::root(), Op::ListAgents).await.unwrap();
             panic!("no mail within timeout; agents: {agents}");
-        }
-        m[0].clone()
+        };
+        self.pending.lock().unwrap().extend(all);
+        first
     }
 
     pub async fn t(&self, id: AgentId) -> Value {
