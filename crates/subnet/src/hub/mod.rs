@@ -769,6 +769,7 @@ impl Hub {
             Op::BlobGet { reference } => j(self.blob_for_model(&reference).await),
             Op::SearchHistory { pattern, page } => j(self.search_history(caller, &pattern, page).await),
             Op::GrepResult { call, pattern, context, page } => j(self.grep_result(caller, &call, &pattern, context, page).await),
+            Op::ReadResult { call, from, to, full } => j(self.read_result(caller, &call, from, to, full).await),
             Op::BlobRaw { reference } => j(self.get_blob(&reference).await.map(|(mime, data)| serde_json::json!({"mime": mime, "base64": blobs::encode_b64(&data)}))),
         }
     }
@@ -879,17 +880,34 @@ impl Hub {
         Ok(serde_json::json!({"pattern": pattern, "matches": total, "page": page, "pages": pages, "messages": t.messages.len(), "hits": shown}))
     }
 
+    /// One of the caller's tool results, the whole of it (`full` when it was cut).
+    async fn result_text(&self, caller: &Addr, call: &str) -> Result<String, HubError> {
+        let Addr::Agent(id) = caller else { return bad("only an agent reads its own tool results") };
+        let t = self.transcript_of(*id, true).await?;
+        let m = t.messages.iter().find(|m| m.tool_call_id.as_deref() == Some(call)).ok_or_else(|| HubError::NotFound(format!("no result of a tool call {call:?} (the id is in the cut note)")))?;
+        Ok(m.full.clone().or_else(|| m.content.clone()).unwrap_or_default())
+    }
+
+    /// An agent reading one of its tool results by lines: `from` to `to`
+    /// (1-based, inclusive; no `to`: 50 lines, or with `full` to the end).
+    /// Unless `full`: at most `MAX_LINES` lines, each cut at `LINE`
+    /// characters and all at `TOTAL`. With where to read on.
+    pub async fn read_result(&self, caller: &Addr, call: &str, from: u32, to: Option<u32>, full: bool) -> Result<Value, HubError> {
+        let text = self.result_text(caller, call).await?;
+        let mut v = subnet_core::tools::read_lines(&text, from as usize, to.map(|t| t as usize), full).map_err(HubError::Bad)?;
+        v["call"] = serde_json::json!(call);
+        Ok(v)
+    }
+
     /// An agent searching one of its tool results, the whole of it (what the
     /// model saw may be cut: `grep_results`): matching lines with their
     /// numbers and `context` lines around, `GREP_PAGE` matches a page.
     pub async fn grep_result(&self, caller: &Addr, call: &str, pattern: &str, context: u32, page: u32) -> Result<Value, HubError> {
         const GREP_PAGE: usize = 30;
         const LINE: usize = 500;
-        let Addr::Agent(id) = caller else { return bad("only an agent searches its own tool results") };
         let re = regex::RegexBuilder::new(pattern).case_insensitive(true).size_limit(1 << 20).build().map_err(|e| HubError::Bad(format!("bad pattern: {e}")))?;
-        let t = self.transcript_of(*id, true).await?;
-        let m = t.messages.iter().find(|m| m.tool_call_id.as_deref() == Some(call)).ok_or_else(|| HubError::NotFound(format!("no result of a tool call {call:?} (the id is in the cut note)")))?;
-        let text = m.full.as_deref().or(m.content.as_deref()).unwrap_or_default();
+        let text = self.result_text(caller, call).await?;
+        let text = text.as_str();
         let lines: Vec<&str> = text.lines().collect();
         let hits: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| re.is_match(l)).map(|(i, _)| i).collect();
         let pages = hits.len().div_ceil(GREP_PAGE).max(1);
@@ -1340,7 +1358,7 @@ impl Hub {
             None => tenant,
         };
         let hooks = def.hooks.iter().filter_map(|h| c.hooks.get(h).map(|d| d.spec(h))).collect();
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results.as_ref().map(|g| g.over()), grep_except: def.grep_results.as_ref().map(|g| g.except().to_vec()).unwrap_or_default() };
         Ok((spec, reserved))
     }
 

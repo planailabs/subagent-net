@@ -1254,11 +1254,13 @@ fn a_long_result_is_cut_on_a_line_with_the_whole_kept() {
     let m = super::cut_result("c7", content.clone(), 50);
     let shown = m.content.unwrap();
     assert!(shown.starts_with("row 000\nrow 001") && !shown.contains("row 007"), "{shown}");
-    assert!(shown.contains("this result is 800 characters (100 lines); you see the first 47. grep_result(call: \"c7\""), "{shown}");
+    assert!(shown.ends_with("[cut: this result is 800 characters (100 lines); you see the first 47 (to line 6). grep_result(call: \"c7\", pattern: …) searches all of it; grep_result(call: \"c7\", from: 7) reads on]"), "{shown}");
     assert_eq!(m.full.as_deref(), Some(content.as_str()));
     // No line break near the end: cut where it is, on a character.
     let m = super::cut_result("c8", "ä".repeat(30), 10);
-    assert!(m.content.unwrap().starts_with(&format!("{}\n[cut", "ä".repeat(10))));
+    let shown = m.content.unwrap();
+    assert!(shown.starts_with(&format!("{}\n[cut", "ä".repeat(10))));
+    assert!(shown.contains("(to line 1)") && shown.contains("from: 1) reads on"), "a line cut in the middle is read again: {shown}");
 }
 
 #[test]
@@ -1306,6 +1308,22 @@ fn any_hook_can_inject_messages_for_the_next_call() {
     let c = h.contents();
     assert_eq!(c[c.len() - 2].1, "exit 1", "the result as it was");
     assert_eq!(c[c.len() - 1].1, "[from hook watch]\nThat command failed before: check the path.");
+    h.crash();
+}
+
+#[test]
+fn results_of_excepted_tools_are_never_cut() {
+    let mut h = H::new(Spec { grep_results: Some(50), grep_except: vec!["*.read_book".into()], ..spec() });
+    let long = "a line of a book\n".repeat(20);
+    h.user("read me something");
+    h.call(0, "c1", "world.read_book", "{}");
+    h.call(1, "c2", "web.scrape", "{}");
+    h.done();
+    h.result("c1", &long);
+    h.result("c2", &long);
+    let of = |id: &str| h.a.messages.iter().find(|m| m.tool_call_id.as_deref() == Some(id)).and_then(|m| m.content.clone()).unwrap();
+    assert_eq!(of("c1"), long, "the book's page whole");
+    assert!(of("c2").contains("[cut: this result is 340 characters"), "the scrape cut: {}", of("c2"));
     h.crash();
 }
 

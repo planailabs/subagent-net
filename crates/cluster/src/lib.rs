@@ -94,6 +94,34 @@ impl Executor {
     }
 }
 
+/// `grep_results`: a limit, or a limit and the tools never cut.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum GrepResults {
+    Over(usize),
+    Block {
+        over: usize,
+        /// `<mcp>.<tool>` patterns (`*` for any run of characters).
+        #[serde(default)]
+        except: Vec<String>,
+    },
+}
+
+impl GrepResults {
+    pub fn over(&self) -> usize {
+        match self {
+            GrepResults::Over(n) | GrepResults::Block { over: n, .. } => *n,
+        }
+    }
+
+    pub fn except(&self) -> &[String] {
+        match self {
+            GrepResults::Over(_) => &[],
+            GrepResults::Block { except, .. } => except,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentDef {
@@ -135,9 +163,11 @@ pub struct AgentDef {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub search_history: bool,
     /// Its agents' tool results longer than this many characters reach the
-    /// model cut, with a note, and `grep_result` searches them whole.
+    /// model cut, with a note, and `grep_result` searches them whole
+    /// (`grep_results = 12000`, or `{ over = 12000, except = ["*.read_book"] }`:
+    /// those tools' results are never cut).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grep_results: Option<usize>,
+    pub grep_results: Option<GrepResults>,
     /// Hooks (`hook` blocks) deciding at points of its agents' loop, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
@@ -637,7 +667,7 @@ impl Cluster {
         };
         let spawnable = |n: &str| self.mixtures.contains_key(n) || self.agents.contains_key(n);
         for (name, a) in &self.agents {
-            if a.grep_results.is_some_and(|n| n < 500) {
+            if a.grep_results.as_ref().is_some_and(|g| g.over() < 500) {
                 return invalid(format!("agent {name:?}: grep_results cuts results at 500 characters or more"));
             }
         }

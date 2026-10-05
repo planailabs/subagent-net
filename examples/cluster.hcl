@@ -26,7 +26,7 @@ agent "deepseek-flash" {
   approve  = ["memory.delete"]
   group_events = true                         # optional: events from routes in one message per call
   search_history = true                       # optional: the built-in search_history
-  grep_results = 8000                         # optional: longer tool results reach the model cut; grep_result searches them
+  grep_results = { over = 8000, except = ["*.read_book"] }   # optional: longer tool results reach the model cut, except these tools'; grep_result searches or reads them (a plain number works too)
   hooks = ["careful"]                         # optional: hooks deciding at points of its loop (below)
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off
   vision   = { max_px = 1024 }                # its model sees images from tools (formats, max_px, keep)

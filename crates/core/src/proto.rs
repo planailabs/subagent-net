@@ -69,6 +69,9 @@ pub enum Op {
     SearchHistory { pattern: String, page: u32 },
     /// Search one of the caller's tool results, all of it (`grep_result`).
     GrepResult { call: String, pattern: String, context: u32, page: u32 },
+    /// Read one of the caller's tool results by lines (`grep_result` with
+    /// `from`/`to`, or `full`): `to` none is 50 lines on, or with `full` the end.
+    ReadResult { call: String, from: u32, to: Option<u32>, full: bool },
     /// A whole blob, as `{mime, base64}` (nodes fetching images for a model;
     /// not a tool).
     BlobRaw { reference: String },

@@ -170,6 +170,9 @@ pub struct Spec {
     /// with a note; `grep_result` searches the whole. `None`: never cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grep_results: Option<usize>,
+    /// Tools (`<mcp>.<tool>` patterns) whose results are never cut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grep_except: Vec<String>,
 }
 
 impl Spec {
@@ -191,6 +194,7 @@ impl Spec {
             group_events: false,
             hooks: vec![],
             grep_results: None,
+            grep_except: vec![],
         }
     }
 }
@@ -1617,10 +1621,15 @@ impl Agent {
         self.set_call(call_id, CallState::Done);
         let message = match self.spec.grep_results {
             // Searching results isn't cut again (they're paged).
-            Some(over) if content.chars().count() > over && !self.is_search(call_id) => cut_result(call_id, content, over),
+            Some(over) if content.chars().count() > over && !self.is_search(call_id) && !self.never_cut(call_id) => cut_result(call_id, content, over),
             _ => Message::tool(call_id, content),
         };
         self.messages.push(message);
+    }
+
+    /// A call of a tool the spec says is never cut (`grep_except`).
+    fn never_cut(&self, call_id: &str) -> bool {
+        !self.spec.grep_except.is_empty() && self.run_of(call_id).is_some_and(|run| self.spec.grep_except.iter().any(|p| crate::hooks::glob(p, &run.function.name)))
     }
 
     /// A call of `grep_result` or `search_history`.
@@ -1840,8 +1849,12 @@ pub fn cut_result(call_id: &str, content: String, over: usize) -> Message {
         _ => head,
     };
     let lines = content.lines().count();
+    // Where reading on starts: after the last whole line shown (a line cut
+    // in the middle is read again).
+    let seen = head.lines().count();
+    let next = if content[head.len()..].starts_with('\n') { seen + 1 } else { seen.max(1) };
     let shown = format!(
-        "{head}\n[cut: this result is {total} characters ({lines} lines); you see the first {}. grep_result(call: {call_id:?}, pattern: …) searches all of it]",
+        "{head}\n[cut: this result is {total} characters ({lines} lines); you see the first {} (to line {seen}). grep_result(call: {call_id:?}, pattern: …) searches all of it; grep_result(call: {call_id:?}, from: {next}) reads on]",
         head.chars().count()
     );
     Message { full: Some(content), ..Message::tool(call_id, shown) }

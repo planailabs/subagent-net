@@ -271,3 +271,16 @@ fn grouped_events_are_a_types_choice() {
     assert_ne!(grouped.agent_id("a"), plain.agent_id("a"), "a new version of the type");
     assert!(!serde_json::to_string(&plain.agents["a"]).unwrap().contains("group_events"), "unset, a type's id stays");
 }
+
+#[test]
+fn grep_results_is_a_limit_or_a_limit_with_exceptions() {
+    let base = "node \"n\" {}\nagent \"a\" {\n  credential = { env = \"K\", base_url = \"http://x\" }\n  model = \"m\"\n  system_prompt = \"s\"\n  nodes = [\"n\"]\n  GREP\n}\n";
+    let c = parse(&base.replace("GREP", "grep_results = 9000")).unwrap();
+    let g = c.agents["a"].grep_results.as_ref().unwrap();
+    assert_eq!((g.over(), g.except().len()), (9000, 0));
+    let c = parse(&base.replace("GREP", "grep_results = { over = 12000, except = [\"*.read_book\"] }")).unwrap();
+    let g = c.agents["a"].grep_results.as_ref().unwrap();
+    assert_eq!((g.over(), g.except()), (12000, &["*.read_book".to_string()][..]));
+    assert!(parse(&base.replace("GREP", "grep_results = { over = 100 }")).unwrap_err().to_string().contains("500 characters or more"));
+}
+
