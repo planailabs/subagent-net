@@ -570,6 +570,8 @@ async fn an_agent_searches_what_was_summarised_away() {
         let r: Value = serde_json::from_str(&last_tool_result(body)).unwrap();
         assert_eq!(r["matches"], 1, "{r}");
         assert_eq!(r["hits"][0]["summarised"], false, "the task stays: {r}");
+        assert_eq!(r.as_object().unwrap().keys().last().map(String::as_str), Some("next_page"), "paging comes last: {r}");
+        assert!(r["next_page"].is_null(), "one page: {r}");
         text(&["it's Swordfish-42"])
     });
     n.hub.send(&Addr::root(), Addr::Agent(id), "what was the code?".into()).await.unwrap();
@@ -614,12 +616,14 @@ async fn a_long_tool_result_reaches_it_cut_and_it_greps_the_rest() {
         let r: Value = serde_json::from_str(&last_tool_result(body)).unwrap();
         assert_eq!(r["matches"], 1, "{r}");
         assert!(r["hits"][0]["lines"].as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("the needle is here")), "{r}");
+        assert_eq!(r.as_object().unwrap().keys().rev().take(4).collect::<Vec<_>>(), ["next_page", "pages", "page", "matches"], "paging comes last: {r}");
         tool_call("r1", "grep_result", json!({"call": "c1", "from": 1}))
     });
     // By lines (the peeked mail is JSON: one long line): cut at 2000 characters…
     n.llm.push(WORKER, |body| {
         let r: Value = serde_json::from_str(&last_tool_result(body)).unwrap_or_else(|_| panic!("not JSON: {}", last_tool_result(body)));
         assert_eq!((r["lines"].as_u64(), r["to"].as_u64(), r["call"].as_str()), (Some(1), Some(1), Some("c1")), "{r}");
+        assert_eq!(r.as_object().unwrap().keys().last().map(String::as_str), Some("next"), "{r}");
         let line = r["text"][0]["text"].as_str().unwrap();
         assert!(line.chars().count() == 2001 && line.ends_with('…') && !line.contains("needle"), "{line:.80}");
         tool_call("r2", "grep_result", json!({"call": "c1", "full": true}))

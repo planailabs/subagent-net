@@ -118,7 +118,7 @@ pub fn read_lines(text: &str, from: usize, to: Option<usize>, full: bool) -> Res
         shown.push(json!({"line": k + 1, "text": text}));
     }
     let last = start - 1 + shown.len();
-    Ok(json!({"lines": all.len(), "from": start, "to": last, "next": (last < all.len()).then_some(last + 1), "text": shown}))
+    Ok(json!({"text": shown, "from": start, "to": last, "lines": all.len(), "next": (last < all.len()).then_some(last + 1)}))
 }
 
 /// Maps a built-in tool call to a hub op. `None` = not a built-in (an MCP tool).
@@ -267,6 +267,7 @@ mod tests {
         let r = read_lines(&book, 10, Some(12), false).unwrap();
         assert_eq!((r["from"].as_u64(), r["to"].as_u64(), r["next"].as_u64(), r["lines"].as_u64()), (Some(10), Some(12), Some(13), Some(500)));
         assert_eq!(r["text"][2], json!({"line": 12, "text": "line 12"}));
+        assert_eq!(r.as_object().unwrap().keys().last().map(String::as_str), Some("next"), "where to read on comes last");
         let r = read_lines(&book, 490, None, false).unwrap();
         assert_eq!((r["to"].as_u64(), r["next"].is_null()), (Some(500), true), "to the end, nothing after");
         let r = read_lines(&book, 1, Some(400), false).unwrap();

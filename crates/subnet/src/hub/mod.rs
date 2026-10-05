@@ -877,7 +877,8 @@ impl Hub {
         let page = (page as usize).clamp(1, pages);
         let total = hits.len();
         let shown: Vec<Value> = hits.into_iter().skip((page - 1) * HISTORY_PAGE).take(HISTORY_PAGE).collect();
-        Ok(serde_json::json!({"pattern": pattern, "matches": total, "page": page, "pages": pages, "messages": t.messages.len(), "hits": shown}))
+        // Paging last: what to read on is at the end, after the hits.
+        Ok(serde_json::json!({"pattern": pattern, "messages": t.messages.len(), "hits": shown, "matches": total, "page": page, "pages": pages, "next_page": (page < pages).then_some(page + 1)}))
     }
 
     /// One of the caller's tool results, the whole of it (`full` when it was cut).
@@ -894,9 +895,11 @@ impl Hub {
     /// characters and all at `TOTAL`. With where to read on.
     pub async fn read_result(&self, caller: &Addr, call: &str, from: u32, to: Option<u32>, full: bool) -> Result<Value, HubError> {
         let text = self.result_text(caller, call).await?;
-        let mut v = subnet_core::tools::read_lines(&text, from as usize, to.map(|t| t as usize), full).map_err(HubError::Bad)?;
-        v["call"] = serde_json::json!(call);
-        Ok(v)
+        let v = subnet_core::tools::read_lines(&text, from as usize, to.map(|t| t as usize), full).map_err(HubError::Bad)?;
+        // The call first, so where to read on (`next`) stays at the end.
+        let mut out = serde_json::Map::from_iter([("call".to_string(), serde_json::json!(call))]);
+        out.extend(v.as_object().cloned().unwrap_or_default());
+        Ok(Value::Object(out))
     }
 
     /// An agent searching one of its tool results, the whole of it (what the
@@ -931,7 +934,7 @@ impl Hub {
                 serde_json::json!({"line": i + 1, "lines": around})
             })
             .collect();
-        Ok(serde_json::json!({"call": call, "pattern": pattern, "matches": hits.len(), "page": page, "pages": pages, "lines": lines.len(), "characters": text.chars().count(), "hits": shown}))
+        Ok(serde_json::json!({"call": call, "pattern": pattern, "lines": lines.len(), "characters": text.chars().count(), "hits": shown, "matches": hits.len(), "page": page, "pages": pages, "next_page": (page < pages).then_some(page + 1)}))
     }
 
     pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {
