@@ -1298,7 +1298,11 @@ impl Agent {
                     .map(|call| PendingCall { call: call.clone(), state: CallState::Queued { retry: false } })
                     .collect();
                 let content = msg.content.clone().unwrap_or_default();
-                self.messages.push(msg);
+                // An answer of nothing (no text, no calls) isn't a message:
+                // APIs refuse a history with one in it.
+                if !content.is_empty() || !msg.tool_calls.is_empty() {
+                    self.messages.push(msg);
+                }
                 if calls.is_empty() {
                     self.turn_end(content, &mut fx);
                 } else {

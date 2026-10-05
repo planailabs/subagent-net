@@ -79,7 +79,9 @@ impl Client {
     /// Request body. A trailing assistant message is a partial answer to continue.
     /// Tool names go out in their wire form (see [`wire_name`]).
     pub fn body(&self, messages: &[Message], tools: &[ToolDef]) -> Value {
-        let mut messages = messages.to_vec();
+        // An assistant message with neither text nor calls (an empty answer
+        // kept in an older history) is refused by APIs: left out.
+        let mut messages: Vec<Message> = messages.iter().filter(|m| !(m.role == Role::Assistant && m.content.as_deref().unwrap_or_default().is_empty() && m.tool_calls.is_empty())).cloned().collect();
         let mut body = self.cfg.params.clone();
         if messages.last().is_some_and(|m| m.role == Role::Assistant) {
             if self.cfg.prefill {
@@ -347,6 +349,15 @@ mod tests {
         assert_eq!(parts[0], json!({"type": "text", "text": "what's this?"}));
         assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,iVBO");
         assert!(b["messages"][0].get("images").is_none());
+    }
+
+    #[test]
+    fn an_empty_answer_in_the_history_is_left_out() {
+        let c = Client::new(cfg(false), None);
+        let empty = Message { content: None, ..Message::assistant("") };
+        let b = c.body(&[Message::user("hi"), empty, Message::user("Ania was her name")], &[]);
+        let roles: Vec<&str> = b["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "user"]);
     }
 
     #[test]

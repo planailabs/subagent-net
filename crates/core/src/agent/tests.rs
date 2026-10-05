@@ -1327,3 +1327,19 @@ fn results_of_excepted_tools_are_never_cut() {
     h.crash();
 }
 
+#[test]
+fn an_answer_of_nothing_isnt_kept_as_a_message() {
+    let mut h = H::new(spec());
+    h.user("hello?");
+    let before = h.a.messages.len();
+    let fx = h.done();
+    assert_eq!(h.a.messages.len(), before, "no empty assistant message");
+    assert!(fx.iter().any(|e| matches!(e, Effect::Report { .. })) || h.a.phase == Phase::Idle, "the turn just ends: {fx:?}");
+    // And the next message goes on normally.
+    h.user("still there?");
+    h.text("yes");
+    h.done();
+    assert_eq!(h.contents().last().unwrap(), &(Role::Assistant, "yes".to_string()));
+    h.crash();
+}
+
