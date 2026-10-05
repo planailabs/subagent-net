@@ -1188,6 +1188,12 @@ impl Hub {
             }
             r.seq += events.len() as u64;
             r.a = std::mem::replace(&mut r.a, Agent::new(id, Spec::of_type(""))).fold(&events);
+            // Copied while waiting for a hook: that run answers the original,
+            // so the copy recovers its own (run again if idempotent, else
+            // on_lost decides), as after a restart.
+            if !r.a.waiting_hooks().is_empty() {
+                return self.commit(st, id, vec![Event::Recovered]).await;
+            }
         }
         self.run(st, vec![Work::Place(id)]).await
     }

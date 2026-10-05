@@ -217,3 +217,26 @@ async fn a_hook_running_when_the_hub_stops_is_settled_by_on_lost_after() {
     }
     panic!("the agent never went on: {:?}", hub.list_agents().await.into_iter().find(|a| a.id == id));
 }
+
+#[tokio::test]
+async fn an_agent_upgraded_while_a_hook_runs_doesnt_wait_for_it_forever() {
+    // A hook that never answers (within the test), not idempotent: on_lost allows.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/never", l.local_addr().unwrap());
+    let app = axum::Router::new().route("/never", axum::routing::post(|| async { tokio::time::sleep(Duration::from_secs(600)).await }));
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let hooks = format!("hook \"slow\" {{\n  on = \"pre_model\"\n  run {{ url = {url:?} }}\n  timeout = \"10m\"\n  on_lost = \"allow\"\n}}\n");
+    let n = Net::new(&cluster(&hooks, &["slow"])).await;
+    n.node("s").await;
+    let id = n.spawn("worker", "go").await;
+    n.until(id, "waiting for its hook", |t| t["hooks"].as_array().is_some_and(|h| !h.is_empty())).await;
+    // A new version of its type (another prompt), and the agent moved onto it.
+    let newer = cluster(&hooks, &["slow"]).replace(WORKER, "You are a worker, now upgraded.").replace("{llm}", &n.llm.url);
+    n.hub.apply_cluster(vec![subnet::hub::db::ClusterFile { name: "c.hcl".into(), text: newer }], false, &Addr::root()).await.unwrap();
+    n.llm.push("You are a worker, now upgraded.", |_| text(&["went on"]));
+    let copy = n.hub.upgrade(&Addr::root(), id, false).await.unwrap();
+    // The copy's own hook run was lost with the move: on_lost lets the call go on.
+    assert_eq!(n.mail().await["content"], "went on");
+    assert!(n.hub.list_agents().await.iter().any(|a| a.id == copy.id && a.hooks.is_empty()));
+}
+
