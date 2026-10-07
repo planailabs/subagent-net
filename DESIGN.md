@@ -27,7 +27,7 @@ A distributed network of LLM agents. Every agent is a resumable state machine: i
  └──────────────┘ └──────────────┘ └──────────────┘
 ```
 
-- **Hub**: the control plane. All state lives in Postgres; schema changes go through `sqlx migrate`. Several hubs can run against one database: one leader serves, the rest stand by (see [High availability](#high-availability)).
+- **Hub**: the control plane. All state lives in its database: Postgres or SQLite, chosen by the URL (`postgres://…`, `sqlite://<file>`; see [Storage](#storage)); schema changes go through `sqlx migrate`. Several hubs can run against one database: one leader serves, the rest stand by (see [High availability](#high-availability)).
 - **Node**: a worker process started with a hub URL, a node name and a token. It connects out to the hub (NAT-friendly), receives its part of the cluster spec, and runs the agent types, MCP servers and senses assigned to it. Credentials are resolved on the node and never leave it.
 - **One binary**, `subnet`: `hub`, `node`, `dev` (hub and node in one process), `tui`, `watch <id>` (one agent's transcript, live and readable), and every API operation as a CLI command.
 - **Environment files:** before parsing its flags (several read env defaults: `DATABASE_URL`, `SUBNET_HUB`, `SUBNET_TOKEN`, …), `subnet` loads `--env-file PATH` (repeatable) and then `./.env`. A variable that is already set is never overwritten: the real environment wins, then earlier files. Nodes resolve credentials (`$VAR`) from the result, so API keys can live in a node's `.env`.
@@ -497,12 +497,19 @@ The web UI and the TUI use the same API.
 - API and MCP use `Authorization: Bearer <token>`. The web UI exchanges a token for an HTTP-only session cookie (`POST /v1/login`).
 - A caller's address is its principal: `user:maciej`, `client:claude`.
 
+## Storage
+
+- Two backends behind one `Db` (`hub/db.rs`): Postgres (`PgPool`, 16 connections) and SQLite (`SqlitePool`). Each query is written once where the SQL is the same (`$N` parameters work in both) and per backend where it isn't (Postgres' `for update skip locked`, `extract(epoch …)`, `regexp_matches`, `now()`).
+- Migrations: `migrations/postgres` and `migrations/sqlite`, each run by `sqlx migrate` at connect, kept equivalent: the same tables and columns (a test compares them). SQLite's types: JSON as text, uuids as 16-byte blobs, times as unix seconds (milliseconds for `deliveries.at` and `holds.since`), `integer primary key autoincrement` for serials.
+- SQLite runs in WAL mode with foreign keys on, through **one connection**: every query is serialised, so writers never meet `SQLITE_BUSY` (a reader pool beside one writer if it's ever too slow). Blob GC there scans the events with `instr` instead of a regexp.
+- High availability works on both (below); with SQLite the hubs must share the file, i.e. run on one machine.
+
 ## High availability
 
-- Hubs share one Postgres. Each hub competes for `pg_try_advisory_lock` on a dedicated connection (retrying every 200 ms); the holder is the **leader**.
+- Hubs share one database. With Postgres each hub competes for `pg_try_advisory_lock` on a dedicated connection (retrying every 200 ms); with SQLite for an exclusive lock on `<file>.hub-lock` (`File::try_lock`; a database in memory belongs to its process alone). The holder is the **leader**.
 - On winning, the leader bumps `hub_leader.term`, records its advertised URL (`subnet hub --advertise <url>`, default `http://<listen>`), loads all state from the database, and serves. Nodes and clients reconnect to it; agents get new epochs on placement as usual.
 - **Fencing:** every event append checks, in the same transaction, that `hub_leader.term` is still this hub's term. A deposed leader (lost its lock connection, partitioned) can't write agent logs even if other connections still work; its first refused write makes it step down.
-- A leader that loses its lock connection, or is fenced, steps down: it drops all in-memory state, closes node connections, and becomes a standby again.
+- A leader that loses its lock connection (Postgres), or is fenced, steps down: it drops all in-memory state, closes node connections, and becomes a standby again.
 - **Standbys** answer every request with `503` and `x-subnet-leader: <url>` when they know the leader. The API client and nodes take a comma-separated list of hub URLs, follow the hint, and otherwise rotate through the list.
 - `Hub::open` (single hub, tests) waits to lead; `subnet hub` starts as a standby and leads once elected. `shutdown` releases leadership.
 - Route state (throttle windows, open batches, debounce timers) is in memory and restarts empty on the new leader.
@@ -555,10 +562,10 @@ State and key handling (`tui::App`) are pure and tested; rendering is tested aga
 Everything in this document is implemented, except what "Not in scope yet" lists:
 
 - **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), vision (images from tools, converted and attached for models that see; blob arguments), tenants and per-tenant MCP servers, snapshots, forks (with tree), upgrades onto a type's new version (residents automatically), internal and external executors.
-- **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing.
+- **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing; Postgres and SQLite stores.
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.
-- **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in Postgres), deliveries log.
+- **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in the database), deliveries log.
 - **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI).
 - **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
 

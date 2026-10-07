@@ -702,12 +702,20 @@ async fn blobs_an_agents_history_mentions_are_kept() {
         db.put_blob(h, "image/png", b"x").await.unwrap();
     }
     // Old and unused, both; one is in an agent's log (a picture it saw).
-    let pool = db.pool.clone();
-    sqlx::query("update blobs set touched_at = now() - interval '400 days'").execute(&pool).await.unwrap();
     let id = uuid::Uuid::new_v4();
-    sqlx::query("insert into agents (id, spec) values ($1, '{}')").bind(id).execute(&pool).await.unwrap();
-    let ev = serde_json::json!({"ToolResult": {"call_id": "c1", "content": format!("[image blob:{seen} image/png 1x1]")}});
-    sqlx::query("insert into events (agent_id, seq, event) values ($1, 1, $2)").bind(id).bind(ev).execute(&pool).await.unwrap();
+    let ev = sqlx::types::Json(serde_json::json!({"ToolResult": {"call_id": "c1", "content": format!("[image blob:{seen} image/png 1x1]")}}));
+    match &db.pool {
+        subnet::hub::db::Pool::Pg(pool) => {
+            sqlx::query("update blobs set touched_at = now() - interval '400 days'").execute(pool).await.unwrap();
+            sqlx::query("insert into agents (id, spec) values ($1, '{}')").bind(id).execute(pool).await.unwrap();
+            sqlx::query("insert into events (agent_id, seq, event) values ($1, 1, $2)").bind(id).bind(ev).execute(pool).await.unwrap();
+        }
+        subnet::hub::db::Pool::Lite(pool) => {
+            sqlx::query("update blobs set touched_at = unixepoch() - 400 * 86400").execute(pool).await.unwrap();
+            sqlx::query("insert into agents (id, spec) values ($1, '{}')").bind(id).execute(pool).await.unwrap();
+            sqlx::query("insert into events (agent_id, seq, event) values ($1, 1, $2)").bind(id).bind(ev).execute(pool).await.unwrap();
+        }
+    }
     assert_eq!(db.gc_blobs(30).await.unwrap(), 1, "only the loose one goes");
     assert!(db.get_blob(&seen).await.unwrap().is_some());
     assert!(db.get_blob(&loose).await.unwrap().is_none());

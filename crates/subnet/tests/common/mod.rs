@@ -83,8 +83,35 @@ async fn sweep(pool: &sqlx::PgPool) {
         .await;
 }
 
-/// URL of a new, empty database.
+/// Whether the tests run on SQLite (`SUBNET_TEST_DB=sqlite`) instead of Postgres.
+pub fn sqlite() -> bool {
+    std::env::var("SUBNET_TEST_DB").is_ok_and(|v| v == "sqlite")
+}
+
+/// URL of a new, empty database: Postgres, or with `SUBNET_TEST_DB=sqlite` a
+/// fresh SQLite file under cargo's target tmp dir.
 pub async fn db_url() -> String {
+    if sqlite() {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("testlite");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Files of earlier runs go once per process.
+        static SWEPT: OnceLock<()> = OnceLock::new();
+        SWEPT.get_or_init(|| {
+            let mine = format!("t_{}_", std::process::id());
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                if !e.file_name().to_string_lossy().starts_with(&mine) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        });
+        let file = dir.join(format!("t_{}_{}.db", std::process::id(), uuid::Uuid::new_v4().simple()));
+        return format!("sqlite://{}", file.display());
+    }
+    pg_url().await
+}
+
+/// URL of a new, empty Postgres database (whatever `SUBNET_TEST_DB` says).
+pub async fn pg_url() -> String {
     let base = server_url();
     let name = format!("t_{}_{}", std::process::id(), uuid::Uuid::new_v4().simple());
     let pool = sqlx::PgPool::connect(&base).await.expect("connect to test postgres");

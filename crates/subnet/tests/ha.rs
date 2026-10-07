@@ -50,12 +50,12 @@ async fn deposed_leader_is_fenced_off() {
     common::net::node_ready(&a, "s").await;
     let id = common::id_of(&a.op(&Addr::root(), Op::Spawn { ty: "w".into(), prompt: "x".into(), tenant: None }).await.unwrap());
     // Another hub became leader behind a's back (e.g. a partition): the term moved on.
-    let pool = sqlx::PgPool::connect(&db).await.unwrap();
-    sqlx::query("update hub_leader set term = term + 1").execute(&pool).await.unwrap();
+    let other = subnet::hub::db::Db::connect(&db).await.unwrap();
+    other.take_term("http://elsewhere").await.unwrap();
     let e = a.op(&Addr::root(), Op::Send { to: Addr::Agent(id), content: "late".into() }).await.unwrap_err();
     assert!(e.contains("not the leader"), "{e}");
     assert!(!a.is_leader(), "a stepped down");
-    let n: i64 = sqlx::query_scalar("select count(*) from events where agent_id = $1").bind(id).fetch_one(&pool).await.unwrap();
+    let n = other.events(id, 0).await.unwrap().len();
     assert!(n <= 2, "no event written after the fence ({n})");
 }
 
