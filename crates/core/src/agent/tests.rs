@@ -1296,6 +1296,20 @@ fn pre_model_hooks_inject_context_before_every_model_call() {
 }
 
 #[test]
+fn a_pause_while_pre_model_hooks_run_holds_the_call() {
+    let mut h = hooked(vec![hook("budget", HookPoint::PreModel, &[])]);
+    h.user("go");
+    h.pause(PauseMode::Quick);
+    let fx = h.hook_done("h1.0", Outcome { inject: vec!["over budget".into()], ..Outcome::allow() });
+    assert!(!fx.contains(&Effect::CallLlm), "paused: no model call");
+    assert!(h.a.is_paused());
+    let fx = h.resume();
+    assert!(fx.contains(&Effect::CallLlm) && runs(&fx).is_empty(), "resumed: the call, without asking again: {fx:?}");
+    assert!(h.contents().iter().any(|(_, t)| t.contains("over budget")));
+    h.crash();
+}
+
+#[test]
 fn any_hook_can_inject_messages_for_the_next_call() {
     let mut h = hooked(vec![hook("watch", HookPoint::PostTool, &["*"])]);
     h.user("go");

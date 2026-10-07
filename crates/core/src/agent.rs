@@ -965,6 +965,12 @@ impl Agent {
                     // What the hooks injected (and what came meanwhile) goes in now.
                     self.inject_pending();
                     self.model_hooked = true;
+                    if !self.gate() {
+                        // Paused while its hooks ran (a budget, say): the call waits for a
+                        // resume, and isn't asked about again.
+                        self.phase = Phase::Thinking { running: false };
+                        return;
+                    }
                     self.phase = Phase::Thinking { running: true };
                     fx.push(Effect::CallLlm);
                 }

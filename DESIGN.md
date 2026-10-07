@@ -328,7 +328,7 @@ hook "no-force-push" {
 | `pre_tool` | `{tool, args, call_id}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`); `rewrite` with new `args` |
 | `post_tool` | `{tool, args, call_id, result}` | `allow` (a `note` is added to the result); `deny` (the result is withheld); `rewrite` (`text` replaces it) |
 | `on_message` | `{from, content, reply}`, before a message reaches the model; messages behind a held one wait, so order is kept | `allow` (with a `note`); `deny` (dropped); `rewrite` (`text`) |
-| `pre_model` | `{messages, last: {role, content}}`, before every model call (after tool results too; once a call: a retried call after a recovery doesn't ask again) | `allow`, with `inject`: context for this call (the time, what a memory recalls, state from outside) |
+| `pre_model` | `{messages, last: {role, content}}`, before every model call (after tool results too; once a call: a retried call after a recovery doesn't ask again; a quick or hard pause that comes while they run holds the call until a resume, which makes it without asking again: a hook can pause an agent before a call, over a budget, say) | `allow`, with `inject`: context for this call (the time, what a memory recalls, state from outside) |
 | `on_turn_end` | `{content}`, when the model ends its turn | `allow`; `continue` with `text`: the model goes on with `[from hook x]` and the text, at most `max_continue` times per turn |
 | `on_report` | `{content}`, the answer about to go out (after `on_turn_end`) | `allow`; `rewrite` (`text`) |
 | `pre_compact` | `{upto, messages}`, before a compaction | `allow`, with `text`: instructions added to that summary's request |
