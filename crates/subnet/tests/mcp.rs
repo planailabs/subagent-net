@@ -64,6 +64,12 @@ impl Tools {
         format!("echo: {text}")
     }
 
+    #[tool(description = "Who calls: the request's _meta")]
+    fn whoami(&self, ctx: RequestContext<RoleServer>) -> String {
+        let m = &ctx.meta.0.0;
+        format!("{} {}", m.get("subnet/agent").and_then(Value::as_str).unwrap_or("nobody"), m.get("subnet/parent").and_then(Value::as_str).unwrap_or("-"))
+    }
+
     #[tool(description = "A picture: a 200x100 PNG")]
     fn snap(&self) -> rmcp::model::CallToolResult {
         use base64::Engine;
@@ -255,6 +261,21 @@ async fn remote_mcp_calls_are_routed_through_the_hub() {
     let id = e.spawn().await;
     assert_eq!(e.mail().await["content"], "echo: far away");
     assert_eq!(e.t(id).await["node"], "s", "the agent ran on s, the tool on m");
+}
+
+#[tokio::test]
+async fn servers_hear_which_agent_calls_locally_and_through_the_hub() {
+    for nodes in [&["s"][..], &["m"][..]] {
+        let e = Env::with(nodes, &[]).await;
+        e.node("s").await;
+        if nodes == ["m"] {
+            e.node("m").await;
+        }
+        e.llm.push(SYS, |_| tool_call("c1", "t.whoami", json!({})));
+        e.llm.push(SYS, |body| text(&[&last_tool_result(body)]));
+        let id = e.spawn().await;
+        assert_eq!(e.mail().await["content"], format!("{id} -"), "{nodes:?}");
+    }
 }
 
 #[tokio::test]

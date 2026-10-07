@@ -430,10 +430,11 @@ impl Hub {
                         let hub_id = st.next_mcp;
                         st.next_mcp += 1;
                         st.mcp_pending.insert(hub_id, McpPending { from: Some(conn), from_id: id, exec });
-                        let tenant = st.agents[&agent].a.spec.tenant.clone();
+                        let spec = &st.agents[&agent].a.spec;
+                        let (tenant, meta) = (spec.tenant.clone(), Some(crate::node::mcp::caller_meta(agent, spec)));
                         let n = st.nodes.get_mut(&exec).unwrap();
                         n.mcp_load += 1;
-                        let _ = n.tx.send(ToNode::McpInvoke { id: hub_id, mcp, tool, args, tenant });
+                        let _ = n.tx.send(ToNode::McpInvoke { id: hub_id, mcp, tool, args, tenant, meta });
                     }
                 }
                 Ok(())
@@ -732,7 +733,7 @@ impl Hub {
             st.mcp_waiters.insert(id, tx);
             let n = st.nodes.get_mut(&exec).unwrap();
             n.mcp_load += 1;
-            let _ = n.tx.send(ToNode::McpInvoke { id, mcp: mcp.into(), tool: tool.into(), args, tenant: None });
+            let _ = n.tx.send(ToNode::McpInvoke { id, mcp: mcp.into(), tool: tool.into(), args, tenant: None, meta: None });
             rx
         };
         rx.await.unwrap_or_else(|_| Err("mcp call dropped".into()))

@@ -92,6 +92,9 @@ pub enum ToNode {
         /// The calling agent's tenant (per-tenant servers).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tenant: Option<String>,
+        /// Who calls: the request's `_meta` (`subnet/agent`, …; see `mcp::caller_meta`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Map<String, Value>>,
     },
     McpAbort { id: u64 },
     /// Result of this node's `McpCall`.
@@ -107,7 +110,7 @@ mod tests {
     fn roundtrips() {
         let msgs = vec![
             ToNode::Reply { id: 3, result: Err("nope".into()) },
-            ToNode::McpInvoke { id: 1, mcp: "m@h".into(), tool: "t".into(), args: json!({"a":1}), tenant: None },
+            ToNode::McpInvoke { id: 1, mcp: "m@h".into(), tool: "t".into(), args: json!({"a":1}), tenant: None, meta: None },
             ToNode::Commit { agent: uuid::Uuid::nil(), seq: 1, event: Event::LlmDone },
         ];
         for m in msgs {

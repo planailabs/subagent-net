@@ -369,7 +369,7 @@ impl Node {
                         let _ = tx.send(result);
                     }
                 }
-                ToNode::McpInvoke { id, mcp, tool, args, tenant } => {
+                ToNode::McpInvoke { id, mcp, tool, args, tenant, meta } => {
                     invocations.retain(|_, t| !t.is_cancelled());
                     let abort = root.child_token();
                     invocations.insert(id, abort.clone());
@@ -384,7 +384,7 @@ impl Node {
                         let result = match host {
                             Err(e) => Err(e),
                             Ok(None) => Err(format!("this node doesn't run mcp {mcp}")),
-                            Ok(Some(h)) => h.call(&tool, args, &abort).await.unwrap_or_else(|| Err("aborted".into())),
+                            Ok(Some(h)) => h.call(&tool, args, meta.as_ref(), &abort).await.unwrap_or_else(|| Err("aborted".into())),
                         };
                         abort.cancel(); // marks the invocation finished
                         let _ = out.send(ToHub::McpResult { id, result });
@@ -710,10 +710,11 @@ impl ToolTask {
         }
         // A per-tenant server runs here if its base instance does; else the
         // hub picks a node (and passes the tenant on).
+        let meta = mcp::caller_meta(self.agent, &self.spec);
         let r = match (self.mcps.get(id), self.tenants.host(id, self.spec.tenant.as_deref()).await) {
-            (Some(_), Some(Ok(h))) => h.call(tool, args, &self.abort).await,
+            (Some(_), Some(Ok(h))) => h.call(tool, args, Some(&meta), &self.abort).await,
             (Some(_), Some(Err(e))) => Some(Err(e)),
-            (Some(h), None) => h.call(tool, args, &self.abort).await,
+            (Some(h), None) => h.call(tool, args, Some(&meta), &self.abort).await,
             (None, _) => self.link.mcp_call(self.agent, self.epoch, id, tool, args, &self.abort).await,
         };
         // Images and other binary results go to the blob store.

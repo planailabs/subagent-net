@@ -357,6 +357,8 @@ Several hooks at a point run one after the other, each seeing what the one befor
 
 An agent can do work *for* someone: its **tenant**. A tenant is set when an agent is spawned from outside the cluster (`spawn` with `tenant`), and every descendant inherits it; agents can't choose one for their children. Agent summaries show it.
 
+Every tool call an agent makes says who calls, in the request's `_meta`: `subnet/agent` (its id), `subnet/parent` and `subnet/tenant` when it has them, also when the call is routed through the hub to another node. One server can so serve many agents and keep each one's state apart (a working directory, a session); switchboard deliveries (`deliver { mcp = … }`) carry none.
+
 An MCP server with `per_tenant = true` (stdio only) runs once per tenant: `${TENANT}` in its `env` is the tenant of the calling agent, so each tenant's calls go to a process started with that tenant's settings (credentials, a data directory, an identity). It needs a `default_tenant`: that instance starts with the node, lists the tools and serves agents without a tenant. A node starts a tenant's instance on its first call and stops it after 10 idle minutes; calls routed through the hub carry the caller's tenant to the node that runs the server.
 
 ```hcl

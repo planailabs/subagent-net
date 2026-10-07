@@ -168,9 +168,10 @@ impl McpHost {
         v
     }
 
-    /// Calls a tool. On `abort` the server is sent `notifications/cancelled`
-    /// and `None` is returned.
-    pub async fn call(&self, tool: &str, args: Value, abort: &CancellationToken) -> Option<Result<String, String>> {
+    /// Calls a tool, with `meta` as the request's `_meta` (who calls). On
+    /// `abort` the server is sent `notifications/cancelled` and `None` is
+    /// returned.
+    pub async fn call(&self, tool: &str, args: Value, meta: Option<&serde_json::Map<String, Value>>, abort: &CancellationToken) -> Option<Result<String, String>> {
         if !self.tools.contains_key(tool) {
             return Some(Err(format!("mcp {} has no tool {tool:?}", self.name)));
         }
@@ -181,6 +182,9 @@ impl McpHost {
         };
         let mut params = CallToolRequestParams::new(tool.to_string());
         params.arguments = Some(arguments);
+        if let Some(m) = meta.filter(|m| !m.is_empty()) {
+            params.meta = Some(rmcp::model::RequestMetaObject(rmcp::model::MetaObject(m.clone())));
+        }
         let req = ClientRequest::CallToolRequest(CallToolRequest::new(params));
         let mut handle = match self.client.peer().send_cancellable_request(req, PeerRequestOptions::no_options()).await {
             Ok(h) => h,
@@ -205,6 +209,21 @@ impl McpHost {
             Err(_) => Err("mcp server went away".into()),
         })
     }
+}
+
+/// The `_meta` of an agent's tool calls: who calls (`subnet/agent`), its
+/// parent and tenant if it has them. A server serving many agents (one per
+/// task, say) tells them apart by it.
+pub fn caller_meta(agent: uuid::Uuid, spec: &subnet_core::agent::Spec) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("subnet/agent".into(), Value::String(agent.to_string()));
+    if let Some(p) = spec.parent {
+        m.insert("subnet/parent".into(), Value::String(p.to_string()));
+    }
+    if let Some(t) = &spec.tenant {
+        m.insert("subnet/tenant".into(), Value::String(t.clone()));
+    }
+    m
 }
 
 /// Parses a model's JSON argument string.
