@@ -317,6 +317,9 @@ pub struct UpgradeArgs {
     /// Move its children too (otherwise they're cancelled).
     #[serde(default)]
     pub tree: bool,
+    /// Onto another mixture or agent type (its history goes on with another model); default: its own.
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -504,7 +507,7 @@ op!(InjectEvent, "inject_event", Operator, Some((Method::Post, "/v1/senses/{sens
 op!(BlobPut, "blob_put", Operator, Some((Method::Post, "/v1/blobs")), BlobPutArgs, crate::hub::blobs::BlobRef, "Store a blob; returns its blob:<sha256> reference.");
 op!(BlobGetOp, "blob_get", Viewer, Some((Method::Get, "/v1/blobs/{hash}")), BlobGetArgs, crate::hub::blobs::Blob, "Read a blob as base64 (raw bytes: GET /v1/blobs/{hash}/raw).");
 op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events, optionally with its children) into a new agent.");
-op!(Upgrade, "upgrade", Operator, Some((Method::Post, "/v1/agents/{id}/upgrade")), UpgradeArgs, Spawned, "Move an agent (a root; with `tree` its children too) onto the current version of its type: its history is copied into a new agent built from the cluster as it is now, the old one is cancelled, and a resident follows. Agents listed `outdated` need this to run again.");
+op!(Upgrade, "upgrade", Operator, Some((Method::Post, "/v1/agents/{id}/upgrade")), UpgradeArgs, Spawned, "Move an agent (a root; with `tree` its children too) onto the current version of its type, or (`to`) of another mixture or agent type: its history is copied into a new agent built from the cluster as it is now, the old one is cancelled, and a resident follows. Agents listed `outdated` need this to run again.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
 pub fn metas() -> Vec<OpMeta> {
@@ -620,7 +623,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     let h = hub.clone();
     r.add::<Upgrade, _, _>(move |c, a| {
         let h = h.clone();
-        async move { Ok(h.upgrade(&c.addr, a.id, a.tree).await?) }
+        async move { Ok(h.upgrade(&c.addr, a.id, a.tree, a.to.as_deref()).await?) }
     });
     let h = hub.clone();
     r.add::<ApplyCluster, _, _>(move |c, a| {

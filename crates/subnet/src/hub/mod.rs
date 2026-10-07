@@ -1038,7 +1038,7 @@ impl Hub {
             return Err(HubError::Forbidden("agents may not fork".into()));
         }
         let mut st = self.st.lock().await;
-        self.copy(&mut st, id, at, tree, false).await
+        self.copy(&mut st, id, at, tree, false, None).await
     }
 
     /// Moves an agent onto the current version of its type (and mixture's
@@ -1048,7 +1048,10 @@ impl Hub {
     /// copy. Only roots: with `tree` its children move too; without, they're
     /// cancelled.
     /// An agent of an older version is otherwise never resumed.
-    pub async fn upgrade(&self, caller: &Addr, id: AgentId, tree: bool) -> Result<Spawned, HubError> {
+    /// Moves a root agent onto the current version of its type, or (`to`) of
+    /// another mixture or agent type: its history goes on with another
+    /// model, say (escalation, a fallback).
+    pub async fn upgrade(&self, caller: &Addr, id: AgentId, tree: bool, to: Option<&str>) -> Result<Spawned, HubError> {
         if matches!(caller, Addr::Agent(_)) {
             return Err(HubError::Forbidden("agents may not upgrade agents".into()));
         }
@@ -1056,7 +1059,7 @@ impl Hub {
         if let Some(p) = st.agents.get(&id).and_then(|r| r.a.spec.parent) {
             return bad(format!("{id} is a child of {p}: upgrade the root of its tree (with tree)"));
         }
-        let new = self.copy(&mut st, id, None, tree, true).await?;
+        let new = self.copy(&mut st, id, None, tree, true, to).await?;
         // A resident follows the copy before the old one stops, so nothing
         // sent to it in between goes to the old agent.
         for (name, rid) in self.db.residents().await? {
@@ -1139,8 +1142,8 @@ impl Hub {
 
     /// The spec `old` would get if it were spawned now: the current type
     /// and MCP servers, with its own parent, budget and tenant.
-    fn current_spec(&self, st: &State, old: &Spec) -> Result<Spec, HubError> {
-        let name = old.mixture.clone().unwrap_or_else(|| old.ty.split('@').next().unwrap_or_default().to_string());
+    fn current_spec(&self, st: &State, old: &Spec, to: Option<&str>) -> Result<Spec, HubError> {
+        let name = to.map(String::from).or_else(|| old.mixture.clone()).unwrap_or_else(|| old.ty.split('@').next().unwrap_or_default().to_string());
         let (mut spec, _) = self.spec_for(st, &name, None, old.tenant.clone())?;
         spec.parent = old.parent;
         spec.budget = old.budget.clone();
@@ -1149,7 +1152,7 @@ impl Hub {
 
     /// Copies an agent's history (the first `at` events) into a new agent,
     /// with its spec as it was (fork) or as it would be now (`fresh`, upgrade).
-    async fn copy(&self, st: &mut State, id: AgentId, at: Option<u64>, tree: bool, fresh: bool) -> Result<Spawned, HubError> {
+    async fn copy(&self, st: &mut State, id: AgentId, at: Option<u64>, tree: bool, fresh: bool, to: Option<&str>) -> Result<Spawned, HubError> {
         let Some(r) = st.agents.get(&id) else { return no_agent(id) };
         let mut root_events = self.db.events(id, 0).await?;
         root_events.truncate(at.unwrap_or(r.seq) as usize);
@@ -1183,7 +1186,9 @@ impl Hub {
         let mut specs = HashMap::new();
         for (old, _) in &subtree {
             let was = &st.agents[old].a.spec;
-            specs.insert(*old, if fresh { self.current_spec(st, was)? } else { was.clone() });
+            // `to` is for the root; its children keep their own types.
+            let onto = if old == &id { to } else { None };
+            specs.insert(*old, if fresh { self.current_spec(st, was, onto)? } else { was.clone() });
         }
         for (old, events) in &subtree {
             let new = map[old];
@@ -1412,10 +1417,10 @@ impl Hub {
             }
             let ready = {
                 let st = self.st.lock().await;
-                st.agents.get(id).is_some_and(|r| outdated(&c.spec, &r.a.spec) && !matches!(r.a.phase, subnet_core::agent::Phase::Cancelled) && self.current_spec(&st, &r.a.spec).is_ok())
+                st.agents.get(id).is_some_and(|r| outdated(&c.spec, &r.a.spec) && !matches!(r.a.phase, subnet_core::agent::Phase::Cancelled) && self.current_spec(&st, &r.a.spec, None).is_ok())
             };
             if ready {
-                match self.upgrade(&Addr::root(), *id, true).await {
+                match self.upgrade(&Addr::root(), *id, true, None).await {
                     Ok(s) => tracing::info!(resident = %name, agent = %s.id, ty = %s.ty, "resident moved to its type's new version"),
                     Err(e) => tracing::warn!(resident = %name, error = %e, "upgrading resident failed"),
                 }

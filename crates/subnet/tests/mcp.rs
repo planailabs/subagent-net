@@ -590,13 +590,13 @@ async fn an_agent_learns_of_tools_its_server_grew() {
     // copied history's old tool change doesn't take it away again.
     let newer = cluster(&url, &["s"], &[], "lazy = false", "").replace("  model = \"mock\"", "  model = \"mock\"\n  search_history = true");
     n.apply(&newer).await;
-    let mut up = n.hub.upgrade(&Addr::root(), id, false).await;
+    let mut up = n.hub.upgrade(&Addr::root(), id, false, None).await;
     for _ in 0..200 {
         if up.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
-        up = n.hub.upgrade(&Addr::root(), id, false).await;
+        up = n.hub.upgrade(&Addr::root(), id, false, None).await;
     }
     let new = up.unwrap().id;
     n.llm.say(SYS, &["both"]);

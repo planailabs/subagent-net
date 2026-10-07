@@ -396,12 +396,12 @@ async fn an_outdated_agent_is_upgraded() {
     n.apply(&cluster("  params = { temperature = 0.5 }")).await;
     n.until(id, "listed as outdated", |t| t["outdated"] == true).await;
     // Until the node offers the new version, there's nothing to move onto.
-    let mut up = n.hub.upgrade(&Addr::root(), id, false).await;
+    let mut up = n.hub.upgrade(&Addr::root(), id, false, None).await;
     for _ in 0..200 {
         match &up {
             Err(e) if e.to_string().contains("no live node") => {
                 tokio::time::sleep(Duration::from_millis(25)).await;
-                up = n.hub.upgrade(&Addr::root(), id, false).await;
+                up = n.hub.upgrade(&Addr::root(), id, false, None).await;
             }
             _ => break,
         }
@@ -415,7 +415,29 @@ async fn an_outdated_agent_is_upgraded() {
     let msgs = n.llm.requests().pop().unwrap()["messages"].as_array().unwrap().len();
     assert_eq!(msgs, 4, "system, one, first, two");
     // Agents may not move agents; children are moved from their root.
-    assert!(n.hub.upgrade(&Addr::Agent(up.id), up.id, false).await.is_err());
+    assert!(n.hub.upgrade(&Addr::Agent(up.id), up.id, false, None).await.is_err());
+}
+
+#[tokio::test]
+async fn an_agent_moves_onto_another_type_with_its_history() {
+    let n = net().await;
+    n.node("a").await;
+    n.llm.say(WORKER, &["first"]);
+    let id = n.spawn("worker", "one").await;
+    assert_eq!(n.mail().await["content"], "first");
+    // Onto the boss's type (another model, another prompt): the same conversation goes on.
+    let up = n.hub.upgrade(&Addr::root(), id, false, Some("boss")).await.unwrap();
+    assert!(up.ty.starts_with("boss@"), "{}", up.ty);
+    n.until(id, "the old one cancelled", |t| t["phase"] == "cancelled").await;
+    n.llm.push(BOSS, |b| {
+        let m = b["messages"].as_array().unwrap();
+        assert_eq!(m[0]["content"], BOSS, "the new type's system prompt");
+        assert!(m.iter().any(|x| x["content"] == "first"), "the old history");
+        text(&["as the boss"])
+    });
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(up.id), content: "two".into() }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "as the boss");
+    assert!(n.hub.upgrade(&Addr::root(), up.id, false, Some("nope")).await.is_err(), "an unknown type");
 }
 
 #[tokio::test]

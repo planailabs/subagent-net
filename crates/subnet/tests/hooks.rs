@@ -234,7 +234,7 @@ async fn an_agent_upgraded_while_a_hook_runs_doesnt_wait_for_it_forever() {
     let newer = cluster(&hooks, &["slow"]).replace(WORKER, "You are a worker, now upgraded.").replace("{llm}", &n.llm.url);
     n.hub.apply_cluster(vec![subnet::hub::db::ClusterFile { name: "c.hcl".into(), text: newer }], false, &Addr::root()).await.unwrap();
     n.llm.push("You are a worker, now upgraded.", |_| text(&["went on"]));
-    let copy = n.hub.upgrade(&Addr::root(), id, false).await.unwrap();
+    let copy = n.hub.upgrade(&Addr::root(), id, false, None).await.unwrap();
     // The copy's own hook run was lost with the move: on_lost lets the call go on.
     assert_eq!(n.mail().await["content"], "went on");
     assert!(n.hub.list_agents().await.iter().any(|a| a.id == copy.id && a.hooks.is_empty()));
