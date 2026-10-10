@@ -1477,6 +1477,25 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 #[test]
+fn a_server_added_to_or_removed_from_its_mixture_makes_an_agent_outdated() {
+    let hcl = |mcp: &str| {
+        format!(
+            "node \"s\" {{}}\nagent \"base\" {{\n  credential {{\n    base_url = \"http://x\"\n  }}\n  model = \"m\"\n  system_prompt = \"x\"\n  nodes = [\"s\"]\n}}\nmcp \"a\" {{\n  url = \"http://a\"\n  nodes = [\"s\"]\n}}\nmcp \"b\" {{\n  url = \"http://b\"\n  nodes = [\"s\"]\n}}\nmixture \"tooler\" {{\n  agent = \"base\"\n  mcp = [{mcp}]\n}}\n"
+        )
+    };
+    let one = subnet_cluster::Cluster::parse(&[("c.hcl", &hcl("\"a\""))]).unwrap();
+    let two = subnet_cluster::Cluster::parse(&[("c.hcl", &hcl("\"a\", \"b\""))]).unwrap();
+    let spec = |c: &subnet_cluster::Cluster| -> Spec {
+        let mcp: std::collections::BTreeMap<String, String> = c.mixtures["tooler"].mcp.iter().map(|m| (m.clone(), c.mcp_id(m).unwrap())).collect();
+        serde_json::from_value(serde_json::json!({"ty": c.agent_id("base").unwrap(), "mixture": "tooler", "mcp": mcp})).unwrap()
+    };
+    assert!(!outdated(&one, &spec(&one)));
+    assert!(outdated(&two, &spec(&one)), "a server added");
+    assert!(outdated(&one, &spec(&two)), "a server removed");
+}
+
+#[cfg(test)]
+#[test]
 fn ct_eq_works() {
     assert!(ct_eq(b"abc", b"abc"));
     assert!(!ct_eq(b"abc", b"abd"));
@@ -1534,10 +1553,12 @@ fn is_ancestor(st: &State, anc: AgentId, mut id: AgentId) -> bool {
 }
 
 /// Whether an agent runs an older version of its type or of its MCP servers
-/// than the cluster declares now (`upgrade` moves it onto the current one).
+/// than the cluster declares now, or its mixture's servers changed (one added
+/// or removed): `upgrade` moves it onto the current one.
 fn outdated(c: &subnet_cluster::Cluster, spec: &Spec) -> bool {
     let name = spec.ty.split('@').next().unwrap_or_default();
-    c.agent_id(name).is_some_and(|now| now != spec.ty) || spec.mcp.iter().any(|(m, id)| c.mcp_id(m).is_some_and(|now| &now != id))
+    let servers_changed = spec.mixture.as_ref().and_then(|m| c.mixtures.get(m)).is_some_and(|m| m.mcp.len() != spec.mcp.len() || m.mcp.iter().any(|s| !spec.mcp.contains_key(s)));
+    c.agent_id(name).is_some_and(|now| now != spec.ty) || servers_changed || spec.mcp.iter().any(|(m, id)| c.mcp_id(m).is_some_and(|now| &now != id))
 }
 
 fn summary(st: &State, c: &subnet_cluster::Cluster, id: AgentId, r: &AgentRec) -> AgentSummary {
