@@ -251,11 +251,14 @@ impl Node {
                 }
             }
         }
-        for m in &cfg.mcps {
-            if rt.mcps.contains_key(&m.id) {
-                continue;
-            }
-            match McpHost::connect(&m.name, &m.id, &m.def, m.def.default_tenant.as_deref()).await {
+        // At once, each within its time: a slow one doesn't hold up the rest.
+        let starting = cfg.mcps.iter().filter(|m| !rt.mcps.contains_key(&m.id)).map(|m| async move {
+            let limit = m.def.start_timeout.map_or(mcp::START_TIMEOUT, |d| d.0);
+            let r = tokio::time::timeout(limit, McpHost::connect(&m.name, &m.id, &m.def, m.def.default_tenant.as_deref())).await;
+            (m, r.unwrap_or_else(|_| Err(format!("didn't start within {limit:?}"))))
+        });
+        for (m, r) in futures::future::join_all(starting).await {
+            match r {
                 Ok(h) => {
                     rt.mcps.insert(m.id.clone(), Arc::new(h));
                 }

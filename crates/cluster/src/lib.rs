@@ -330,6 +330,10 @@ pub struct McpDef {
     /// without a tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_tenant: Option<String>,
+    /// How long it may take to start and list its tools (default 45s); then
+    /// the node reports it unavailable instead of waiting on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_timeout: Option<crate::time::Dur>,
 }
 
 fn yes() -> bool {

@@ -402,6 +402,20 @@ async fn missing_credentials_are_reported_by_the_node() {
 }
 
 #[tokio::test]
+async fn a_server_that_doesnt_start_in_time_is_reported_and_the_node_gets_ready() {
+    let url = mcp_server(Arc::new(Stats::default())).await;
+    let cluster = cluster(&url, &["s"], &[], "", "").replace("mixture \"tooler\"", "mcp \"stuck\" {\n  command = [\"sleep\", \"30\"]\n  nodes = [\"s\"]\n  start_timeout = \"300ms\"\n}\nmixture \"tooler\"");
+    let n = Net::new(&cluster).await;
+    let started = std::time::Instant::now();
+    n.node("s").await;
+    let nodes = n.hub.list_nodes().await;
+    assert!(started.elapsed() < Duration::from_secs(10), "ready without waiting on it: {:?}", started.elapsed());
+    let (id, err) = nodes[0].errors.iter().next().unwrap();
+    assert!(id.starts_with("stuck@") && err.contains("didn't start within 300ms"), "{id}: {err}");
+    assert!(nodes[0].mcps.iter().any(|m| m.starts_with("t@")), "the other one runs: {:?}", nodes[0].mcps);
+}
+
+#[tokio::test]
 async fn tool_calls_of_one_message_run_in_parallel() {
     let e = Env::new(&[]).await;
     e.node("s").await;

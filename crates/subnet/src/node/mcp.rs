@@ -36,6 +36,11 @@ pub struct Tenants {
 /// How long an unused tenant instance lives.
 pub const TENANT_IDLE: Duration = Duration::from_secs(600);
 
+/// How long a server may take to start and list its tools (unless its
+/// `start_timeout` says) before the node reports it unavailable: one that
+/// hangs mustn't keep the node from ready.
+pub const START_TIMEOUT: Duration = Duration::from_secs(45);
+
 impl Tenants {
     /// Takes the node's MCP servers; instances of servers it no longer runs
     /// (or that changed) are stopped.
