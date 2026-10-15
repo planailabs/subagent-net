@@ -177,7 +177,12 @@ impl Accumulator {
                 slot.id.clone_from(&tc.id);
             }
             if let Some(n) = &tc.name {
-                slot.name.get_or_insert_default().push_str(n);
+                // OpenAI sends the name once; some bridges (LiteLLM's Codex one) repeat the
+                // whole name in every chunk. A chunk equal to the name so far is a repeat.
+                let name = slot.name.get_or_insert_default();
+                if name != n {
+                    name.push_str(n);
+                }
             }
             if let Some(a) = &tc.arguments {
                 slot.arguments.get_or_insert_default().push_str(a);
@@ -286,6 +291,19 @@ mod tests {
         assert_eq!(m.content, None);
         assert_eq!(m.tool_calls, vec![ToolCall::new("c0", "read", "{\"p\":1}"), ToolCall::new("c1", "write", "{}")]);
         assert_eq!(a.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn repeated_tool_names_are_not_concatenated() {
+        let mut a = Accumulator::default();
+        // a bridge that repeats the whole name in every chunk
+        a.push(&tc(0, Some("c0"), Some("t4t__target"), Some("{\"id\":")));
+        a.push(&tc(0, None, Some("t4t__target"), Some("1}")));
+        // a name genuinely split over chunks still joins
+        a.push(&tc(1, Some("c1"), Some("t4t__"), None));
+        a.push(&tc(1, None, Some("http"), Some("{}")));
+        let m = a.finish();
+        assert_eq!(m.tool_calls, vec![ToolCall::new("c0", "t4t__target", "{\"id\":1}"), ToolCall::new("c1", "t4t__http", "{}")]);
     }
 
     #[test]

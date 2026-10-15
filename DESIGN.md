@@ -251,7 +251,7 @@ Each LLM call reports its context size (prompt + completion tokens). Before the 
 
 ### Executors
 
-- **Internal:** the node's built-in runner. It streams completions from an OpenAI-compatible endpoint, batches deltas every 250 ms, and runs tools.
+- **Internal:** the node's built-in runner. It streams completions from an OpenAI-compatible endpoint, batches deltas every 250 ms, and runs tools. A tool call's name is joined from its chunks, except that a chunk equal to the whole name so far is a repeat. Some bridges, such as LiteLLM's Codex one, send the full name in every chunk.
 - **External (`executor { command = [...] }`):** a process that replaces only the *thinking*. The node keeps running the agent's state machine, tools, approvals, pausing and failover; for every LLM call it asks the process instead. Any program can be an agent brain (another framework, a rule engine, a human-in-the-loop UI) and still gets pause, resume, fork and failover.
 
   The node starts one process per agent type (lazily, again after it exits) and speaks JSON lines over stdio:
