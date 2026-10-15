@@ -26,6 +26,8 @@ subnet tui                       # the agent park in the terminal
 subnet watch <agent-id>          # one agent's transcript, live
 ```
 
+`nix build` (the flake's default package) gives a `subnet` for other projects: hub, node and CLI, without the embedded web UI and the tool router.
+
 Open http://127.0.0.1:7700 for the web UI: the agent park, live transcripts with pause/resume/approve, senses, the switchboard's routes and deliveries, and the cluster spec.
 
 Every `subnet` command reads `./.env` and `--env-file PATH` before anything else (the real environment wins), so `DATABASE_URL`, `SUBNET_TOKEN` or API keys can live there.
