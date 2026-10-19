@@ -166,7 +166,15 @@ impl Accumulator {
             self.content.push_str(c);
         }
         for tc in &d.tool_calls {
-            let slot = match self.tool_calls.iter_mut().find(|t| t.index == tc.index) {
+            // A chunk with another call's id is a new call, even at the same index: LiteLLM's
+            // Codex bridge sends parallel calls all at index 0.
+            let slot = match self
+                .tool_calls
+                .iter_mut()
+                .rev()
+                .find(|t| t.index == tc.index)
+                .filter(|t| tc.id.is_none() || t.id.is_none() || t.id == tc.id)
+            {
                 Some(s) => s,
                 None => {
                     self.tool_calls.push(ToolCallDelta { index: tc.index, ..Default::default() });
@@ -304,6 +312,16 @@ mod tests {
         a.push(&tc(1, None, Some("http"), Some("{}")));
         let m = a.finish();
         assert_eq!(m.tool_calls, vec![ToolCall::new("c0", "t4t__target", "{\"id\":1}"), ToolCall::new("c1", "t4t__http", "{}")]);
+    }
+
+    #[test]
+    fn parallel_calls_at_one_index_stay_apart() {
+        let mut a = Accumulator::default();
+        // the bridge's parallel calls: same index, own ids
+        a.push(&tc(0, Some("c0"), Some("skills__skill_load"), Some("")));
+        a.push(&tc(0, Some("c1"), Some("git__worktree_start"), Some("")));
+        let m = a.finish();
+        assert_eq!(m.tool_calls, vec![ToolCall::new("c0", "skills__skill_load", ""), ToolCall::new("c1", "git__worktree_start", "")]);
     }
 
     #[test]
