@@ -1367,7 +1367,7 @@ impl Hub {
             None => tenant,
         };
         let hooks = def.hooks.iter().filter_map(|h| c.hooks.get(h).map(|d| d.spec(h))).collect();
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results.as_ref().map(|g| g.over()), grep_except: def.grep_results.as_ref().map(|g| g.except().to_vec()).unwrap_or_default() };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results.as_ref().map(|g| g.over()), grep_except: def.grep_results.as_ref().map(|g| g.except().to_vec()).unwrap_or_default(), call_reasons: def.call_reasons };
         Ok((spec, reserved))
     }
 

@@ -171,6 +171,11 @@ pub struct AgentDef {
     /// Hooks (`hook` blocks) deciding at points of its agents' loop, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
+    /// Every tool its agents are offered takes an optional `_reason` (why
+    /// the call is made): hooks get it as `reason`, the transcript keeps it,
+    /// and the tool never sees it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub call_reasons: bool,
 }
 
 /// `hook "name" { ... }`: a decision made outside an agent at a point of

@@ -1114,6 +1114,28 @@ fn pre_tool_hooks_allow_deny_rewrite_and_ask_in_order() {
 }
 
 #[test]
+fn call_reasons_reach_hooks_and_the_transcript_but_not_the_tool() {
+    let mut h = H::new(Spec { hooks: vec![hook("policy", HookPoint::PreTool, &[]), hook("audit", HookPoint::PostTool, &[])], call_reasons: true, tools: vec![ToolDef { name: "fs.write".into(), description: "write".into(), parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}) }], ..spec() });
+    let offered = h.a.offered_tools();
+    assert!(offered.iter().all(|t| t.parameters["properties"]["_reason"]["type"] == "string"), "{offered:?}");
+    assert!(offered[0].parameters["properties"]["path"].is_object(), "its own parameters stay");
+    h.user("go");
+    h.call(0, "c1", "fs.write", r#"{"path":"a","_reason":"save the notes"}"#);
+    let fx = h.done();
+    let r = runs(&fx);
+    assert_eq!((r[0].2["reason"].as_str(), r[0].2["args"].get("_reason")), (Some("save the notes"), None));
+    let fx = h.hook_done("h1.0", Outcome::allow());
+    assert_eq!(tool_effect(&fx).function.arguments, r#"{"path":"a"}"#, "the tool doesn't see it");
+    let fx = h.result("c1", "ok");
+    assert_eq!(runs(&fx)[0].2["reason"], "save the notes");
+    // The transcript keeps the call as the model made it.
+    assert!(h.a.messages.iter().any(|m| m.tool_calls.iter().any(|c| c.function.arguments.contains("save the notes"))));
+    // Off: offered as they are, and no reason.
+    let h = H::new(Spec { tools: vec![ToolDef { name: "fs.write".into(), description: "write".into(), parameters: json!({"type": "object", "properties": {}}) }], ..spec() });
+    assert!(h.a.offered_tools()[0].parameters["properties"].get("_reason").is_none());
+}
+
+#[test]
 fn post_tool_hooks_replace_withhold_or_annotate_results() {
     let mut h = hooked(vec![hook("redact", HookPoint::PostTool, &["db.*"]), hook("tag", HookPoint::PostTool, &["db.*"])]);
     h.user("go");

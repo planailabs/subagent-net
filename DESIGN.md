@@ -66,6 +66,7 @@ agent "deepseek-flash" {
   search_history = true                       # optional: the built-in search_history (below)
   grep_results = { over = 8000, except = ["*.read_book"] }   # optional: longer tool results reach the model cut, except these tools'; grep_result searches or reads them (below; a plain number works too)
   hooks = ["careful"]                         # optional: hooks deciding at points of its loop (below)
+  call_reasons = true                         # optional: every tool takes an optional `_reason` (below, Hooks)
   compact  = { at_tokens = 64000, keep = 8 }  # on by default (96000, 8); enabled = false turns it off;
                                               # instructions = "…" adds what its summaries must keep;
                                               # prompt = "…" replaces the built-in instructions
@@ -325,13 +326,15 @@ hook "no-force-push" {
 
 | point | asked about (`input`) | it can answer |
 |---|---|---|
-| `pre_tool` | `{tool, args, call_id}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`); `rewrite` with new `args` |
-| `post_tool` | `{tool, args, call_id, result}` | `allow` (a `note` is added to the result); `deny` (the result is withheld); `rewrite` (`text` replaces it) |
+| `pre_tool` | `{tool, args, call_id, reason}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`); `rewrite` with new `args` |
+| `post_tool` | `{tool, args, call_id, result, reason}` | `allow` (a `note` is added to the result); `deny` (the result is withheld); `rewrite` (`text` replaces it) |
 | `on_message` | `{from, content, reply}`, before a message reaches the model; messages behind a held one wait, so order is kept | `allow` (with a `note`); `deny` (dropped); `rewrite` (`text`) |
 | `pre_model` | `{messages, last: {role, content}}`, before every model call (after tool results too; once a call: a retried call after a recovery doesn't ask again; a quick or hard pause that comes while they run holds the call until a resume, which makes it without asking again: a hook can pause an agent before a call, over a budget, say) | `allow`, with `inject`: context for this call (the time, what a memory recalls, state from outside) |
 | `on_turn_end` | `{content}`, when the model ends its turn | `allow`; `continue` with `text`: the model goes on with `[from hook x]` and the text, at most `max_continue` times per turn |
 | `on_report` | `{content}`, the answer about to go out (after `on_turn_end`) | `allow`; `rewrite` (`text`) |
 | `pre_compact` | `{upto, messages}`, before a compaction | `allow`, with `text`: instructions added to that summary's request |
+
+**Call reasons.** An agent type with `call_reasons = true` offers every tool (built-ins, MCP tools, `load_tools`, `call_tool`) with an optional `_reason` parameter ("why you make this call"). It's taken from the call as the model made it (`call_tool`'s own, or inside its `arguments`), given to `pre_tool` and `post_tool` hooks as `reason` (none: `null`), kept in the transcript (the call as the model made it), and stripped from the arguments before the call runs and before hooks see `args`, so no tool sees it. It's added where tools are offered, not to the spec's tool list: switching it doesn't make agents' tools change.
 
 Several hooks at a point run one after the other, each seeing what the one before decided (rewritten arguments, results, messages). An outcome is `{decision, reason?, args?, text?, note?, inject?}`.
 
@@ -568,7 +571,7 @@ Everything in this document is implemented, except what "Not in scope yet" lists
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.
 - **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in the database), deliveries log.
-- **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI).
+- **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI), call reasons (`_reason` for hooks, never for the tool).
 - **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
 
 When something in this document changes, the change and its status land in the same commit.

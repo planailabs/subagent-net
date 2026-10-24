@@ -173,6 +173,10 @@ pub struct Spec {
     /// Tools (`<mcp>.<tool>` patterns) whose results are never cut.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grep_except: Vec<String>,
+    /// Every offered tool takes an optional `_reason`: hooks get it as
+    /// `reason`, the transcript keeps it, the tool never sees it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub call_reasons: bool,
 }
 
 impl Spec {
@@ -195,6 +199,7 @@ impl Spec {
             hooks: vec![],
             grep_results: None,
             grep_except: vec![],
+            call_reasons: false,
         }
     }
 }
@@ -781,7 +786,24 @@ impl Agent {
             return None;
         }
         let args: Value = serde_json::from_str(&run.function.arguments).unwrap_or(Value::Null);
-        Some(self.chain(hooks, json!({"tool": run.function.name, "args": args, "call_id": call_id, "result": result})))
+        let reason = self.reason_of(call_id);
+        Some(self.chain(hooks, json!({"tool": run.function.name, "args": args, "call_id": call_id, "result": result, "reason": reason})))
+    }
+
+    /// The `_reason` the model gave a call (with `call_reasons`), from the
+    /// call as it made it (call_tool's own or its arguments').
+    fn reason_of(&self, call_id: &str) -> Option<String> {
+        if !self.spec.call_reasons {
+            return None;
+        }
+        let Phase::Tools { calls } = &self.phase else { return None };
+        let c = calls.iter().find(|c| c.call.id == call_id)?;
+        let outer: Value = serde_json::from_str(&c.call.function.arguments).ok()?;
+        let inner = match &outer["arguments"] {
+            Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
+            v => v.clone(),
+        };
+        [&outer, &inner].into_iter().find_map(|v| v["_reason"].as_str()).map(String::from).filter(|r| !r.trim().is_empty())
     }
 
     /// A call as it runs (call_tool resolved).
@@ -1135,6 +1157,16 @@ impl Agent {
     /// `load_tools` (a fixed catalogue of every lazy tool) and `call_tool`
     /// when there are lazy tools. Loaded schemas live in the conversation.
     pub fn offered_tools(&self) -> Vec<ToolDef> {
+        let mut tools = self.offered_tools_bare();
+        if self.spec.call_reasons {
+            for t in &mut tools {
+                with_reason(&mut t.parameters);
+            }
+        }
+        tools
+    }
+
+    fn offered_tools_bare(&self) -> Vec<ToolDef> {
         let mut tools: Vec<ToolDef> = self.spec.tools.iter().filter(|t| !self.spec.lazy.contains(&t.name)).cloned().collect();
         let lazy: Vec<&ToolDef> = self.spec.tools.iter().filter(|t| self.spec.lazy.contains(&t.name)).collect();
         if !lazy.is_empty() {
@@ -1536,7 +1568,8 @@ impl Agent {
                             continue;
                         }
                         let args: Value = serde_json::from_str(&run.function.arguments).unwrap_or(Value::Null);
-                        let chain = self.chain(hooks, json!({"tool": run.function.name, "args": args, "call_id": id}));
+                        let reason = self.reason_of(&id);
+                        let chain = self.chain(hooks, json!({"tool": run.function.name, "args": args, "call_id": id, "reason": reason}));
                         self.run_hook(&chain, fx);
                         self.set_call(&id, CallState::PreHook { chain });
                     }
@@ -1803,6 +1836,8 @@ fn translate(spec: &Spec, loaded: &BTreeSet<String>, call: &ToolCall) -> Dispatc
         spec.tools.iter().find(|t| t.name.replace('.', "__") == n).map(|t| t.name.clone()).unwrap_or_else(|| n.to_string())
     };
     let lazy_or_run = |name: String, arguments: String, id: &str| {
+        // The reason is the hooks' and the transcript's, never the tool's.
+        let arguments = if spec.call_reasons { without_reason(arguments) } else { arguments };
         if spec.lazy.contains(&name) && !loaded.contains(&name) {
             Dispatch::Load(name)
         } else {
@@ -1833,6 +1868,30 @@ fn translate(spec: &Spec, loaded: &BTreeSet<String>, call: &ToolCall) -> Dispatc
         v => v.to_string(),
     };
     lazy_or_run(name, args, &call.id)
+}
+
+/// What `call_reasons` adds to every offered tool's parameters.
+const REASON: &str = "Why you make this call: what you expect it to do or tell you (a short sentence).";
+
+fn with_reason(params: &mut Value) {
+    if !params.is_object() {
+        *params = json!({"type": "object"});
+    }
+    if !params["properties"].is_object() {
+        params["properties"] = json!({});
+    }
+    params["properties"]["_reason"] = json!({"type": "string", "description": REASON});
+}
+
+/// Arguments (a JSON object's text) without `_reason`; others as they are.
+fn without_reason(arguments: String) -> String {
+    match serde_json::from_str::<Value>(&arguments) {
+        Ok(Value::Object(mut m)) if m.contains_key("_reason") => {
+            m.remove("_reason");
+            Value::Object(m).to_string()
+        }
+        _ => arguments,
+    }
 }
 
 /// Up to the first sentence end (or 120 characters) of a description.

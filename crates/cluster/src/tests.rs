@@ -282,5 +282,6 @@ fn grep_results_is_a_limit_or_a_limit_with_exceptions() {
     let g = c.agents["a"].grep_results.as_ref().unwrap();
     assert_eq!((g.over(), g.except()), (12000, &["*.read_book".to_string()][..]));
     assert!(parse(&base.replace("GREP", "grep_results = { over = 100 }")).unwrap_err().to_string().contains("500 characters or more"));
+    assert!(parse(&base.replace("GREP", "call_reasons = true")).unwrap().agents.values().next().unwrap().call_reasons);
 }
 
