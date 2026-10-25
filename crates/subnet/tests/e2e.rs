@@ -517,7 +517,7 @@ async fn long_conversations_are_compacted() {
     assert_eq!(t["compactions"], 1);
     // Nothing's lost: the full transcript has what was compacted away, and
     // where the compaction was.
-    let full = serde_json::to_value(n.hub.transcript_of(id, true).await.unwrap()).unwrap();
+    let full = serde_json::to_value(n.hub.transcript_of(id, true, None).await.unwrap()).unwrap();
     let msgs = full["messages"].as_array().unwrap();
     assert!(msgs.len() > t["messages"].as_array().unwrap().len(), "{full}");
     assert!(msgs.iter().any(|m| m["tool_call_id"] == "c1"), "the first call's result, compacted away");
@@ -550,7 +550,7 @@ async fn compaction_can_be_asked_for() {
     assert!(t["messages"].as_array().unwrap().iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("we talked five times"))));
     assert_eq!(n.llm.requests().len(), calls + 1, "only the summary: no turn after it");
     // Nothing lost.
-    let full = n.hub.transcript_of(id, true).await.unwrap();
+    let full = n.hub.transcript_of(id, true, None).await.unwrap();
     assert!(full.messages.iter().any(|m| m.content.as_deref() == Some("answer 0")));
 }
 
@@ -665,7 +665,7 @@ async fn a_long_tool_result_reaches_it_cut_and_it_greps_the_rest() {
     let id = n.spawn("picker", "what's in the box?").await;
     assert_eq!(n.mail().await["content"], "found it");
     // The transcript keeps the whole.
-    let t = n.hub.transcript_of(id, true).await.unwrap();
+    let t = n.hub.transcript_of(id, true, None).await.unwrap();
     assert!(t.messages.iter().any(|m| m.full.as_deref().is_some_and(|f| f.contains("needle"))));
 }
 

@@ -219,6 +219,10 @@ pub struct TranscriptArgs {
     /// (with where each compaction was), instead of what the model is sent.
     #[serde(default)]
     pub full: bool,
+    /// The state as it was after `at` events: the log replayed to that point,
+    /// nothing written (the flight recorder's scrub). Default: now.
+    #[serde(default)]
+    pub at: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -312,6 +316,78 @@ pub struct ForkArgs {
     /// Also fork the children it had spawned by then (with their descendants).
     #[serde(default)]
     pub tree: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EventsArgs {
+    /// Agent id.
+    pub id: AgentId,
+    /// First seq to include (default: the beginning; the first is 1).
+    #[serde(default)]
+    pub from: Option<u64>,
+    /// Last seq to include (default: the end).
+    #[serde(default)]
+    pub to: Option<u64>,
+    /// Include the log entries themselves alongside the steps.
+    #[serde(default)]
+    pub raw: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DiffArgs {
+    /// First agent (the original, say).
+    pub a: AgentId,
+    /// Second agent (a fork of the first, or another run of the same task).
+    pub b: AgentId,
+    /// Cut A's log after `at_a` events (default: all of it).
+    #[serde(default)]
+    pub at_a: Option<u64>,
+    /// Cut B's log after `at_b` events (default: all of it).
+    #[serde(default)]
+    pub at_b: Option<u64>,
+}
+
+/// A log entry with its seq and time (unix milliseconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EventEntry {
+    pub seq: u64,
+    pub at_ms: i64,
+    pub event: serde_json::Value,
+}
+
+/// An agent's log as a timeline of steps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EventLog {
+    pub id: AgentId,
+    /// The seq of its last committed event (0 before the first one).
+    pub head: u64,
+    /// The range included: `[from, to)`.
+    pub from: u64,
+    pub to: u64,
+    pub steps: Vec<subnet_core::replay::Step>,
+    /// The entries themselves (only with `raw`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventEntry>,
+}
+
+/// Two runs, aligned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentDiff {
+    pub a: AgentId,
+    pub b: AgentId,
+    /// Each run's agent type (with its version hash).
+    pub a_ty: String,
+    pub b_ty: String,
+    /// How many events of each log were compared.
+    pub a_len: u64,
+    pub b_len: u64,
+    /// Built differently: another type, model, tools, budget or tenant.
+    pub spec_changed: bool,
+    /// A's steps (its rows index into these).
+    pub steps_a: Vec<subnet_core::replay::Step>,
+    /// B's steps.
+    pub steps_b: Vec<subnet_core::replay::Step>,
+    pub diff: subnet_core::replay::Diff,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -510,6 +586,8 @@ op!(InjectEvent, "inject_event", Operator, Some((Method::Post, "/v1/senses/{sens
 op!(BlobPut, "blob_put", Operator, Some((Method::Post, "/v1/blobs")), BlobPutArgs, crate::hub::blobs::BlobRef, "Store a blob; returns its blob:<sha256> reference.");
 op!(BlobGetOp, "blob_get", Viewer, Some((Method::Get, "/v1/blobs/{hash}")), BlobGetArgs, crate::hub::blobs::Blob, "Read a blob as base64 (raw bytes: GET /v1/blobs/{hash}/raw).");
 op!(Fork, "fork", Operator, Some((Method::Post, "/v1/agents/{id}/fork")), ForkArgs, Spawned, "Copy an agent's history (optionally only the first `at` events, optionally with its children) into a new agent.");
+op!(Events, "events", Viewer, Some((Method::Get, "/v1/agents/{id}/events")), EventsArgs, EventLog, "An agent's log as a timeline of steps (a streamed answer is one step), with the raw entries on request: the flight recorder.");
+op!(DiffAgents, "diff", Viewer, Some((Method::Get, "/v1/diff")), DiffArgs, AgentDiff, "Two runs aligned side by side: where they part first and why (a different input, model, tool result, compaction, control step or spec).");
 op!(Upgrade, "upgrade", Operator, Some((Method::Post, "/v1/agents/{id}/upgrade")), UpgradeArgs, Spawned, "Move an agent (a root; with `tree` its children too) onto the current version of its type, or (`to`) of another mixture or agent type: its history is copied into a new agent built from the cluster as it is now, the old one is cancelled, and a resident follows. Agents listed `outdated` need this to run again.");
 
 /// Metadata of every operation (what the CLI needs; no hub required).
@@ -529,6 +607,8 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<Cancel>(),
         OpMeta::of::<Approve>(),
         OpMeta::of::<Fork>(),
+        OpMeta::of::<Events>(),
+        OpMeta::of::<DiffAgents>(),
         OpMeta::of::<Upgrade>(),
         OpMeta::of::<ApplyCluster>(),
         OpMeta::of::<GetCluster>(),
@@ -571,7 +651,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     let h = hub.clone();
     r.add::<GetAgent, _, _>(move |_, a| {
         let h = h.clone();
-        async move { Ok(h.transcript_of(a.id, a.full).await?) }
+        async move { Ok(h.transcript_of(a.id, a.full, a.at).await?) }
     });
     let h = hub.clone();
     r.add::<WatchAgent, _, _>(move |_, a| {
@@ -622,6 +702,16 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<Fork, _, _>(move |c, a| {
         let h = h.clone();
         async move { Ok(h.fork(&c.addr, a.id, a.at, a.tree).await?) }
+    });
+    let h = hub.clone();
+    r.add::<Events, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(h.event_log(a.id, a.from.unwrap_or(0), a.to, a.raw).await?) }
+    });
+    let h = hub.clone();
+    r.add::<DiffAgents, _, _>(move |_, a| {
+        let h = h.clone();
+        async move { Ok(h.diff(a.a, a.b, a.at_a, a.at_b).await?) }
     });
     let h = hub.clone();
     r.add::<Upgrade, _, _>(move |c, a| {

@@ -20,7 +20,7 @@ impl Hub {
         // Subscribe before looking, so nothing between the look and the wait is missed.
         let mut rx = self.subscribe();
         let cap = a.max_chars.unwrap_or(2000);
-        let t = self.transcript_of(a.id, a.full).await?;
+        let t = self.transcript_of(a.id, a.full, None).await?;
         let len = t.messages.len() as u64;
         let timeout = a.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let after = match a.after {
@@ -52,7 +52,7 @@ impl Hub {
             tokio::time::sleep(COALESCE).await;
         };
         let _ = tokio::time::timeout(Duration::from_millis(timeout), wait).await;
-        Ok(render(self.transcript_of(a.id, a.full).await?, after, cap))
+        Ok(render(self.transcript_of(a.id, a.full, None).await?, after, cap))
     }
 }
 

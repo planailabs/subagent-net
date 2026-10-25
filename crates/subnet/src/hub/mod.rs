@@ -29,7 +29,7 @@ use subnet_core::proto::{Mail, Op};
 
 use crate::wire::{Snapshot, ToHub, ToNode};
 
-use crate::api::{AgentSummary, Done, NodeSummary, Spawned, Transcript, TypeSummary};
+use crate::api::{AgentDiff, AgentSummary, Done, EventLog, EventEntry, NodeSummary, Spawned, Transcript, TypeSummary};
 use db::Db;
 
 pub type ConnId = u64;
@@ -815,13 +815,42 @@ impl Hub {
     }
 
     pub async fn transcript(&self, id: AgentId) -> Result<Transcript, HubError> {
-        self.transcript_of(id, false).await
+        self.transcript_of(id, false, None).await
     }
 
     /// An agent's transcript: what its model is sent, or (`full`) the whole
     /// conversation as it happened, replayed from its log, compacted parts
-    /// included.
-    pub async fn transcript_of(&self, id: AgentId, full: bool) -> Result<Transcript, HubError> {
+    /// included. With `at`, the state as it was after `at` events: the log
+    /// folded again, nothing written (the flight recorder's scrub).
+    pub async fn transcript_of(&self, id: AgentId, full: bool, at: Option<u64>) -> Result<Transcript, HubError> {
+        let (spec, head) = {
+            let st = self.st.lock().await;
+            let Some(r) = st.agents.get(&id) else { return no_agent(id) };
+            (r.a.spec.clone(), r.seq)
+        };
+        if let Some(n) = at
+            && n < head
+        {
+            // Replay rather than read the live state: the log is the truth,
+            // and this is the one place that asks it about the past.
+            let mut events = self.db.events(id, 0).await?;
+            events.truncate(n as usize);
+            let a = Agent::replay(id, spec.clone(), &events);
+            let (messages, compacted) = match full && a.compactions > 0 {
+                true => {
+                    let h = Agent::full_history(id, spec, &events);
+                    (h.messages, h.compactions)
+                }
+                false => (a.messages.clone(), vec![]),
+            };
+            let summary = {
+                let st = self.st.lock().await;
+                let c = self.cluster.read().unwrap().spec.clone();
+                // A replay of the past: the log does not say which node ran it.
+                summary_of(&st, &c, id, &a, n, None)
+            };
+            return Ok(Transcript { summary, messages, compacted, partial: (!a.acc.is_empty()).then(|| a.acc.partial()), inbox: a.inbox.iter().cloned().collect() });
+        }
         let (mut t, spec, seq) = {
             let st = self.st.lock().await;
             let Some(r) = st.agents.get(&id) else { return no_agent(id) };
@@ -844,6 +873,62 @@ impl Hub {
         Ok(t)
     }
 
+    /// An agent's log as readable steps: the timeline of the flight recorder.
+    /// `from..=to` by seq (the log's first seq is 1); `to` none is the end.
+    /// With `raw`, the log entries themselves are included too.
+    pub async fn event_log(&self, id: AgentId, from: u64, to: Option<u64>, raw: bool) -> Result<EventLog, HubError> {
+        let head = {
+            let st = self.st.lock().await;
+            let Some(r) = st.agents.get(&id) else { return no_agent(id) };
+            r.seq
+        };
+        // `head` is the seq of the last committed event, so `to` is inclusive
+        // here and exclusive in the query.
+        let to = to.unwrap_or(head).min(head);
+        if from > to {
+            return bad(format!("from ({from}) is past the end of the log ({to})"));
+        }
+        let rows = self.db.event_log(id, from, Some(to + 1)).await?;
+        let steps = subnet_core::replay::timed_steps(rows.iter().map(|(seq, at, ev)| (*seq, Some(*at), ev)));
+        let events = match raw {
+            true => rows
+                .iter()
+                .map(|(seq, at, ev)| EventEntry { seq: *seq, at_ms: *at, event: serde_json::to_value(ev).unwrap_or_default() })
+                .collect(),
+            false => vec![],
+        };
+        Ok(EventLog { id, head, from, to, steps, events })
+    }
+
+    /// Two runs, aligned: the flight recorder's comparison. Each is a log
+    /// (optionally cut at `at` events), and the answer says where they part
+    /// first and why.
+    pub async fn diff(&self, a: AgentId, b: AgentId, at_a: Option<u64>, at_b: Option<u64>) -> Result<AgentDiff, HubError> {
+        let (spec_a, spec_b, head_a, head_b) = {
+            let st = self.st.lock().await;
+            let (Some(ra), Some(rb)) = (st.agents.get(&a), st.agents.get(&b)) else { return no_agent(if st.agents.contains_key(&a) { b } else { a }) };
+            (ra.a.spec.clone(), rb.a.spec.clone(), ra.seq, rb.seq)
+        };
+        let (wa, wb) = (at_a.unwrap_or(head_a).min(head_a), at_b.unwrap_or(head_b).min(head_b));
+        // Logs, not live state: a comparison must not be moved by a run going
+        // on while it is read.
+        let (ea, eb) = futures::try_join!(self.db.events(a, 0), self.db.events(b, 0))?;
+        let ea: Vec<Event> = ea.into_iter().take(wa as usize).collect();
+        let eb: Vec<Event> = eb.into_iter().take(wb as usize).collect();
+        // A log's first event is seq 1 (the hub appends at `seq + 1`).
+        let steps_a = subnet_core::replay::steps(1, &ea);
+        let steps_b = subnet_core::replay::steps(1, &eb);
+        let mut d = subnet_core::replay::diff(&steps_a, &steps_b);
+        let spec_changed = serde_json::to_value(&spec_a).ok() != serde_json::to_value(&spec_b).ok();
+        // Built differently explains a divergence better than the first
+        // symptom does; the symptom is still in the steps.
+        if spec_changed && let Some(first) = &mut d.first {
+            first.cause = subnet_core::replay::Cause::Spec;
+            first.note = format!("the runs were built differently ({} vs {}): {}", spec_a.ty, spec_b.ty, first.note);
+        }
+        Ok(AgentDiff { a, b, a_ty: spec_a.ty.clone(), b_ty: spec_b.ty.clone(), a_len: wa, b_len: wb, spec_changed, steps_a, steps_b, diff: d })
+    }
+
     /// An agent searching its own whole conversation (summarised parts too):
     /// the messages matching `pattern` (a case-insensitive regex), oldest
     /// first, `HISTORY_PAGE` a page, each cut to the part around the match.
@@ -852,7 +937,7 @@ impl Hub {
         const AROUND: usize = 200;
         let Addr::Agent(id) = caller else { return bad("only an agent searches its own history") };
         let re = regex::RegexBuilder::new(pattern).case_insensitive(true).size_limit(1 << 20).build().map_err(|e| HubError::Bad(format!("bad pattern: {e}")))?;
-        let t = self.transcript_of(*id, true).await?;
+        let t = self.transcript_of(*id, true, None).await?;
         // The summarised ones are in a compaction's range (the task never is).
         let summarised = |n: usize| t.compacted.iter().any(|c| (c.from..c.to).contains(&n));
         // Its own searches (calls and results) aren't news.
@@ -885,7 +970,7 @@ impl Hub {
     /// One of the caller's tool results, the whole of it (`full` when it was cut).
     async fn result_text(&self, caller: &Addr, call: &str) -> Result<String, HubError> {
         let Addr::Agent(id) = caller else { return bad("only an agent reads its own tool results") };
-        let t = self.transcript_of(*id, true).await?;
+        let t = self.transcript_of(*id, true, None).await?;
         let m = t.messages.iter().find(|m| m.tool_call_id.as_deref() == Some(call)).ok_or_else(|| HubError::NotFound(format!("no result of a tool call {call:?} (the id is in the cut note)")))?;
         Ok(m.full.clone().or_else(|| m.content.clone()).unwrap_or_default())
     }
@@ -1562,32 +1647,37 @@ fn outdated(c: &subnet_cluster::Cluster, spec: &Spec) -> bool {
 }
 
 fn summary(st: &State, c: &subnet_cluster::Cluster, id: AgentId, r: &AgentRec) -> AgentSummary {
-    let awaiting_approval = r.a.awaiting_approval().first().map(|c| (*c).clone());
-    let phase = serde_json::to_value(&r.a.phase).unwrap()["phase"].as_str().unwrap_or_default().to_string();
+    summary_of(st, c, id, &r.a, r.seq, r.node)
+}
+
+/// A summary of an agent's state, live or replayed: `seq` is how far its log
+/// goes, `node` where it ran (none for a replay of the past).
+fn summary_of(st: &State, c: &subnet_cluster::Cluster, id: AgentId, a: &Agent, seq: u64, node: Option<ConnId>) -> AgentSummary {
+    let awaiting_approval = a.awaiting_approval().first().map(|c| (*c).clone());
+    let phase = serde_json::to_value(&a.phase).unwrap()["phase"].as_str().unwrap_or_default().to_string();
     AgentSummary {
         id,
-        ty: r.a.spec.ty.clone(),
-        parent: r.a.spec.parent,
+        ty: a.spec.ty.clone(),
+        parent: a.spec.parent,
         phase,
-        error: match &r.a.phase {
+        error: match &a.phase {
             subnet_core::agent::Phase::Failed { error } => Some(error.clone()),
             _ => None,
         },
-        pause: r.a.pause,
-        paused: r.a.is_paused(),
-        node: r.node.and_then(|c| st.nodes.get(&c)).map(|s| s.name.clone()),
-        usage: r.a.usage,
-        budget: r.a.spec.budget.clone(),
-        reserved: r.a.reserved,
-        compactions: r.a.compactions,
-        tenant: r.a.spec.tenant.clone(),
-        outdated: outdated(c, &r.a.spec),
-        superseded_by: r.a.superseded_by,
-        seq: r.seq,
+        pause: a.pause,
+        paused: a.is_paused(),
+        node: node.and_then(|c| st.nodes.get(&c)).map(|s| s.name.clone()),
+        usage: a.usage,
+        budget: a.spec.budget.clone(),
+        reserved: a.reserved,
+        compactions: a.compactions,
+        tenant: a.spec.tenant.clone(),
+        outdated: outdated(c, &a.spec),
+        superseded_by: a.superseded_by,
+        seq,
         awaiting_approval,
-        hooks: r.a.waiting_hooks().into_iter().map(|(run, name)| crate::api::WaitingHook { run, name }).collect(),
-        last: r
-            .a
+        hooks: a.waiting_hooks().into_iter().map(|(run, name)| crate::api::WaitingHook { run, name }).collect(),
+        last: a
             .messages
             .iter()
             .rev()

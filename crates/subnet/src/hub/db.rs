@@ -109,6 +109,26 @@ impl Db {
         })
     }
 
+    /// The log in `[from, to)`, in order, with each entry's time (unix ms):
+    /// what the flight recorder reads. `to` none is the end.
+    pub async fn event_log(&self, id: AgentId, from: u64, to: Option<u64>) -> Result<Vec<(u64, i64, Event)>, sqlx::Error> {
+        // SQLite's integers are signed 64-bit: u64::MAX would wrap.
+        let from = from.min(i64::MAX as u64) as i64;
+        let to = to.map(|t| t.min(i64::MAX as u64) as i64);
+        on!(
+            self,
+            |p, q|
+            "select seq, (extract(epoch from at) * 1000)::bigint as at_ms, event from events where agent_id = $1 and seq >= $2 and ($3::bigint is null or seq < $3) order by seq",
+            "select seq, at * 1000 as at_ms, event from events where agent_id = ?1 and seq >= ?2 and (?3 is null or seq < ?3) order by seq"
+            => {
+                let rows = sqlx::query(q).bind(id).bind(from).bind(to).fetch_all(p).await?;
+                rows.into_iter()
+                    .map(|r| Ok((r.try_get::<i64, _>("seq")? as u64, r.try_get::<i64, _>("at_ms")?, r.try_get::<Json<Event>, _>("event")?.0)))
+                    .collect()
+            }
+        )
+    }
+
     /// Appends events starting at `first_seq`, atomically, if this hub's term
     /// is still the leader's. `Ok(false)` means a newer leader exists.
     pub async fn append(&self, id: AgentId, first_seq: u64, events: &[Event]) -> Result<bool, sqlx::Error> {

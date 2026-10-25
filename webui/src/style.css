@@ -59,3 +59,22 @@ main { padding: 12px; }
 .compacted > summary { cursor: pointer; color: var(--dim); }
 .compacted .summary { color: var(--hi); border-left: 2px solid var(--line); padding-left: 8px; }
 .compacted .msg { opacity: 0.7; }
+
+/* replay: a timeline to scrub, and two runs side by side. Monochrome:
+   sameness and divergence are shown by glyphs and line patterns, never colour. */
+.tl { max-height: 68vh; overflow: auto; border: 1px solid var(--line); }
+.tl .st { display: grid; grid-template-columns: 8ch 13ch 1fr; gap: 8px; padding: 2px 8px; cursor: pointer; border-left: 2px solid transparent; }
+.tl .st:hover { background: #111; }
+.tl .st.sel { border-left-color: var(--hi); background: #141414; }
+.tl .st .lab, .dr .side { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tl .st .pv, .dr .pv { color: var(--dim); }
+.cmp { border: 1px solid var(--line); max-height: 68vh; overflow: auto; }
+.dr { display: grid; grid-template-columns: 2ch 1fr 1fr; gap: 8px; padding: 2px 8px; border-left: 2px solid transparent; cursor: pointer; }
+.dr:hover { background: #111; }
+.dr.same { opacity: 0.5; }
+.dr.changed { border-left-style: dotted; border-left-color: var(--dim); }
+.dr.only_a { border-left-style: dashed; border-left-color: var(--hi); }
+.dr.only_b { border-left-style: double; border-left-width: 4px; border-left-color: var(--hi); }
+.dr .mark { color: var(--dim); }
+.dr .side { color: var(--fg); }
+.dr.same .side { color: var(--dim); }

@@ -8,8 +8,9 @@ import Senses from "./components/Senses.vue";
 import Switchboard from "./components/Switchboard.vue";
 import Cluster from "./components/Cluster.vue";
 import Inbox from "./components/Inbox.vue";
+import Replay from "./components/Replay.vue";
 
-const tabs = { park: Park, senses: Senses, switchboard: Switchboard, cluster: Cluster, inbox: Inbox };
+const tabs = { park: Park, replay: Replay, senses: Senses, switchboard: Switchboard, cluster: Cluster, inbox: Inbox };
 const initial = location.hash.slice(1).split("/")[0];
 const tab = ref(initial in tabs ? initial : "park");
 const me = ref(null);

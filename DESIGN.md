@@ -236,6 +236,17 @@ enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
   - Without `tree`, the copy has no children: `ChildSpawned`/`ChildReport` events are left out, so a `wait_for` pending at the fork point returns "not a child".
   - With `tree`, every child spawned within the prefix is forked as well (recursively, with its full log), with ids remapped in all copied events and specs.
 
+### Flight recorder
+
+A run is readable from its log alone. `crates/core/src/replay.rs` turns a log into **steps** — a streamed answer is one step however many deltas it came in; a tool result, an input, a pause are one each — and compares two logs. Pure, like `apply`.
+
+- A step has a `kind`, a **key** and a **digest**. The key is where in the run it is, content aside (`input:<from>`, `llm`, `tool:<name>`, `pause:<mode>`, …); the digest is what happened, content included. Tool results are keyed by the *tool name* from the stream that proposed the call, never by the call id, which differs between runs: two runs of the same task line up even though their ids and token counts do not.
+- **Scrub:** `transcript` with `at` folds the log again up to that seq and returns the state as it was then, writing nothing. Seqs are 1-based (the first committed event is 1); `at` is how many events had happened.
+- **Compare:** `diff` aligns two logs by key — identical head and tail cut first, then a longest-common-subsequence alignment, with windowed matching for logs too long for its table — and marks each row `same`, `changed` (one key, different digest) or one-sided, then reports the first divergence, its cause (`input`, `model`, `tool`, `context`, `control`, `extra`, or `spec` when the two were built differently) and how much of the runs is identical.
+- **Branch:** `fork` with `at` already copies a log prefix. The recorder shows the state at the seq to branch from, and the web UI's replay tab does both in one click.
+
+It compares recorded runs; it does not re-run a model. Determinism is per fold (`Agent::apply`), which is why a scrub is exact and a diff explains rather than reproduces.
+
 ### Compaction
 
 Each LLM call reports its context size (prompt + completion tokens). Before the next call, if that reached the agent type's `compact.at_tokens` (default 96 000), the state machine asks for a compaction (`Effect::Compact { upto }`) instead of the call:
@@ -480,6 +491,8 @@ Every operation is defined once in the `ops` crate's typed registry: name, summa
   - `GET /v1/agents`, `GET /v1/agents/{id}`
   - `POST /v1/agents` (spawn), `POST /v1/agents/{id}/pause`
   - `GET /v1/cluster`, `PUT /v1/cluster` (apply)
+  - `GET /v1/agents/{id}/events` (the log as steps; `raw` adds the entries)
+  - `GET /v1/diff?a=&b=` (two runs aligned, with the first divergence and its cause)
 
   `GET /v1/openapi.json` is the generated OpenAPI 3.1 document; `/v1/docs` renders it.
 - **MCP** (`/mcp`): every op a principal's role allows is a tool.
@@ -533,6 +546,7 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
   - **Switchboard:** routes with counters (matched, dropped, throttled, delivered), the holds (frozen or open, how many wait, a freeze/release button), and the latest deliveries.
   - **Cluster:** nodes and what they run, current spec version, diff and apply (admin), history.
   - **Inbox:** mail for the logged-in principal.
+  - **Replay:** the flight recorder. One agent's log as a timeline (time, kind, label, preview) to scrub with a slider or by clicking a step, the state at that point (phase, messages, task, last answer) and **fork from here**. Pick a second agent and the two runs are shown side by side, aligned row by row — ` ` same, `~` changed, `-` only the first, `+` only the second — with the first divergence, its cause, the similarity, and a click that scrubs the first run to that row.
 
 ## TUI
 
@@ -574,5 +588,6 @@ Everything in this document is implemented, except what "Not in scope yet" lists
 - **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in the database), deliveries log.
 - **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI), call reasons (`_reason` for hooks, never for the tool).
 - **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
+- **Flight recorder:** steps (`events`), scrub (`transcript` with `at`), two runs aligned (`diff`) with the first divergence and its cause; the web UI's replay tab, including fork-from-here.
 
 When something in this document changes, the change and its status land in the same commit.

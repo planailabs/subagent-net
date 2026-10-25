@@ -335,3 +335,68 @@ async fn watch_agent_follows_an_agent_live() {
     let w: Value = reqwest::get(format!("{base}/v1/agents/{id}/watch?after=0&timeout_ms=0")).await.unwrap().json().await.unwrap();
     assert_eq!(w["entries"].as_array().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn the_log_reads_as_steps_and_scrubs_backwards() {
+    let (base, llm) = setup(None).await;
+    llm.say(SYS, &["hello ", "there"]);
+    let u = remote(&base, None, "user").await.unwrap();
+    let id = u.call_raw("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+
+    let log = u.call_raw("events", json!({"id": id})).await.unwrap();
+    let steps = log["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["kind"], "input", "{log}");
+    assert_eq!(steps[0]["preview"], "x");
+    // However many chunks the stream came in, it is one step.
+    let streams: Vec<&Value> = steps.iter().filter(|s| s["kind"] == "stream").collect();
+    assert_eq!(streams.len(), 1, "{log}");
+    assert_eq!(streams[0]["label"], "model: 11 chars", "{log}");
+    assert!(log["head"].as_u64().unwrap() >= steps.len() as u64);
+
+    // Scrub: before the task arrived, nothing had happened.
+    let at0 = u.call_raw("transcript", json!({"id": id, "at": 0})).await.unwrap();
+    assert_eq!(at0["seq"], 0);
+    assert_eq!(at0["messages"].as_array().unwrap().len(), 0, "{at0}");
+    let now = u.call_raw("transcript", json!({"id": id})).await.unwrap();
+    assert!(now["messages"].as_array().unwrap().len() >= 2, "{now}");
+    // Past the end is now, not an error.
+    let far = u.call_raw("transcript", json!({"id": id, "at": 99999})).await.unwrap();
+    assert_eq!(far["seq"], now["seq"]);
+
+    // A range, and the raw entries on request.
+    let raw = u.call_raw("events", json!({"id": id, "from": 0, "to": 2, "raw": true})).await.unwrap();
+
+    assert_eq!(raw["to"], 2);
+    assert_eq!(raw["events"].as_array().unwrap().len(), 2);
+    assert_eq!(raw["events"][0]["seq"], 1, "the log starts at seq 1");
+}
+
+#[tokio::test]
+async fn a_fork_compared_with_its_original_parts_at_the_fork_point() {
+    let (base, llm) = setup(None).await;
+    llm.say(SYS, &["hello"]);
+    let u = remote(&base, None, "user").await.unwrap();
+    let id = u.call_raw("spawn", json!({"type":"helper","prompt":"x"})).await.unwrap()["id"].as_str().unwrap().to_string();
+    u.call_raw("wait_inbox", json!({"timeout_ms": 5000})).await.unwrap();
+    let fid = u.call_raw("fork", json!({"id": id, "at": 1})).await.unwrap()["id"].as_str().unwrap().to_string();
+
+    // The fork has only the task; everything else is the original's alone.
+    let d = u.call_raw("diff", json!({"a": id, "b": fid, "at_b": 1})).await.unwrap();
+    assert_eq!(d["diff"]["changed"], 0, "{d}");
+    assert_eq!(d["diff"]["only_b"], 0, "{d}");
+    assert!(d["diff"]["only_a"].as_u64().unwrap() >= 1);
+    assert_eq!(d["diff"]["first"]["cause"], "extra");
+    assert_eq!(d["a_ty"], d["b_ty"]);
+    assert_eq!(d["spec_changed"], false);
+    assert_eq!(d["steps_a"][0]["seq"], 1, "steps carry the log's seq, which starts at 1");
+
+    // A run against itself is the same run.
+    let same = u.call_raw("diff", json!({"a": id, "b": id})).await.unwrap();
+    assert_eq!(same["diff"]["similarity"], 1.0);
+    assert!(same["diff"].get("first").is_none(), "{same}");
+
+    // REST is the same op.
+    let r: Value = reqwest::get(format!("{base}/v1/diff?a={id}&b={fid}&at_b=1")).await.unwrap().json().await.unwrap();
+    assert_eq!(r["diff"]["first"]["cause"], "extra");
+}
