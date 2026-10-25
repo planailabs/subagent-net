@@ -761,7 +761,7 @@ impl Hub {
             Op::Pause { id, mode, tree } => j(self.pause(caller, id, mode, tree).await),
             Op::Resume { id, tree } => j(self.resume(caller, id, tree).await),
             Op::Cancel { id } => j(self.cancel(caller, id).await),
-            Op::Approve { id, call_id, approved } => j(self.approve(caller, id, call_id, approved).await),
+            Op::Approve { id, call_id, approved, reason } => j(self.approve(caller, id, call_id, approved, reason).await),
             Op::Fork { id, at, tree } => j(self.fork(caller, id, at, tree).await),
             Op::Transcript { id } => j(self.transcript(id).await),
             Op::WaitInbox { timeout_ms } => j(self.wait_inbox(caller, timeout_ms).await),
@@ -1017,8 +1017,8 @@ impl Hub {
         self.control(caller, id, false, Event::CompactRequested).await
     }
 
-    pub async fn approve(&self, caller: &Addr, id: AgentId, call_id: String, approved: bool) -> Result<Done, HubError> {
-        self.control(caller, id, false, Event::Approval { call_id, approved }).await
+    pub async fn approve(&self, caller: &Addr, id: AgentId, call_id: String, approved: bool, reason: Option<String>) -> Result<Done, HubError> {
+        self.control(caller, id, false, Event::Approval { call_id, approved, reason }).await
     }
 
     async fn control(&self, caller: &Addr, id: AgentId, tree: bool, ev: Event) -> Result<Done, HubError> {

@@ -207,7 +207,7 @@ enum Event {
     Inbox { from: Addr, content, reply },
     LlmDelta { delta }, LlmDone, LlmAborted, LlmFailed { error },
     ToolResult { call_id, content, is_error }, ToolAborted { call_id },
-    Approval { call_id, approved },
+    Approval { call_id, approved, reason },
     ChildSpawned { id, reserved }, ChildReport { id, status, content },
     PauseRequested { mode }, Resumed, Cancelled, Superseded { by },
     Recovered,                                     // logged by the hub on every placement
@@ -224,6 +224,7 @@ enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
 ```
 
 - The spec (mixture, agent type, MCP types, parent, budget, approval list, tool list) is stored with the agent, not in the log.
+- **Approval reasons:** `approve` takes an optional `reason`. A denied call's result is `[denied by user: reason]`; an approved one's reason reaches the model as a note before its next call (`[the user approved call c1: reason]`).
 - **Parallel tools:** all tool calls of one assistant message start together (each may first need approval). The next LLM call happens once all have results. A `quick` pause lets the running calls finish but starts no queued or approved ones.
 - `wait_for` is handled by the state machine itself (it waits for `ChildReport` events). Every other tool is executed by the node.
 - **Recovery:** whenever the hub places an agent, it first commits `Recovered`: whatever was in flight is gone, and applying `Recovered` returns the effects that restart it. Because recovery is logged, every replica folds identical state.

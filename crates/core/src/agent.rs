@@ -255,6 +255,9 @@ pub enum Event {
     Approval {
         call_id: String,
         approved: bool,
+        /// Why (the model reads it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// `reserved` tokens are carved out of this agent's budget for the child.
     ChildSpawned {
@@ -1375,13 +1378,17 @@ impl Agent {
                     self.tool_done(call_id, "[aborted before completion]".into(), &mut fx);
                 }
             }
-            Event::Approval { call_id, approved } => {
+            Event::Approval { call_id, approved, reason } => {
                 if self.call_in(call_id, &CallState::Approval) {
                     if *approved {
+                        if let Some(r) = reason {
+                            self.notes.push(format!("[the user approved call {call_id}: {r}]"));
+                        }
                         self.set_call(call_id, CallState::Approved);
                         self.advance(&mut fx);
                     } else {
-                        self.tool_done(call_id, "[denied by user]".into(), &mut fx);
+                        let why = reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default();
+                        self.tool_done(call_id, format!("[denied by user{why}]"), &mut fx);
                     }
                 }
             }

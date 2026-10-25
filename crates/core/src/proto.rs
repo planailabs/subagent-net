@@ -41,6 +41,9 @@ pub enum Op {
         id: AgentId,
         call_id: String,
         approved: bool,
+        /// Why (the model reads it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Copy an agent's log (up to `at` events) into a new, parentless agent
     /// (with `tree`, its descendants too).

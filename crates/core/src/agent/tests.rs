@@ -307,7 +307,7 @@ fn quick_pause_finishes_running_calls_but_starts_none() {
     let fx = h.done();
     assert!(matches!(fx.as_slice(), [Effect::CallTool { .. }, Effect::RequestApproval { .. }]), "{fx:?}");
     h.pause(PauseMode::Quick);
-    assert!(h.ev(Event::Approval { call_id: "c2".into(), approved: true }).is_empty(), "approved but not started");
+    assert!(h.ev(Event::Approval { call_id: "c2".into(), approved: true, reason: None }).is_empty(), "approved but not started");
     assert!(h.result("c1", "r").is_empty());
     assert!(h.a.is_paused());
     assert_eq!(tool_effects(&h.resume()), [("c2".to_string(), false)]);
@@ -412,7 +412,7 @@ fn approval_granted_runs_tool() {
     h.call(0, "c1", "rm", "{}");
     assert!(matches!(h.done().as_slice(), [Effect::RequestApproval { call }] if call.id == "c1"));
     assert!(!h.a.inflight());
-    let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true });
+    let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None });
     assert!(matches!(fx.as_slice(), [Effect::CallTool { retry: false, .. }]));
 }
 
@@ -423,7 +423,7 @@ fn approval_while_paused_runs_on_resume() {
     h.call(0, "c1", "rm", "{}");
     h.done();
     h.pause(PauseMode::Quick);
-    assert!(h.ev(Event::Approval { call_id: "c1".into(), approved: true }).is_empty());
+    assert!(h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None }).is_empty());
     assert!(matches!(h.resume().as_slice(), [Effect::CallTool { retry: false, .. }]));
 }
 
@@ -433,8 +433,24 @@ fn approval_denied_tells_model() {
     h.user("x");
     h.call(0, "c1", "rm", "{}");
     h.done();
-    assert_eq!(h.ev(Event::Approval { call_id: "c1".into(), approved: false }), vec![Effect::CallLlm]);
+    assert_eq!(h.ev(Event::Approval { call_id: "c1".into(), approved: false, reason: None }), vec![Effect::CallLlm]);
     assert_eq!(h.a.messages.last().unwrap().content.as_deref(), Some("[denied by user]"));
+}
+
+#[test]
+fn approval_reasons_reach_the_model() {
+    let mut h = H::new(Spec { approve: vec!["rm".into()], ..spec() });
+    h.user("x");
+    h.call(0, "c1", "rm", "{}");
+    h.done();
+    h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: Some("it's a temp dir".into()) });
+    assert_eq!(h.a.notes, ["[the user approved call c1: it's a temp dir]"]);
+    let mut h = H::new(Spec { approve: vec!["rm".into()], ..spec() });
+    h.user("x");
+    h.call(0, "c1", "rm", "{}");
+    h.done();
+    h.ev(Event::Approval { call_id: "c1".into(), approved: false, reason: Some("keep the logs".into()) });
+    assert_eq!(h.a.messages.last().unwrap().content.as_deref(), Some("[denied by user: keep the logs]"));
 }
 
 #[test]
@@ -443,7 +459,7 @@ fn approval_for_other_call_is_ignored() {
     h.user("x");
     h.call(0, "c1", "rm", "{}");
     h.done();
-    assert!(h.ev(Event::Approval { call_id: "c9".into(), approved: true }).is_empty());
+    assert!(h.ev(Event::Approval { call_id: "c9".into(), approved: true, reason: None }).is_empty());
 }
 
 // ---------- children ----------
@@ -618,7 +634,7 @@ fn replay_of_long_session_matches_live_state() {
     h.user("a");
     h.call(0, "c1", "rm", "{}");
     h.done();
-    h.ev(Event::Approval { call_id: "c1".into(), approved: true });
+    h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None });
     h.pause(PauseMode::Quick);
     h.result("c1", "ok");
     h.user("b");
@@ -722,7 +738,7 @@ fn approvals_see_the_real_tool() {
     let fx = h.done();
     assert!(matches!(&fx[..], [Effect::RequestApproval { call }] if call.function.name == "web.scrape"), "{fx:?}");
     assert_eq!(h.a.awaiting_approval()[0].function.name, "web.scrape");
-    let fx = h.ev(Event::Approval { call_id: "c2".into(), approved: true });
+    let fx = h.ev(Event::Approval { call_id: "c2".into(), approved: true, reason: None });
     assert_eq!(tool_effect(&fx).function.name, "web.scrape");
 }
 
@@ -1108,7 +1124,7 @@ fn pre_tool_hooks_allow_deny_rewrite_and_ask_in_order() {
     h.done();
     let fx = h.hook_done("h1.0", answer(Decision::Ask));
     assert!(matches!(fx.as_slice(), [Effect::RequestApproval { .. }]));
-    let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true });
+    let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None });
     assert_eq!(tool_effect(&fx).function.name, "x.y");
     h.crash();
 }

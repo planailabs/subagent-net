@@ -298,6 +298,9 @@ pub struct ApproveArgs {
     pub call_id: String,
     /// true to run the call, false to deny it.
     pub approved: bool,
+    /// Why (optional): the model reads it.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -613,7 +616,7 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     let h = hub.clone();
     r.add::<Approve, _, _>(move |c, a| {
         let h = h.clone();
-        async move { Ok(h.approve(&c.addr, a.id, a.call_id, a.approved).await?) }
+        async move { Ok(h.approve(&c.addr, a.id, a.call_id, a.approved, a.reason).await?) }
     });
     let h = hub.clone();
     r.add::<Fork, _, _>(move |c, a| {

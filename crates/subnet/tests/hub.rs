@@ -472,8 +472,8 @@ async fn approve_commits_approval() {
     let mut sp = spawner(&hub, "s", vec![worker()], 2).await;
     let id = spawn(&hub, &Addr::root(), "worker").await.unwrap();
     expect_assign(&mut sp).await;
-    hub.op(&Addr::root(), Op::Approve { id, call_id: "c".into(), approved: true }).await.unwrap();
-    assert_eq!(expect_commit(&mut sp).await.2, Event::Approval { call_id: "c".into(), approved: true });
+    hub.op(&Addr::root(), Op::Approve { id, call_id: "c".into(), approved: true, reason: None }).await.unwrap();
+    assert_eq!(expect_commit(&mut sp).await.2, Event::Approval { call_id: "c".into(), approved: true, reason: None });
 }
 
 #[tokio::test]

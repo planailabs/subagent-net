@@ -200,7 +200,7 @@ async fn approval_gates_tool() {
     assert_eq!(t["paused"], false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(n.llm.requests().len(), 1, "tool must not run before approval");
-    n.hub.op(&Addr::root(), Op::Approve { id, call_id: "c1".into(), approved: true }).await.unwrap();
+    n.hub.op(&Addr::root(), Op::Approve { id, call_id: "c1".into(), approved: true, reason: None }).await.unwrap();
     assert_eq!(n.mail().await["content"], "listed");
     assert_eq!(n.t(id).await["awaiting_approval"], Value::Null);
 }
