@@ -54,6 +54,14 @@ claude mcp add --transport http subnet http://127.0.0.1:7700/mcp \
 
 The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`, `answer`, `fork`, `transcript`, `list_agents` and `list_types`. The same operations are a REST/RPC API (`/v1/…`, OpenAPI at `/v1/openapi.json`, docs at `/v1/docs`) and `subnet` subcommands.
 
+## Driving agents from an app
+
+A backend (a chat app, say) can be a hub's only principal and drive its agents itself: `spawn` one per conversation with a `tenant`, follow it on `GET /v1/events?agent=<id>` (SSE), `send` the user's messages.
+
+- **Asking the user:** declare `client_tool "ask_question" { description, input_schema }` in the agent type. The model calls it like any tool; the stream shows `client_tool_call {call_id, name, input}`, the summary `awaiting_client`; `answer {id, call_id, content, is_error?}` gives the result and the agent goes on.
+- **Approvals:** a call needing approval (`approve = [...]`, or a `pre_tool` hook answering `ask`) shows as `approval_requested {call_id, name, input, reason?, hook?}`; `approve {id, call_id, approved, reason?}` decides it. A `pre_tool` URL hook with `credential = { header, env, prefix }` can do the first layers (rules, a validator) and answer `ask` for a person; its question carries the call (`input: {tool, args, call_id, reason}`) and `agent: {id, type, tenant}`.
+- **Usage:** per model call, the last `delta.usage` of an `llm_delta` before `llm_done`, plus `compacted.usage` (see DESIGN.md, Messaging).
+
 ## Tests
 
 ```sh
