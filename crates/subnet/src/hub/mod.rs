@@ -586,6 +586,8 @@ impl Hub {
         let r = st.agents.get_mut(&id).unwrap();
         let mut reports = vec![];
         let mut hooks = vec![];
+        // Waits for people (approvals) go into the log, so event streams see them.
+        let mut waits = vec![];
         for event in events {
             r.seq += 1;
             for fx in r.a.apply(&event) {
@@ -593,6 +595,13 @@ impl Hub {
                     Effect::Report { to, status, content } => reports.push((to, status, content)),
                     // Hooks run here too, from the hub's replica, each once.
                     Effect::RunHook { id: run, hook, input } => hooks.push((run, hook, input)),
+                    Effect::RequestApproval { call, reason, hook } => waits.push(Event::ApprovalRequested {
+                        input: call.input(),
+                        call_id: call.id,
+                        name: call.function.name,
+                        reason,
+                        hook,
+                    }),
                     _ => {}
                 }
             }
@@ -627,6 +636,9 @@ impl Hub {
                     .filter(|(_, p)| p.node.is_none() && s.ready.contains(&p.a.spec.ty) && wants_runner(&p.a))
                     .map(|(p, _)| Work::Place(*p)),
             );
+        }
+        if !waits.is_empty() {
+            work.push_back(Work::Commit(id, waits));
         }
         for (run, hook, input) in hooks {
             self.arc().start_hook(id, run, hook, input);

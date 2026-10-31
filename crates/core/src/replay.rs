@@ -33,6 +33,8 @@ pub enum StepKind {
     StreamFailed,
     ToolResult,
     ToolAborted,
+    /// A call started waiting for a user's approval.
+    ApprovalRequested,
     /// A user approved or denied a call.
     Approval,
     ChildSpawned,
@@ -57,7 +59,7 @@ impl StepKind {
         match self {
             StepKind::Input => Cause::Input,
             StepKind::Stream | StepKind::StreamAborted | StepKind::StreamFailed => Cause::Model,
-            StepKind::ToolResult | StepKind::ToolAborted | StepKind::Approval => Cause::Tool,
+            StepKind::ToolResult | StepKind::ToolAborted | StepKind::ApprovalRequested | StepKind::Approval => Cause::Tool,
             StepKind::Compacted | StepKind::CompactFailed | StepKind::CompactRequested => Cause::Context,
             _ => Cause::Control,
         }
@@ -222,6 +224,17 @@ impl Folder {
                     format!("{n} {verdict}"),
                     head(verdict),
                     digest(&["approval", verdict]),
+                )
+            }
+            Event::ApprovalRequested { name, input, reason, .. } => {
+                let input = input.to_string();
+                let why = reason.as_deref().unwrap_or_default();
+                (
+                    StepKind::ApprovalRequested,
+                    format!("approval_requested:{name}"),
+                    format!("{name} waits for approval"),
+                    head(if why.is_empty() { &input } else { why }),
+                    digest(&["approval_requested", name, &input, why]),
                 )
             }
             Event::ChildSpawned { id, reserved } => (

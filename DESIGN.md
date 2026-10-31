@@ -208,6 +208,7 @@ enum Event {
     LlmDelta { delta }, LlmDone, LlmAborted, LlmFailed { error },
     ToolResult { call_id, content, is_error }, ToolAborted { call_id },
     Approval { call_id, approved, reason },
+    ApprovalRequested { call_id, name, input, reason, hook },   // logged by the hub: a call waits for a person
     ChildSpawned { id, reserved }, ChildReport { id, status, content },
     PauseRequested { mode }, Resumed, Cancelled, Superseded { by },
     Recovered,                                     // logged by the hub on every placement
@@ -215,7 +216,7 @@ enum Event {
     Compacted { upto, summary, usage }, CompactFailed { error },
 }
 
-enum Effect { CallLlm, Compact { upto }, CallTool { call, retry }, RequestApproval { call },
+enum Effect { CallLlm, Compact { upto }, CallTool { call, retry }, RequestApproval { call, reason, hook },
               AbortInflight, Report { to, status, content } }
 
 enum Phase { Idle, Thinking { running }, Tools { calls }, Failed { error }, Cancelled }
@@ -224,6 +225,7 @@ enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
 ```
 
 - The spec (mixture, agent type, MCP types, parent, budget, approval list, tool list) is stored with the agent, not in the log.
+- **Approval requests are events:** when a call starts waiting for approval (`approve = [...]`, or a `pre_tool` hook answering `ask`), the hub logs `ApprovalRequested { call_id, name, input, reason?, hook? }` from its replica's `RequestApproval`: `name` and `input` are the call as it will run (`call_tool` resolved, `_reason` stripped), `hook` and `reason` say which hook asked and why. Event streams (`/v1/events`) see it as `approval_requested` without polling; the agent summary still has `awaiting_approval`. It's logged once per call: the state keeps which calls' waits are in the log (`announced`), and a recovery or resume asks again only for one whose request never made it into the log.
 - **Approval reasons:** `approve` takes an optional `reason`. A denied call's result is `[denied by user: reason]`; an approved one's reason reaches the model as a note before its next call (`[the user approved call c1: reason]`).
 - **Parallel tools:** all tool calls of one assistant message start together (each may first need approval). The next LLM call happens once all have results. A `quick` pause lets the running calls finish but starts no queued or approved ones.
 - `wait_for` is handled by the state machine itself (it waits for `ChildReport` events). Every other tool is executed by the node.
@@ -338,7 +340,7 @@ hook "no-force-push" {
 
 | point | asked about (`input`) | it can answer |
 |---|---|---|
-| `pre_tool` | `{tool, args, call_id, reason}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`); `rewrite` with new `args` |
+| `pre_tool` | `{tool, args, call_id, reason}`, before a call starts (`spawn_agent` too: that's how spawns are judged) | `allow`; `deny` (the model reads `[denied by hook x: reason]`); `ask` (a user approves, as with `approve`: logged as `approval_requested` with the hook's name and its `reason`); `rewrite` with new `args` |
 | `post_tool` | `{tool, args, call_id, result, reason}` | `allow` (a `note` is added to the result); `deny` (the result is withheld); `rewrite` (`text` replaces it) |
 | `on_message` | `{from, content, reply}`, before a message reaches the model; messages behind a held one wait, so order is kept | `allow` (with a `note`); `deny` (dropped); `rewrite` (`text`) |
 | `pre_model` | `{messages, last: {role, content}}`, before every model call (after tool results too; once a call: a retried call after a recovery doesn't ask again; a quick or hard pause that comes while they run holds the call until a resume, which makes it without asking again: a hook can pause an agent before a call, over a budget, say) | `allow`, with `inject`: context for this call (the time, what a memory recalls, state from outside) |

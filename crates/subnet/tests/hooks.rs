@@ -240,3 +240,39 @@ async fn an_agent_upgraded_while_a_hook_runs_doesnt_wait_for_it_forever() {
     assert!(n.hub.list_agents().await.iter().any(|a| a.id == copy.id && a.hooks.is_empty()));
 }
 
+
+/// A layered approval: a URL `pre_tool` hook answers `ask` (its rules and
+/// validator couldn't decide), the wait is streamed as `approval_requested`
+/// with the hook and its reason, and a person's `approve` lets the call run.
+#[tokio::test]
+async fn a_url_hook_asks_a_person_and_the_wait_is_an_event() {
+    let (url, seen) = hook_server(|_| json!({"decision": "ask", "reason": "the validator is unsure"})).await;
+    let hooks = format!("hook \"gate\" {{\n  on = \"pre_tool\"\n  run {{ url = {url:?} }}\n}}\n");
+    let n = Net::new(&cluster(&hooks, &["gate"])).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |_| tool_call("c1", "list_types", json!({"x": 1})));
+    n.llm.push(WORKER, |body| {
+        assert!(last_tool_result(body).contains("worker"), "{}", last_tool_result(body));
+        text(&["listed"])
+    });
+    let mut rx = n.hub.subscribe();
+    let id = n.spawn("worker", "go").await;
+    let asked = loop {
+        if let subnet::hub::Notice::Agent { agent, event, .. } = rx.recv().await.unwrap()
+            && agent == id
+            && let v = serde_json::to_value(&event).unwrap()
+            && v["type"] == "approval_requested"
+        {
+            break v;
+        }
+    };
+    assert_eq!(
+        asked,
+        json!({"type": "approval_requested", "call_id": "c1", "name": "list_types", "input": {"x": 1}, "reason": "the validator is unsure", "hook": "gate"})
+    );
+    let q = seen.lock().unwrap()[0].clone();
+    assert_eq!((q["input"]["call_id"].as_str(), q["input"]["tool"].as_str(), &q["input"]["args"]), (Some("c1"), Some("list_types"), &json!({"x": 1})));
+    assert_eq!(n.t(id).await["awaiting_approval"]["id"], "c1");
+    n.hub.op(&Addr::root(), subnet_core::proto::Op::Approve { id, call_id: "c1".into(), approved: true, reason: None }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "listed");
+}

@@ -410,7 +410,7 @@ fn approval_granted_runs_tool() {
     let mut h = H::new(Spec { approve: vec!["rm".into()], ..spec() });
     h.user("x");
     h.call(0, "c1", "rm", "{}");
-    assert!(matches!(h.done().as_slice(), [Effect::RequestApproval { call }] if call.id == "c1"));
+    assert!(matches!(h.done().as_slice(), [Effect::RequestApproval { call, .. }] if call.id == "c1"));
     assert!(!h.a.inflight());
     let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None });
     assert!(matches!(fx.as_slice(), [Effect::CallTool { retry: false, .. }]));
@@ -451,6 +451,32 @@ fn approval_reasons_reach_the_model() {
     h.done();
     h.ev(Event::Approval { call_id: "c1".into(), approved: false, reason: Some("keep the logs".into()) });
     assert_eq!(h.a.messages.last().unwrap().content.as_deref(), Some("[denied by user: keep the logs]"));
+}
+
+#[test]
+fn an_approval_request_is_logged_once() {
+    let mut h = H::new(Spec { approve: vec!["rm".into()], ..spec() });
+    h.user("x");
+    h.call(0, "c1", "rm", r#"{"path":"/tmp"}"#);
+    let fx = h.done();
+    let [Effect::RequestApproval { call, reason: None, hook: None }] = fx.as_slice() else { panic!("{fx:?}") };
+    // The hub logs it; from then on it isn't asked for again.
+    h.ev(Event::ApprovalRequested { call_id: call.id.clone(), name: call.function.name.clone(), input: call.input(), reason: None, hook: None });
+    assert_eq!(h.a.announced.len(), 1);
+    assert!(h.crash().is_empty(), "a recovery doesn't ask again");
+    h.pause(PauseMode::Quick);
+    assert!(h.resume().is_empty(), "nor does a resume");
+    assert_eq!(h.a.awaiting_approval()[0].input(), json!({"path": "/tmp"}));
+    // A request for a call not waiting changes nothing.
+    h.ev(Event::ApprovalRequested { call_id: "c9".into(), name: "rm".into(), input: json!({}), reason: None, hook: None });
+    assert!(!h.a.announced.contains("c9"));
+    let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None });
+    assert!(matches!(fx.as_slice(), [Effect::CallTool { .. }]));
+    // The next step's calls start unannounced.
+    h.result("c1", "gone");
+    h.call(0, "c1", "rm", "{}");
+    assert!(matches!(h.done().as_slice(), [Effect::RequestApproval { .. }]));
+    assert!(h.a.announced.is_empty());
 }
 
 #[test]
@@ -736,7 +762,7 @@ fn approvals_see_the_real_tool() {
     h.done();
     h.call(0, "c2", CALL_TOOL, r#"{"name":"web.scrape","arguments":{"url":"u"}}"#);
     let fx = h.done();
-    assert!(matches!(&fx[..], [Effect::RequestApproval { call }] if call.function.name == "web.scrape"), "{fx:?}");
+    assert!(matches!(&fx[..], [Effect::RequestApproval { call, .. }] if call.function.name == "web.scrape"), "{fx:?}");
     assert_eq!(h.a.awaiting_approval()[0].function.name, "web.scrape");
     let fx = h.ev(Event::Approval { call_id: "c2".into(), approved: true, reason: None });
     assert_eq!(tool_effect(&fx).function.name, "web.scrape");
@@ -1122,8 +1148,9 @@ fn pre_tool_hooks_allow_deny_rewrite_and_ask_in_order() {
     h.user("go");
     h.call(0, "c1", "x.y", "{}");
     h.done();
-    let fx = h.hook_done("h1.0", answer(Decision::Ask));
-    assert!(matches!(fx.as_slice(), [Effect::RequestApproval { .. }]));
+    let fx = h.hook_done("h1.0", Outcome { decision: Decision::Ask, reason: Some("costly".into()), ..Outcome::allow() });
+    // Which hook asked, and why, go with the request.
+    assert!(matches!(fx.as_slice(), [Effect::RequestApproval { hook: Some(n), reason: Some(r), .. }] if n == "ask" && r == "costly"), "{fx:?}");
     let fx = h.ev(Event::Approval { call_id: "c1".into(), approved: true, reason: None });
     assert_eq!(tool_effect(&fx).function.name, "x.y");
     h.crash();

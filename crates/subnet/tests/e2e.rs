@@ -193,7 +193,19 @@ async fn approval_gates_tool() {
     n.node("s").await;
     n.llm.push(WORKER, |_| tool_call("c1", "list_agents", json!({})));
     n.llm.push(WORKER, |_| text(&["listed"]));
+    let mut rx = n.hub.subscribe();
     let id = n.spawn("worker", "list").await;
+    // The wait is an event too: streams see it without polling.
+    let asked = loop {
+        if let subnet::hub::Notice::Agent { agent, event, .. } = rx.recv().await.unwrap()
+            && agent == id
+            && let v = serde_json::to_value(&event).unwrap()
+            && v["type"] == "approval_requested"
+        {
+            break v;
+        }
+    };
+    assert_eq!(asked, json!({"type": "approval_requested", "call_id": "c1", "name": "list_agents", "input": {}}));
     let t = n.until(id, "approval", |t| t["awaiting_approval"].is_object()).await;
     assert_eq!(t["awaiting_approval"]["function"]["name"], "list_agents");
     assert_eq!(t["awaiting_approval"]["id"], "c1");

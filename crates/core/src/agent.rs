@@ -319,6 +319,18 @@ pub enum Event {
         id: String,
         outcome: Outcome,
     },
+    /// A call waits for a user's approval (`Effect::RequestApproval`, logged
+    /// by the hub so event streams see it): the call as it will run, and
+    /// the hook that asked and why, when a `pre_tool` hook answered `ask`.
+    ApprovalRequested {
+        call_id: String,
+        name: String,
+        input: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -334,8 +346,16 @@ pub enum Effect {
     /// before a crash: the runtime re-runs idempotent tools and proposes
     /// `ToolAborted` for the rest.
     CallTool { call: ToolCall, retry: bool },
-    /// Ask the user to approve a call; they answer with `Approval`.
-    RequestApproval { call: ToolCall },
+    /// Ask the user to approve a call; they answer with `Approval`. `hook`
+    /// and `reason`: the `pre_tool` hook that asked for it, and why. The hub
+    /// logs it as `ApprovalRequested`.
+    RequestApproval {
+        call: ToolCall,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook: Option<String>,
+    },
     /// Abort the in-flight LLM stream / tool call (hard pause, cancel).
     AbortInflight,
     /// The turn ended: deliver the final answer to everyone who asked. The hub
@@ -518,6 +538,10 @@ pub struct Agent {
     /// injected is in): a retry of the call (a recovery) doesn't run them again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_hooked: bool,
+    /// Calls of the current step whose wait (an approval, a client's answer)
+    /// is in the log (`ApprovalRequested`, `ClientToolCall`): not asked again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub announced: BTreeSet<String>,
 }
 
 fn is_zero64(n: &u64) -> bool {
@@ -556,6 +580,7 @@ impl Agent {
             continues: 0,
             compact_notes: vec![],
             model_hooked: false,
+            announced: BTreeSet::new(),
         }
     }
 
@@ -888,7 +913,7 @@ impl Agent {
             Decision::Ask => {
                 self.set_call(call_id, CallState::Approval);
                 if let Some(run) = self.run_of(call_id) {
-                    fx.push(Effect::RequestApproval { call: run });
+                    fx.push(Effect::RequestApproval { call: run, reason: o.reason.clone(), hook: Some(h.name.clone()) });
                 }
             }
             Decision::Continue | Decision::Error => {
@@ -1018,11 +1043,18 @@ impl Agent {
         }
     }
 
-    /// Asks again for approvals still open (after a restart or resume).
+    /// Asks again for approvals still open whose request isn't in the log
+    /// yet (after a restart or resume): each is logged once.
     fn rerequest_approvals(&self, fx: &mut Vec<Effect>) {
         if let (Phase::Tools { calls }, true) = (&self.phase, self.gate()) {
-            for c in calls.iter().filter(|c| c.state == CallState::Approval) {
-                fx.push(Effect::RequestApproval { call: c.call.clone() });
+            for c in calls.iter().filter(|c| !self.announced.contains(&c.call.id)) {
+                let run = match translate(&self.spec, &self.loaded, &c.call) {
+                    Dispatch::Run(run) => run,
+                    _ => c.call.clone(),
+                };
+                if c.state == CallState::Approval {
+                    fx.push(Effect::RequestApproval { call: run, reason: None, hook: None });
+                }
             }
         }
     }
@@ -1344,6 +1376,7 @@ impl Agent {
                 if !content.is_empty() || !msg.tool_calls.is_empty() {
                     self.messages.push(msg);
                 }
+                self.announced.clear();
                 if calls.is_empty() {
                     self.turn_end(content, &mut fx);
                 } else {
@@ -1373,6 +1406,12 @@ impl Agent {
                 }
             }
             Event::HookDone { id, outcome } => self.hook_done(id, outcome.clone(), &mut fx),
+            // Only a record (for event streams); it's asked for once.
+            Event::ApprovalRequested { call_id, .. } => {
+                if self.call_in(call_id, &CallState::Approval) {
+                    self.announced.insert(call_id.clone());
+                }
+            }
             Event::ToolAborted { call_id } => {
                 if self.call_in(call_id, &CallState::Running) {
                     self.tool_done(call_id, "[aborted before completion]".into(), &mut fx);
@@ -1604,7 +1643,7 @@ impl Agent {
                         match c.state.clone() {
                             CallState::Cleared if self.spec.approve.contains(&run.function.name) => {
                                 c.state = CallState::Approval;
-                                fx.push(Effect::RequestApproval { call: run });
+                                fx.push(Effect::RequestApproval { call: run, reason: None, hook: None });
                             }
                             CallState::Cleared | CallState::Approved => {
                                 c.state = CallState::Running;
@@ -1619,7 +1658,7 @@ impl Agent {
                             }
                             CallState::Queued { retry: false } if self.spec.approve.contains(&run.function.name) => {
                                 c.state = CallState::Approval;
-                                fx.push(Effect::RequestApproval { call: run });
+                                fx.push(Effect::RequestApproval { call: run, reason: None, hook: None });
                             }
                             CallState::Queued { retry } => {
                                 c.state = CallState::Running;

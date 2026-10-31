@@ -515,7 +515,7 @@ impl Runner {
                     self.inflight.cancel();
                     self.inflight = self.life.child_token();
                 }
-                Effect::RequestApproval { call } => {
+                Effect::RequestApproval { call, .. } => {
                     tracing::info!(agent = %self.id, tool = %call.function.name, "waiting for approval");
                 }
                 // The hub routes reports and runs hooks from its own replica.

@@ -16,6 +16,7 @@ const CHANGES_SUMMARY = new Set([
   "tool_result",
   "tool_aborted",
   "approval",
+  "approval_requested",
   "child_spawned",
   "child_report",
   "pause_requested",

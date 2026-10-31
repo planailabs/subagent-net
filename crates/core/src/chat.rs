@@ -80,6 +80,11 @@ impl ToolCall {
             function: FunctionCall { name: name.into(), arguments: arguments.into() },
         }
     }
+
+    /// Its arguments as JSON (a string, as given, if they aren't JSON).
+    pub fn input(&self) -> Value {
+        serde_json::from_str(&self.function.arguments).unwrap_or_else(|_| Value::String(self.function.arguments.clone()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
