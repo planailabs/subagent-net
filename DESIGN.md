@@ -209,6 +209,7 @@ enum Event {
     ToolResult { call_id, content, is_error }, ToolAborted { call_id },
     Approval { call_id, approved, reason },
     ApprovalRequested { call_id, name, input, reason, hook },   // logged by the hub: a call waits for a person
+    ClientToolCall { call_id, name, input },                    // logged by the hub: a client tool's call waits for `answer`
     ChildSpawned { id, reserved }, ChildReport { id, status, content },
     PauseRequested { mode }, Resumed, Cancelled, Superseded { by },
     Recovered,                                     // logged by the hub on every placement
@@ -216,19 +217,19 @@ enum Event {
     Compacted { upto, summary, usage }, CompactFailed { error },
 }
 
-enum Effect { CallLlm, Compact { upto }, CallTool { call, retry }, RequestApproval { call, reason, hook },
+enum Effect { CallLlm, Compact { upto }, CallTool { call, retry }, RequestApproval { call, reason, hook }, AskClient { call },
               AbortInflight, Report { to, status, content } }
 
 enum Phase { Idle, Thinking { running }, Tools { calls }, Failed { error }, Cancelled }
 // each pending tool call has its own state:
-enum CallState { Queued, Running, Approval, Approved, Children { ids }, Done }
+enum CallState { Queued, Running, Approval, Approved, Children { ids }, Client, Done }
 ```
 
 - The spec (mixture, agent type, MCP types, parent, budget, approval list, tool list) is stored with the agent, not in the log.
 - **Approval requests are events:** when a call starts waiting for approval (`approve = [...]`, or a `pre_tool` hook answering `ask`), the hub logs `ApprovalRequested { call_id, name, input, reason?, hook? }` from its replica's `RequestApproval`: `name` and `input` are the call as it will run (`call_tool` resolved, `_reason` stripped), `hook` and `reason` say which hook asked and why. Event streams (`/v1/events`) see it as `approval_requested` without polling; the agent summary still has `awaiting_approval`. It's logged once per call: the state keeps which calls' waits are in the log (`announced`), and a recovery or resume asks again only for one whose request never made it into the log.
 - **Approval reasons:** `approve` takes an optional `reason`. A denied call's result is `[denied by user: reason]`; an approved one's reason reaches the model as a note before its next call (`[the user approved call c1: reason]`).
 - **Parallel tools:** all tool calls of one assistant message start together (each may first need approval). The next LLM call happens once all have results. A `quick` pause lets the running calls finish but starts no queued or approved ones.
-- `wait_for` is handled by the state machine itself (it waits for `ChildReport` events). Every other tool is executed by the node.
+- `wait_for` is handled by the state machine itself (it waits for `ChildReport` events), and client tools by whoever drives the agent (see [Client tools](#client-tools)). Every other tool is executed by the node.
 - **Recovery:** whenever the hub places an agent, it first commits `Recovered`: whatever was in flight is gone, and applying `Recovered` returns the effects that restart it. Because recovery is logged, every replica folds identical state.
 - **Reports are routed by the hub** from its own replica, exactly once.
 - **Compaction** (on by default; see below) keeps long conversations within the model's context.
@@ -359,6 +360,35 @@ Several hooks at a point run one after the other, each seeing what the one befor
 **Where hooks run:** the hub runs `RunHook` from its own replica (like reports): `when` first (false: allowed, the hook isn't asked; checked when the cluster is applied), then the hook: an MCP tool on any node running its server (waited for after a restart, within the timeout), an HTTP POST, or an agent spawned with the question and the decisions its point takes, whose answer (a JSON object, words around it allowed) is the outcome; it's cancelled after. Each gets `{hook, point, agent: {id, type}, input}`; the timeout bounds it all.
 
 **By hand:** an agent's summary lists the hook runs it waits for (`hooks: [{run, name}]`); `settle_hook {id, run, decision, reason?, text?, args?}` (operator) answers one as if the hook had. The web UI shows them with allow/deny buttons; the TUI marks the agent ⌛.
+
+### Client tools
+
+An agent type can declare tools that **whoever drives the agent** answers, not a node: a chat backend asking its user a question, a UI showing a form. They're declared in the `agent` block:
+
+```hcl
+agent "assistant" {
+  # …
+  client_tool "ask_question" {
+    description  = "Ask the user one question and wait for the answer."
+    input_schema = {
+      type       = "object"
+      properties = {
+        question = { type = "string" }
+        options  = { type = "array", items = { type = "string" } }
+      }
+      required = ["question"]
+    }
+  }
+}
+```
+
+- `input_schema` is the JSON schema of its arguments: an HCL object, a JSON text (a heredoc), or `jsonencode({…})`; without one, any object. `description` defaults to empty. Names are 1–64 of `a-z A-Z 0-9 _ -` and can't be a built-in's. The tools are part of the type (a new version when they change; none: the type's id is as it was).
+- The model is offered them like any other tool: eager (never behind `load_tools`), in the spec's tools (`Spec.client_tools` names them), with `_reason` under `call_reasons`.
+- **A call:** nothing runs it. It's judged like any call first (`pre_tool` hooks, `approve`), then the call waits in its own state (`CallState::Client`); the agent needs no node meanwhile. The hub logs `ClientToolCall { call_id, name, input }` (from its replica's `AskClient`; `input` is the call as made, `call_tool` resolved and `_reason` stripped), which event streams see as `client_tool_call`, and the agent's summary lists `awaiting_client: [{call_id, name, input}]`.
+- **The answer:** `answer {id, call_id, content, is_error?}` (operator; `POST /v1/agents/{id}/answer`, MCP, `subnet answer <id> --call-id … --content …`) commits it as the call's `ToolResult` (with `is_error`, the model reads `error: <content>`); `post_tool` hooks see it as any result. Only a call that waits can be answered: another call, a second answer or an answer after a cancel is refused.
+- **Parallel calls:** the other calls of the same message run as usual; the next model call waits until every call has its result, the client's included. Several client calls of one message wait together, each answered by its own `call_id`.
+- **Messages while one waits:** a message sent (`send`) while a client call waits is queued like any message during a step: the call keeps waiting, and the message reaches the model after the answer, at the next model call. A chat backend whose user writes instead of answering answers the call itself (say `answer {content: "[the user wrote instead: …]"}`) and sends the message, or just sends it and answers later.
+- **Survives everything, like approvals:** the wait is state folded from the log, and `ClientToolCall` is logged once per call (`announced`); a recovery (or resume) asks again only for one whose event never made it into the log. A pause doesn't touch it (nothing is in flight; an answer during a pause waits for the resume), a cancel ends it, compaction waits until the step is over (as for any pending call), and a fork or upgrade copies the waiting call: the copy waits for an answer of its own. The flight recorder shows the wait as a `client_tool:<name>` step and the answer as the tool's result.
 
 ## MCP servers and the MCP switchboard
 
@@ -491,7 +521,7 @@ Every operation is defined once in the `ops` crate's typed registry: name, summa
 
 - **REST + RPC API:** `POST /v1/ops/<name>` for every op, plus REST routes where declared, e.g.
   - `GET /v1/agents`, `GET /v1/agents/{id}`
-  - `POST /v1/agents` (spawn), `POST /v1/agents/{id}/pause`
+  - `POST /v1/agents` (spawn), `POST /v1/agents/{id}/pause`, `POST /v1/agents/{id}/answer` (a client tool's answer)
   - `GET /v1/cluster`, `PUT /v1/cluster` (apply)
   - `GET /v1/agents/{id}/events` (the log as steps; `raw` adds the entries)
   - `GET /v1/diff?a=&b=` (two runs aligned, with the first divergence and its cause)
@@ -509,7 +539,7 @@ The web UI and the TUI use the same API.
 
 - Principals are declared in the cluster file: `user`, `client`, `node`. Each has a role:
   - `admin`: apply cluster files, issue tokens, everything else
-  - `operator`: spawn, send, pause, resume, cancel, compact, approve, fork, upgrade
+  - `operator`: spawn, send, pause, resume, cancel, compact, approve, answer, fork, upgrade
   - `viewer`: read only
   - nodes: the node protocol only
 - `subnet issue-token <kind> <name>` (admin) creates a random token. The hub stores only its SHA-256.
@@ -554,8 +584,8 @@ Vue 3 + Parcel, in `webui/`, embedded into the binary (`rust-embed`, cargo featu
 
 `subnet tui` (ratatui), built on the same API and event stream:
 
-- a park view: plots as headed groups, agents as tree rows with glyph, type, token bar and last line
-- an agent pane: transcript, streaming partial and pending approval, scrolled to the end
+- a park view: plots as headed groups, agents as tree rows with glyph, type, token bar and last line (`?`: waiting for an approval or a client's answer)
+- an agent pane: transcript, streaming partial, pending approval and client calls (with the `subnet answer` command to give one), scrolled to the end
 - keys: `j`/`k` select, `s`/`q`/`h` pause safe/quick/hard, `r` resume, `x` cancel, `c` compact, `a`/`d` approve/deny, `m` message, `f` fork, `esc` quit
 
 State and key handling (`tui::App`) are pure and tested; rendering is tested against ratatui's `TestBackend`.
@@ -583,7 +613,7 @@ State and key handling (`tui::App`) are pure and tested; rendering is tested aga
 
 Everything in this document is implemented, except what "Not in scope yet" lists:
 
-- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), vision (images from tools, converted and attached for models that see; blob arguments), tenants and per-tenant MCP servers, snapshots, forks (with tree), upgrades onto a type's new version (residents automatically), internal and external executors.
+- **Agents:** core state machine (pause modes, recovery, approval, children, budgets, parallel tools, compaction), approval requests and client tools' calls as logged events, client tools (`client_tool`, `answer`), vision (images from tools, converted and attached for models that see; blob arguments), tenants and per-tenant MCP servers, snapshots, forks (with tree), upgrades onto a type's new version (residents automatically), internal and external executors.
 - **Hub:** sequencer, placement with dormancy and eviction, epoch fencing, reports, mailboxes, residents, MCP routing with mixture ACLs, blob store, active-standby HA with term fencing; Postgres and SQLite stores.
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.

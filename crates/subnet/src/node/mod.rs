@@ -520,6 +520,10 @@ impl Runner {
                 }
                 // The hub routes reports and runs hooks from its own replica.
                 Effect::Report { .. } | Effect::RunHook { .. } => {}
+                // Nothing runs a client tool: whoever drives the agent answers.
+                Effect::AskClient { call } => {
+                    tracing::info!(agent = %self.id, tool = %call.function.name, "waiting for the client's answer");
+                }
             }
         }
     }

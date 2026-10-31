@@ -692,3 +692,80 @@ async fn without_search_history_there_is_no_such_tool() {
     n.spawn("worker", "hi").await;
     assert_eq!(n.mail().await["content"], "fine");
 }
+
+const ASK: &str = "  client_tool \"ask_question\" {\n    description = \"Ask the user one question.\"\n    input_schema = { type = \"object\", properties = { q = { type = \"string\" } }, required = [\"q\"] }\n  }";
+
+/// The next event of this agent whose type is `ty`, as JSON.
+async fn next_event(rx: &mut tokio::sync::broadcast::Receiver<subnet::hub::Notice>, id: subnet_core::addr::AgentId, ty: &str) -> Value {
+    loop {
+        if let subnet::hub::Notice::Agent { agent, event, .. } = rx.recv().await.unwrap()
+            && agent == id
+            && let v = serde_json::to_value(&event).unwrap()
+            && v["type"] == ty
+        {
+            return v;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_client_tool_waits_for_its_answer() {
+    let n = Net::new(&cluster(ASK)).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |body| {
+        let ask = body["tools"].as_array().unwrap().iter().find(|t| t["function"]["name"] == "ask_question").expect("offered like any tool");
+        assert_eq!(ask["function"]["parameters"]["required"], json!(["q"]));
+        common::llm::tool_calls(&[("c1", "ask_question", json!({"q": "where to?"})), ("c2", "list_types", json!({}))])
+    });
+    n.llm.push(WORKER, |body| {
+        let msgs = body["messages"].as_array().unwrap();
+        let results: Vec<_> = msgs.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect();
+        assert!(results.iter().any(|r| r == "Lisbon"), "{results:?}");
+        assert!(results.iter().any(|r| r.contains("worker")), "the other call ran: {results:?}");
+        // What the user wrote meanwhile comes after the answer.
+        assert_eq!(msgs.last().unwrap()["content"], "and cheap, please");
+        text(&["going to Lisbon"])
+    });
+    let mut rx = n.hub.subscribe();
+    let id = n.spawn("worker", "plan a trip").await;
+    let ev = next_event(&mut rx, id, "client_tool_call").await;
+    assert_eq!(ev, json!({"type": "client_tool_call", "call_id": "c1", "name": "ask_question", "input": {"q": "where to?"}}));
+    let t = n.until(id, "the other call's result", |t| t["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool")).await;
+    assert_eq!(t["awaiting_client"], json!([{"call_id": "c1", "name": "ask_question", "input": {"q": "where to?"}}]));
+    // A message meanwhile waits for the answer.
+    n.hub.op(&Addr::root(), Op::Send { to: Addr::Agent(id), content: "and cheap, please".into() }).await.unwrap();
+    // Only the waiting call can be answered.
+    let e = n.hub.answer(&Addr::root(), id, "c2".into(), "x".into(), false).await.unwrap_err();
+    assert!(e.to_string().contains("isn't waiting"), "{e}");
+    n.hub.answer(&Addr::root(), id, "c1".into(), "Lisbon".into(), false).await.unwrap();
+    assert_eq!(n.mail().await["content"], "going to Lisbon");
+    let t = n.t(id).await;
+    assert!(t.get("awaiting_client").is_none(), "{t}");
+}
+
+#[tokio::test]
+async fn a_client_call_outlives_a_hub_restart_and_forks_with_its_agent() {
+    let n = Net::new(&cluster(ASK)).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |_| tool_call("c1", "ask_question", json!({"q": "ok?"})));
+    let id = n.spawn("worker", "go").await;
+    n.until(id, "the wait", |t| t["awaiting_client"].is_array()).await;
+    // A fork from here waits for an answer of its own.
+    let fork = n.hub.op(&Addr::root(), Op::Fork { id, at: None, tree: false }).await.unwrap();
+    let fork = common::id_of(&fork);
+    assert_eq!(n.t(fork).await["awaiting_client"][0]["call_id"], "c1");
+    n.hub.shutdown();
+    let hub = subnet::hub::Hub::open(&n.db, None).await.unwrap();
+    common::net::node_ready(&hub, "s").await;
+    let t = hub.op(&Addr::root(), Op::Transcript { id }).await.unwrap();
+    assert_eq!(t["awaiting_client"][0]["input"], json!({"q": "ok?"}));
+    let log = hub.event_log(id, 1, None, true).await.unwrap();
+    let asks = serde_json::to_value(&log).unwrap()["steps"].as_array().unwrap().iter().filter(|s| s["kind"] == "client_tool_call").count();
+    assert_eq!(asks, 1, "logged once");
+    n.llm.push(WORKER, |body| text(&[&format!("user said {}", last_tool_result(body))]));
+    hub.answer(&Addr::root(), id, "c1".into(), "no".into(), true).await.unwrap();
+    let mail = hub.op(&Addr::root(), Op::WaitInbox { timeout_ms: Some(10_000) }).await.unwrap();
+    assert_eq!(mail[0]["content"], "user said error: no");
+    let t = hub.op(&Addr::root(), Op::Transcript { id: fork }).await.unwrap();
+    assert_eq!(t["awaiting_client"][0]["call_id"], "c1", "the fork still waits");
+}

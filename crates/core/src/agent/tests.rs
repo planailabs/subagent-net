@@ -488,6 +488,144 @@ fn approval_for_other_call_is_ignored() {
     assert!(h.ev(Event::Approval { call_id: "c9".into(), approved: true, reason: None }).is_empty());
 }
 
+// ---------- client tools ----------
+
+fn client_spec() -> Spec {
+    let ask = ToolDef { name: "ask_question".into(), description: "Ask the user.".into(), parameters: json!({"type": "object", "properties": {"q": {"type": "string"}}}) };
+    Spec { tools: vec![ask], client_tools: vec!["ask_question".into()], ..spec() }
+}
+
+fn asked(fx: &[Effect]) -> Vec<ToolCall> {
+    fx.iter().filter_map(|e| if let Effect::AskClient { call } = e { Some(call.clone()) } else { None }).collect()
+}
+
+impl H {
+    /// The hub logs the wait (what it does with `AskClient`).
+    fn announce(&mut self, call: &ToolCall) -> Vec<Effect> {
+        self.ev(Event::ClientToolCall { call_id: call.id.clone(), name: call.function.name.clone(), input: call.input() })
+    }
+}
+
+#[test]
+fn a_client_tool_waits_for_its_answer_while_other_calls_run() {
+    let mut h = H::new(client_spec());
+    h.user("plan my trip");
+    h.call(0, "c1", "ask_question", r#"{"q":"where to?"}"#);
+    h.call(1, "c2", "list_types", "{}");
+    let fx = h.done();
+    // The server tool runs; the client tool runs nowhere.
+    assert_eq!(fx.iter().filter(|e| matches!(e, Effect::CallTool { call, .. } if call.id == "c2")).count(), 1);
+    let ask = asked(&fx);
+    assert_eq!(ask.len(), 1);
+    assert_eq!((ask[0].id.as_str(), ask[0].input()), ("c1", json!({"q": "where to?"})));
+    assert!(h.a.awaits_client("c1"));
+    assert_eq!(h.a.awaiting_client().iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c1"]);
+    assert!(h.announce(&ask[0]).is_empty());
+    // The other call's result doesn't end the step.
+    assert!(h.result("c2", "worker").is_empty());
+    assert!(!h.a.inflight(), "nothing runs for it");
+    // The answer is the call's result; then the model goes on.
+    assert_eq!(h.result("c1", "Lisbon"), vec![Effect::CallLlm]);
+    assert!(h.a.awaiting_client().is_empty());
+    let results: Vec<_> = h.a.messages.iter().filter(|m| m.role == Role::Tool).map(|m| (m.tool_call_id.clone().unwrap(), m.content.clone().unwrap())).collect();
+    assert_eq!(results, [("c2".to_string(), "worker".to_string()), ("c1".to_string(), "Lisbon".to_string())]);
+    // A late second answer changes nothing.
+    assert!(h.result("c1", "Porto").is_empty());
+    h.crash();
+}
+
+#[test]
+fn a_client_call_survives_recovery_and_is_asked_for_once() {
+    let mut h = H::new(client_spec());
+    h.user("x");
+    h.call(0, "c1", "ask_question", "{}");
+    let ask = asked(&h.done());
+    // Not in the log yet (the hub died first): a recovery asks again.
+    assert_eq!(asked(&h.crash()), ask);
+    h.announce(&ask[0]);
+    assert!(h.crash().is_empty(), "logged: not asked again");
+    assert!(h.a.awaits_client("c1"));
+    assert_eq!(h.result("c1", "yes"), vec![Effect::CallLlm]);
+}
+
+#[test]
+fn messages_sent_while_a_client_call_waits_come_after_its_answer() {
+    let mut h = H::new(client_spec());
+    h.user("x");
+    h.call(0, "c1", "ask_question", "{}");
+    let ask = asked(&h.done());
+    h.announce(&ask[0]);
+    // The user writes instead of answering: queued, the call still waits.
+    assert!(h.user("actually, never mind").is_empty());
+    assert!(h.a.awaits_client("c1"));
+    assert_eq!(h.result("c1", "[the user wrote instead of answering]"), vec![Effect::CallLlm]);
+    let tail: Vec<_> = h.contents().into_iter().rev().take(2).collect();
+    assert_eq!(tail, [(Role::User, "actually, never mind".into()), (Role::Tool, "[the user wrote instead of answering]".into())]);
+}
+
+#[test]
+fn client_calls_wait_through_pauses_and_end_with_a_cancel() {
+    let mut h = H::new(client_spec());
+    h.user("x");
+    h.call(0, "c1", "ask_question", "{}");
+    h.done();
+    // Nothing in flight: a hard pause aborts nothing; an answer meanwhile waits for the resume.
+    assert!(h.pause(PauseMode::Hard).is_empty());
+    assert!(h.a.is_paused());
+    assert!(h.result("c1", "ok").is_empty());
+    assert_eq!(h.resume(), vec![Effect::CallLlm]);
+    // A paused agent asks once it's resumed.
+    let mut h = H::new(client_spec());
+    h.user("x");
+    h.pause(PauseMode::Quick);
+    h.call(0, "c1", "ask_question", "{}");
+    assert!(asked(&h.done()).is_empty());
+    assert_eq!(asked(&h.resume()).len(), 1);
+    // A compaction asked for meanwhile waits for the step to end.
+    assert!(h.ev(Event::CompactRequested).is_empty());
+    assert!(h.a.awaits_client("c1"));
+    // Cancelled: nothing waits any more.
+    h.ev(Event::Cancelled);
+    assert!(!h.a.awaits_client("c1"));
+    assert!(h.a.awaiting_client().is_empty());
+    assert!(h.result("c1", "late").is_empty());
+}
+
+#[test]
+fn client_tools_are_judged_like_any_tool_and_see_no_reason() {
+    let mut h = H::new(Spec { hooks: vec![hook("policy", HookPoint::PreTool, &["ask_*"])], call_reasons: true, ..client_spec() });
+    // Offered as an eager tool, with the reason parameter like the rest.
+    assert!(h.a.offered_tools().iter().any(|t| t.name == "ask_question" && t.parameters["properties"]["_reason"].is_object()));
+    h.user("x");
+    h.call(0, "c1", "ask_question", r#"{"q":"ok?","_reason":"need a date"}"#);
+    let fx = h.done();
+    assert_eq!(runs(&fx)[0].2["reason"], "need a date");
+    assert!(asked(&fx).is_empty(), "its hook decides first");
+    let fx = h.hook_done("h1.0", Outcome::allow());
+    assert_eq!(asked(&fx)[0].input(), json!({"q": "ok?"}));
+    // Several client calls of one step wait together.
+    let mut h = H::new(client_spec());
+    h.user("x");
+    h.call(0, "c1", "ask_question", "{}");
+    h.call(1, "c2", "ask_question", "{}");
+    assert_eq!(asked(&h.done()).len(), 2);
+    assert!(h.result("c2", "b").is_empty());
+    assert_eq!(h.result("c1", "a"), vec![Effect::CallLlm]);
+}
+
+#[test]
+fn a_client_call_is_a_step_of_the_flight_recorder() {
+    let mut h = H::new(client_spec());
+    h.user("x");
+    h.call(0, "c1", "ask_question", r#"{"q":"?"}"#);
+    let ask = asked(&h.done());
+    h.announce(&ask[0]);
+    h.result("c1", "yes");
+    let steps = crate::replay::steps(1, &h.log);
+    let keys: Vec<_> = steps.iter().map(|s| s.key.as_str()).collect();
+    assert_eq!(keys, ["input:user:root", "llm", "client_tool:ask_question", "tool:ask_question"]);
+}
+
 // ---------- children ----------
 
 fn kid(n: u128) -> AgentId {

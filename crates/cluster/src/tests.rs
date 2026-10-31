@@ -285,3 +285,40 @@ fn grep_results_is_a_limit_or_a_limit_with_exceptions() {
     assert!(parse(&base.replace("GREP", "call_reasons = true")).unwrap().agents.values().next().unwrap().call_reasons);
 }
 
+
+#[test]
+fn client_tools_are_declared_in_an_agent_and_are_part_of_its_type() {
+    let tool = |schema: &str| {
+        BASE.replace(
+            "  nodes = [\"n1\"]\n",
+            &format!("  nodes = [\"n1\"]\n  client_tool \"ask_question\" {{\n    description = \"Ask the user one question.\"\n    input_schema = {schema}\n  }}\n"),
+        )
+    };
+    let want = serde_json::json!({"type": "object", "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]});
+    // An HCL object, jsonencode(…) or a JSON text: the same schema, the same type.
+    let obj = parse(&tool("{\n      type = \"object\"\n      properties = {\n        question = { type = \"string\" }\n        options = { type = \"array\", items = { type = \"string\" } }\n      }\n      required = [\"question\"]\n    }")).unwrap();
+    let enc = parse(&tool("jsonencode({\n      type = \"object\"\n      properties = {\n        question = { type = \"string\" }\n        options = { type = \"array\", items = { type = \"string\" } }\n      }\n      required = [\"question\"]\n    })")).unwrap();
+    let text = parse(&tool(&format!("<<-EOT\n      {want}\n    EOT"))).unwrap();
+    let t = &obj.agents["a"].client_tools["ask_question"];
+    assert_eq!(t.input_schema, want);
+    assert_eq!(t.description, "Ask the user one question.");
+    assert_eq!(t.tool("ask_question").parameters, want);
+    assert_eq!(enc, obj);
+    assert_eq!(text, obj);
+    // Part of the type's identity; without any, the identity is as it was.
+    let plain = parse(BASE).unwrap();
+    assert_ne!(obj.agent_id("a"), plain.agent_id("a"));
+    assert!(!serde_json::to_string(&plain.agents["a"]).unwrap().contains("client_tool"));
+    // Without a schema: any object.
+    let bare = parse(&BASE.replace("  nodes = [\"n1\"]\n", "  nodes = [\"n1\"]\n  client_tool \"confirm\" {}\n")).unwrap();
+    assert_eq!(bare.agents["a"].client_tools["confirm"].input_schema["type"], "object");
+    // Names a model can call, not a built-in's; schemas of objects.
+    let bad = |name: &str, schema: &str| {
+        let f = BASE.replace("  nodes = [\"n1\"]\n", &format!("  nodes = [\"n1\"]\n  client_tool {name:?} {{\n    input_schema = {schema}\n  }}\n"));
+        parse(&f).unwrap_err().to_string()
+    };
+    assert!(bad("a.b", "{}").contains("names are"), "{}", bad("a.b", "{}"));
+    assert!(bad("spawn_agent", "{}").contains("built-in"));
+    assert!(bad("q", "{ type = \"string\" }").contains("object"));
+    assert!(bad("q", "\"not json\"").contains("isn't JSON"));
+}

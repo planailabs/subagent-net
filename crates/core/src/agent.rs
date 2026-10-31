@@ -177,6 +177,10 @@ pub struct Spec {
     /// `reason`, the transcript keeps it, the tool never sees it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub call_reasons: bool,
+    /// Tools of `tools` answered by whoever drives the agent (an agent
+    /// type's `client_tool`s): no node runs them; a call waits for `answer`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_tools: Vec<String>,
 }
 
 impl Spec {
@@ -200,6 +204,7 @@ impl Spec {
             grep_results: None,
             grep_except: vec![],
             call_reasons: false,
+            client_tools: vec![],
         }
     }
 }
@@ -331,6 +336,14 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hook: Option<String>,
     },
+    /// A call of a client tool waits for its answer (`Effect::AskClient`,
+    /// logged by the hub so event streams see it); `answer` gives it, as
+    /// the call's `ToolResult`.
+    ClientToolCall {
+        call_id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -356,6 +369,9 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hook: Option<String>,
     },
+    /// A client tool was called: nothing runs it; whoever drives the agent
+    /// answers (`ToolResult`). The hub logs it as `ClientToolCall`.
+    AskClient { call: ToolCall },
     /// Abort the in-flight LLM stream / tool call (hard pause, cancel).
     AbortInflight,
     /// The turn ended: deliver the final answer to everyone who asked. The hub
@@ -427,6 +443,8 @@ pub enum CallState {
     },
     /// Its `pre_tool` hooks let it run (approval may still come).
     Cleared,
+    /// A client tool's call: waiting for whoever drives the agent to answer.
+    Client,
     /// It returned; its `post_tool` hooks are deciding about the result.
     PostHook {
         chain: HookChain,
@@ -1043,8 +1061,8 @@ impl Agent {
         }
     }
 
-    /// Asks again for approvals still open whose request isn't in the log
-    /// yet (after a restart or resume): each is logged once.
+    /// Asks again for approvals and client answers still open whose request
+    /// isn't in the log yet (after a restart or resume): each is logged once.
     fn rerequest_approvals(&self, fx: &mut Vec<Effect>) {
         if let (Phase::Tools { calls }, true) = (&self.phase, self.gate()) {
             for c in calls.iter().filter(|c| !self.announced.contains(&c.call.id)) {
@@ -1052,11 +1070,34 @@ impl Agent {
                     Dispatch::Run(run) => run,
                     _ => c.call.clone(),
                 };
-                if c.state == CallState::Approval {
-                    fx.push(Effect::RequestApproval { call: run, reason: None, hook: None });
+                match c.state {
+                    CallState::Approval => fx.push(Effect::RequestApproval { call: run, reason: None, hook: None }),
+                    CallState::Client => fx.push(Effect::AskClient { call: run }),
+                    _ => {}
                 }
             }
         }
+    }
+
+    /// Client tools' calls waiting for an answer (as they were made:
+    /// `call_tool` resolved, `_reason` stripped).
+    pub fn awaiting_client(&self) -> Vec<ToolCall> {
+        match &self.phase {
+            Phase::Tools { calls } => calls
+                .iter()
+                .filter(|c| c.state == CallState::Client)
+                .map(|c| match translate(&self.spec, &self.loaded, &c.call) {
+                    Dispatch::Run(call) => call,
+                    _ => c.call.clone(),
+                })
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    /// Whether this call of a client tool waits for its answer.
+    pub fn awaits_client(&self, call_id: &str) -> bool {
+        self.call_in(call_id, &CallState::Client)
     }
 
     /// Tool calls waiting for approval (as they'll run: call_tool resolved).
@@ -1394,8 +1435,9 @@ impl Agent {
                 self.acc.tool_calls.clear();
                 self.fail(error.clone(), &mut fx);
             }
+            // A client tool's answer is its result too.
             Event::ToolResult { call_id, content, .. } => {
-                if self.call_in(call_id, &CallState::Running) {
+                if self.call_in(call_id, &CallState::Running) || self.call_in(call_id, &CallState::Client) {
                     match self.post_hooks(call_id, content) {
                         Some(chain) => {
                             self.run_hook(&chain, &mut fx);
@@ -1409,6 +1451,11 @@ impl Agent {
             // Only a record (for event streams); it's asked for once.
             Event::ApprovalRequested { call_id, .. } => {
                 if self.call_in(call_id, &CallState::Approval) {
+                    self.announced.insert(call_id.clone());
+                }
+            }
+            Event::ClientToolCall { call_id, .. } => {
+                if self.call_in(call_id, &CallState::Client) {
                     self.announced.insert(call_id.clone());
                 }
             }
@@ -1623,6 +1670,7 @@ impl Agent {
                     // Every call is judged against what was loaded before any
                     // of them (two calls of one unloaded tool both get its schema).
                     let loaded = self.loaded.clone();
+                    let client = |name: &str| self.spec.client_tools.iter().any(|t| t == name);
                     let mut errors = vec![];
                     let mut loads = vec![];
                     let Phase::Tools { calls } = &mut self.phase else { unreachable!() };
@@ -1645,6 +1693,11 @@ impl Agent {
                                 c.state = CallState::Approval;
                                 fx.push(Effect::RequestApproval { call: run, reason: None, hook: None });
                             }
+                            // A client tool runs nowhere: it waits for an answer.
+                            CallState::Cleared | CallState::Approved if client(&run.function.name) => {
+                                c.state = CallState::Client;
+                                fx.push(Effect::AskClient { call: run });
+                            }
                             CallState::Cleared | CallState::Approved => {
                                 c.state = CallState::Running;
                                 fx.push(Effect::CallTool { call: run, retry: false });
@@ -1659,6 +1712,10 @@ impl Agent {
                             CallState::Queued { retry: false } if self.spec.approve.contains(&run.function.name) => {
                                 c.state = CallState::Approval;
                                 fx.push(Effect::RequestApproval { call: run, reason: None, hook: None });
+                            }
+                            CallState::Queued { .. } if client(&run.function.name) => {
+                                c.state = CallState::Client;
+                                fx.push(Effect::AskClient { call: run });
                             }
                             CallState::Queued { retry } => {
                                 c.state = CallState::Running;

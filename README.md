@@ -52,7 +52,7 @@ claude mcp add --transport http subnet http://127.0.0.1:7700/mcp \
   --header "Authorization: Bearer $CLAUDE_TOKEN"   # from: subnet issue-token client claude
 ```
 
-The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`, `fork`, `transcript`, `list_agents` and `list_types`. The same operations are a REST/RPC API (`/v1/…`, OpenAPI at `/v1/openapi.json`, docs at `/v1/docs`) and `subnet` subcommands.
+The caller then gets `spawn`, `send`, `wait_inbox`, `pause`, `resume`, `approve`, `answer`, `fork`, `transcript`, `list_agents` and `list_types`. The same operations are a REST/RPC API (`/v1/…`, OpenAPI at `/v1/openapi.json`, docs at `/v1/docs`) and `subnet` subcommands.
 
 ## Tests
 
@@ -64,7 +64,7 @@ Web UI logic: `cd webui && npm test`.
 
 The tests start a throwaway Postgres under `target/tmp/testpg` (stop it with `pg_ctl -D target/tmp/testpg stop`), or use `$DATABASE_URL`. They cover:
 
-- the state machine: every pause mode, crash recovery, approval, children, budgets, parallel tools
+- the state machine: every pause mode, crash recovery, approval, client tools, children, budgets, parallel tools
 - the LLM client against a mock SSE server; external executors
 - the hub against real Postgres: placement, fencing, dormancy, snapshots, forks, auth, HA elections
 - cluster files, including the example in DESIGN.md

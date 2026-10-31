@@ -176,6 +176,54 @@ pub struct AgentDef {
     /// and the tool never sees it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub call_reasons: bool,
+    /// Tools answered by whoever drives its agents, not by a node
+    /// (`client_tool "name" { … }`): a call waits for `answer`.
+    #[serde(default, rename = "client_tool", skip_serializing_if = "IndexMap::is_empty")]
+    pub client_tools: IndexMap<String, ClientToolDef>,
+}
+
+/// `client_tool "name" { description, input_schema }` in an agent block:
+/// a tool the model sees like any other (eager), answered by whoever drives
+/// the agent (`answer`) instead of a node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClientToolDef {
+    #[serde(default)]
+    pub description: String,
+    /// JSON schema of its arguments: an HCL object, a JSON text, or
+    /// `jsonencode({…})`. Default: an object without properties.
+    #[serde(default = "ClientToolDef::any_object")]
+    pub input_schema: Value,
+}
+
+impl ClientToolDef {
+    fn any_object() -> Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    /// The tool as agents are offered it.
+    pub fn tool(&self, name: &str) -> subnet_core::chat::ToolDef {
+        subnet_core::chat::ToolDef { name: name.to_string(), description: self.description.clone(), parameters: self.input_schema.clone() }
+    }
+
+    /// `input_schema` as an object: a JSON text (or what `jsonencode(…)`
+    /// came as, which HCL here doesn't evaluate) is read.
+    fn normalize(&mut self) -> Result<(), String> {
+        if let Value::String(text) = &self.input_schema {
+            let t = text.trim();
+            self.input_schema = match t.strip_prefix("${jsonencode(").and_then(|r| r.strip_suffix(")}")) {
+                Some(inner) => {
+                    let v: Map<String, Value> = hcl::from_str(&format!("v = {inner}\n")).map_err(|e| format!("jsonencode: {e}"))?;
+                    v.get("v").cloned().unwrap_or_default()
+                }
+                None => serde_json::from_str(t).map_err(|e| format!("input_schema isn't JSON: {e}"))?,
+            };
+        }
+        match &self.input_schema {
+            Value::Object(o) if o.get("type").is_none_or(|t| t == "object") => Ok(()),
+            _ => Err("input_schema must be a JSON schema of an object (type = \"object\")".into()),
+        }
+    }
 }
 
 /// `hook "name" { ... }`: a decision made outside an agent at a point of
@@ -646,6 +694,11 @@ impl Cluster {
             merged.routes.extend(c.routes);
             merged.hooks.extend(c.hooks);
         }
+        for (name, a) in &mut merged.agents {
+            for (t, d) in &mut a.client_tools {
+                d.normalize().map_err(|e| Error::Invalid(format!("agent {name:?}: client_tool {t:?}: {e}")))?;
+            }
+        }
         merged.validate()?;
         Ok(merged)
     }
@@ -742,6 +795,15 @@ impl Cluster {
             }
             if a.executor.command.as_ref().is_some_and(Vec::is_empty) {
                 return invalid(format!("{ctx}: executor command is empty"));
+            }
+            let builtin: Vec<String> = subnet_core::tools::builtin_tools().into_iter().map(|t| t.name).chain(["load_tools", "call_tool", "search_history", "grep_result"].map(String::from)).collect();
+            for t in a.client_tools.keys() {
+                if t.is_empty() || t.len() > 64 || !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    return invalid(format!("{ctx}: client_tool {t:?}: names are 1-64 of a-z, A-Z, 0-9, _ and -"));
+                }
+                if builtin.contains(t) {
+                    return invalid(format!("{ctx}: client_tool {t:?} has a built-in tool's name"));
+                }
             }
         }
         for (name, m) in &self.mcps {

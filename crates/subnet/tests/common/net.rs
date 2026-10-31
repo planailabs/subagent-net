@@ -44,6 +44,8 @@ pub async fn wait_configured(hub: &Hub, name: &str) {
 
 pub struct Net {
     pub hub: Arc<Hub>,
+    /// Its database (a hub opened on it again is a restart).
+    pub db: String,
     pub llm: MockLlm,
     /// Mail the inbox handed over with the one `mail` returned (it gives
     /// all that's waiting at once): the next calls return it, in order.
@@ -54,8 +56,9 @@ impl Net {
     /// `cluster` may use `{llm}` for the mock LLM's URL.
     pub async fn new(cluster: &str) -> Self {
         let llm = MockLlm::start().await;
-        let hub = Hub::open(&db_url().await, None).await.unwrap();
-        let net = Self { hub, llm, pending: Default::default() };
+        let db = db_url().await;
+        let hub = Hub::open(&db, None).await.unwrap();
+        let net = Self { hub, db, llm, pending: Default::default() };
         net.apply(cluster).await;
         net
     }

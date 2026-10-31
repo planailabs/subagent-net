@@ -586,7 +586,7 @@ impl Hub {
         let r = st.agents.get_mut(&id).unwrap();
         let mut reports = vec![];
         let mut hooks = vec![];
-        // Waits for people (approvals) go into the log, so event streams see them.
+        // Waits for people (approvals, client tools) go into the log, so event streams see them.
         let mut waits = vec![];
         for event in events {
             r.seq += 1;
@@ -602,6 +602,7 @@ impl Hub {
                         reason,
                         hook,
                     }),
+                    Effect::AskClient { call } => waits.push(Event::ClientToolCall { input: call.input(), call_id: call.id, name: call.function.name }),
                     _ => {}
                 }
             }
@@ -1118,6 +1119,19 @@ impl Hub {
         self.control(caller, id, false, Event::Approval { call_id, approved, reason }).await
     }
 
+    /// Answers a client tool's call an agent waits for (`answer`): the
+    /// answer is the call's result, as if a tool had returned it.
+    pub async fn answer(&self, caller: &Addr, id: AgentId, call_id: String, content: String, is_error: bool) -> Result<Done, HubError> {
+        let mut st = self.st.lock().await;
+        self.targets(&st, caller, id, false)?;
+        if !st.agents.get(&id).is_some_and(|r| r.a.awaits_client(&call_id)) {
+            return bad(format!("{id} isn't waiting for an answer to a client tool call {call_id:?}"));
+        }
+        let content = if is_error { format!("error: {content}") } else { content };
+        self.commit(&mut st, id, vec![Event::ToolResult { call_id, content, is_error }]).await?;
+        Ok(Done::OK)
+    }
+
     async fn control(&self, caller: &Addr, id: AgentId, tree: bool, ev: Event) -> Result<Done, HubError> {
         let mut st = self.st.lock().await;
         for id in self.targets(&st, caller, id, tree)? {
@@ -1202,6 +1216,8 @@ impl Hub {
             if def.map_or(has("grep_result"), |d| d.grep_results.is_some()) {
                 tools.push(subnet_core::tools::grep_tool());
             }
+            // Its client tools stay what its type made them.
+            tools.extend(spec.tools.iter().filter(|t| spec.client_tools.contains(&t.name)).cloned());
             let (mut idempotent, mut lazy) = (vec![], vec![]);
             let mut all_live = true;
             for (m, mid) in &spec.mcp {
@@ -1399,6 +1415,9 @@ impl Hub {
         if def.grep_results.is_some() {
             tools.push(subnet_core::tools::grep_tool());
         }
+        // Client tools: offered like any (eager) tool, answered by whoever drives the agent.
+        tools.extend(def.client_tools.iter().map(|(n, t)| t.tool(n)));
+        let client_tools = def.client_tools.keys().cloned().collect();
         let mut mcp = std::collections::BTreeMap::new();
         let mut idempotent = vec![];
         let mut lazy = vec![];
@@ -1464,7 +1483,7 @@ impl Hub {
             None => tenant,
         };
         let hooks = def.hooks.iter().filter_map(|h| c.hooks.get(h).map(|d| d.spec(h))).collect();
-        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results.as_ref().map(|g| g.over()), grep_except: def.grep_results.as_ref().map(|g| g.except().to_vec()).unwrap_or_default(), call_reasons: def.call_reasons };
+        let spec = Spec { ty, mixture, parent, budget, approve: def.approve.clone(), mcp, tools, idempotent, lazy, compact, tenant, vision: def.vision.clone(), group_events: def.group_events, hooks, grep_results: def.grep_results.as_ref().map(|g| g.over()), grep_except: def.grep_results.as_ref().map(|g| g.except().to_vec()).unwrap_or_default(), call_reasons: def.call_reasons, client_tools };
         Ok((spec, reserved))
     }
 
@@ -1688,6 +1707,7 @@ fn summary_of(st: &State, c: &subnet_cluster::Cluster, id: AgentId, a: &Agent, s
         superseded_by: a.superseded_by,
         seq,
         awaiting_approval,
+        awaiting_client: a.awaiting_client().into_iter().map(|c| crate::api::ClientCall { input: c.input(), call_id: c.id, name: c.function.name }).collect(),
         hooks: a.waiting_hooks().into_iter().map(|(run, name)| crate::api::WaitingHook { run, name }).collect(),
         last: a
             .messages

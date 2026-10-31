@@ -35,6 +35,8 @@ pub enum StepKind {
     ToolAborted,
     /// A call started waiting for a user's approval.
     ApprovalRequested,
+    /// A client tool was called: it waits for whoever drives the agent.
+    ClientToolCall,
     /// A user approved or denied a call.
     Approval,
     ChildSpawned,
@@ -59,7 +61,7 @@ impl StepKind {
         match self {
             StepKind::Input => Cause::Input,
             StepKind::Stream | StepKind::StreamAborted | StepKind::StreamFailed => Cause::Model,
-            StepKind::ToolResult | StepKind::ToolAborted | StepKind::ApprovalRequested | StepKind::Approval => Cause::Tool,
+            StepKind::ToolResult | StepKind::ToolAborted | StepKind::ApprovalRequested | StepKind::ClientToolCall | StepKind::Approval => Cause::Tool,
             StepKind::Compacted | StepKind::CompactFailed | StepKind::CompactRequested => Cause::Context,
             _ => Cause::Control,
         }
@@ -235,6 +237,16 @@ impl Folder {
                     format!("{name} waits for approval"),
                     head(if why.is_empty() { &input } else { why }),
                     digest(&["approval_requested", name, &input, why]),
+                )
+            }
+            Event::ClientToolCall { name, input, .. } => {
+                let input = input.to_string();
+                (
+                    StepKind::ClientToolCall,
+                    format!("client_tool:{name}"),
+                    format!("{name} waits for the client"),
+                    head(&input),
+                    digest(&["client_tool", name, &input]),
                 )
             }
             Event::ChildSpawned { id, reserved } => (

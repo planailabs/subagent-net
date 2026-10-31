@@ -56,6 +56,9 @@ pub struct AgentSummary {
     pub seq: u64,
     /// The tool call waiting for approval, if any.
     pub awaiting_approval: Option<ToolCall>,
+    /// Client tools' calls waiting for an answer (`answer`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub awaiting_client: Vec<ClientCall>,
     /// Hooks it waits for (`settle_hook` decides one by hand).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<WaitingHook>,
@@ -305,6 +308,28 @@ pub struct ApproveArgs {
     /// Why (optional): the model reads it.
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// A client tool's call waiting for its answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClientCall {
+    pub call_id: String,
+    /// The client tool.
+    pub name: String,
+    /// Its arguments, as the model gave them.
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AnswerArgs {
+    pub id: AgentId,
+    /// The waiting call (see awaiting_client, or the client_tool_call event).
+    pub call_id: String,
+    /// The answer: what the model reads as the tool's result.
+    pub content: String,
+    /// The tool failed (the model reads `error: <content>`).
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -567,6 +592,7 @@ op!(Resume, "resume", Operator, Some((Method::Post, "/v1/agents/{id}/resume")), 
 op!(Cancel, "cancel", Operator, Some((Method::Post, "/v1/agents/{id}/cancel")), IdArgs, Done, "Cancel an agent and all its descendants.");
 op!(Compact, "compact", Operator, Some((Method::Post, "/v1/agents/{id}/compact")), IdArgs, Done, "Compact an agent's conversation now, whatever its size: an idle agent at once (and it stays idle), a busy one before its next model call. Nothing is lost: transcript with full shows everything.");
 op!(Approve, "approve", Operator, Some((Method::Post, "/v1/agents/{id}/approve")), ApproveArgs, Done, "Approve or deny the tool call an agent is waiting on.");
+op!(Answer, "answer", Operator, Some((Method::Post, "/v1/agents/{id}/answer")), AnswerArgs, Done, "Answer a client tool's call an agent waits for: the content is the call's result, and the agent goes on.");
 op!(ApplyCluster, "apply_cluster", Admin, Some((Method::Put, "/v1/cluster")), ApplyArgs, Applied, "Validate cluster files and make them the desired state (or just diff with dry_run).");
 op!(GetCluster, "get_cluster", Viewer, Some((Method::Get, "/v1/cluster")), NoArgs, ClusterView, "The applied cluster files and their version.");
 op!(ClusterHistory, "cluster_history", Viewer, Some((Method::Get, "/v1/cluster/history")), NoArgs, Vec<VersionInfo>, "All applied cluster versions, newest first.");
@@ -606,6 +632,7 @@ pub fn metas() -> Vec<OpMeta> {
         OpMeta::of::<Resume>(),
         OpMeta::of::<Cancel>(),
         OpMeta::of::<Approve>(),
+        OpMeta::of::<Answer>(),
         OpMeta::of::<Fork>(),
         OpMeta::of::<Events>(),
         OpMeta::of::<DiffAgents>(),
@@ -697,6 +724,11 @@ pub fn registry(hub: Arc<Hub>) -> Registry<Principal> {
     r.add::<Approve, _, _>(move |c, a| {
         let h = h.clone();
         async move { Ok(h.approve(&c.addr, a.id, a.call_id, a.approved, a.reason).await?) }
+    });
+    let h = hub.clone();
+    r.add::<Answer, _, _>(move |c, a| {
+        let h = h.clone();
+        async move { Ok(h.answer(&c.addr, a.id, a.call_id, a.content, a.is_error).await?) }
     });
     let h = hub.clone();
     r.add::<Fork, _, _>(move |c, a| {
