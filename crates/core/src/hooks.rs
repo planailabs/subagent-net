@@ -81,10 +81,29 @@ pub enum OnLost {
 pub enum HookRun {
     /// A tool of an MCP server, on any node running it.
     Mcp { server: String, tool: String },
-    /// An HTTP endpoint the hub POSTs to.
-    Url { url: String },
+    /// An HTTP endpoint the hub POSTs to, with a credential if it has one.
+    Url {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<Credential>,
+    },
     /// An agent (a mixture or type) asked to decide: its answer is the outcome.
     Spawn { mixture: String },
+}
+
+/// What a URL hook sends so its receiver knows the caller: the header
+/// `header` with `prefix` and the value of the hub's environment variable
+/// `env` (only the variable's name is in the spec).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Credential {
+    /// e.g. `Authorization`.
+    pub header: String,
+    /// The hub's environment variable holding the secret.
+    pub env: String,
+    /// Put before the value, e.g. `Bearer `.
+    #[serde(default)]
+    pub prefix: String,
 }
 
 /// A hook as an agent's spec has it (from the cluster's `hook` block).
@@ -223,7 +242,7 @@ mod tests {
 
     #[test]
     fn lost_outcomes_follow_on_lost_for_the_point() {
-        let h = |on, on_lost| HookSpec { name: "h".into(), on, matches: vec![], when: None, run: HookRun::Url { url: "u".into() }, timeout_ms: 1, on_lost, idempotent: false, max_continue: 3 };
+        let h = |on, on_lost| HookSpec { name: "h".into(), on, matches: vec![], when: None, run: HookRun::Url { url: "u".into(), credential: None }, timeout_ms: 1, on_lost, idempotent: false, max_continue: 3 };
         let d = |on, l| Outcome::error("x").instead(&h(on, l)).decision;
         assert_eq!(d(HookPoint::PreTool, OnLost::Deny), Decision::Deny);
         assert_eq!(d(HookPoint::OnTurnEnd, OnLost::Deny), Decision::Allow, "a turn just ends");

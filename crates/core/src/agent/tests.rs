@@ -1229,7 +1229,7 @@ fn compaction_off_can_still_be_asked_for() {
 use crate::hooks::{HookRun, OnLost};
 
 fn hook(name: &str, on: HookPoint, matches: &[&str]) -> HookSpec {
-    HookSpec { name: name.into(), on, matches: matches.iter().map(|m| m.to_string()).collect(), when: None, run: HookRun::Url { url: "http://x".into() }, timeout_ms: 1000, on_lost: OnLost::Deny, idempotent: false, max_continue: 2 }
+    HookSpec { name: name.into(), on, matches: matches.iter().map(|m| m.to_string()).collect(), when: None, run: HookRun::Url { url: "http://x".into(), credential: None }, timeout_ms: 1000, on_lost: OnLost::Deny, idempotent: false, max_continue: 2 }
 }
 
 fn hooked(hooks: Vec<HookSpec>) -> H {

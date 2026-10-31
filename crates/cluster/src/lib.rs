@@ -253,6 +253,11 @@ pub struct HookDef {
     /// on_turn_end: how often it may continue one turn (default 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_continue: Option<u32>,
+    /// `run { url }`: a header the hub sends so the receiver can tell it's
+    /// the hub asking (`{ header, env, prefix }`, as for HTTP MCP servers;
+    /// `env` is read from the hub's environment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<subnet_core::hooks::Credential>,
 }
 
 /// Where a hook runs: exactly one of these.
@@ -283,7 +288,7 @@ impl HookDef {
         use subnet_core::hooks::{HookRun, HookSpec};
         let run = match (&self.run.mcp, &self.run.url, &self.run.spawn) {
             (Some(m), _, _) => HookRun::Mcp { server: m.server.clone(), tool: m.tool.clone() },
-            (_, Some(u), _) => HookRun::Url { url: u.clone() },
+            (_, Some(u), _) => HookRun::Url { url: u.clone(), credential: self.credential.clone() },
             (_, _, Some(m)) => HookRun::Spawn { mixture: m.clone() },
             _ => unreachable!("validated: exactly one"),
         };
@@ -754,6 +759,9 @@ impl Cluster {
                 && !(u.starts_with("http://") || u.starts_with("https://"))
             {
                 return invalid(format!("{ctx}: url must be http(s)"));
+            }
+            if h.credential.is_some() && h.run.url.is_none() {
+                return invalid(format!("{ctx}: credential is for url hooks"));
             }
             if !h.tools.is_empty() && !matches!(h.on, HookPoint::PreTool | HookPoint::PostTool) {
                 return invalid(format!("{ctx}: tools only goes with pre_tool and post_tool"));

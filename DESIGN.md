@@ -332,6 +332,7 @@ hook "no-force-push" {
   # from     = ["user:*"]            # on_message: the senders it's for
   when       = "input.args.cmd.contains('--force')"   # optional CEL over point, input, agent
   run        { mcp = { server = "policy", tool = "check" } }   # or url = "https://…", or spawn = "<mixture>"
+  # credential = { header = "Authorization", env = "HOOK_TOKEN", prefix = "Bearer " }   # url hooks: sent with each request
   timeout    = "10s"                 # default 30s
   on_lost    = "deny"                # allow | deny (default) | ask (pre_tool) | fail
   idempotent = true                  # run again after a restart instead of on_lost
@@ -357,7 +358,9 @@ Several hooks at a point run one after the other, each seeing what the one befor
 
 **Replayable and resumable.** A hook run is an effect (`RunHook { id, hook, input }`, ids `h<n>.<k>`, deterministic) and its answer an event (`HookDone { id, outcome }`); `Agent::apply` stays pure. While it waits the agent is in an explicit state: a tool call `pre_hook` or `post_hook` (then `cleared` to start), a held message in `screening`, or the phase `hooking` (turn end, compaction, a model call). Replays fold the answers and never run a hook again; forks and upgrades copy them, and a copy made while a hook runs recovers it at once (that run answers the original): run again if idempotent, else settled by `on_lost`. `Recovered` runs a hook that was running again if it's `idempotent`, else settles it by `on_lost` (deterministically, in `apply`); after a restart the hub recovers agents waiting for hooks that no node will place. An answer that's late, broken or a decision its point doesn't take counts as an error: `on_lost` decides (`deny` is the careful side: a call denied, a result withheld, a message dropped, a turn just ends; `fail`: the agent fails, a tool call first getting the hook's error as its result).
 
-**Where hooks run:** the hub runs `RunHook` from its own replica (like reports): `when` first (false: allowed, the hook isn't asked; checked when the cluster is applied), then the hook: an MCP tool on any node running its server (waited for after a restart, within the timeout), an HTTP POST, or an agent spawned with the question and the decisions its point takes, whose answer (a JSON object, words around it allowed) is the outcome; it's cancelled after. Each gets `{hook, point, agent: {id, type}, input}`; the timeout bounds it all.
+**Where hooks run:** the hub runs `RunHook` from its own replica (like reports): `when` first (false: allowed, the hook isn't asked; checked when the cluster is applied), then the hook: an MCP tool on any node running its server (waited for after a restart, within the timeout), an HTTP POST, or an agent spawned with the question and the decisions its point takes, whose answer (a JSON object, words around it allowed) is the outcome; it's cancelled after. Each gets `{hook, point, agent: {id, type, tenant}, input}` (`tenant`: whose work it is, `null` without one; `when` sees the same `agent`); the timeout bounds it all.
+
+**URL hooks' credential:** a URL hook may have `credential = { header, env, prefix }` (the shape HTTP MCP servers have; a block works too): each POST carries the header `header` with `prefix` and the value of the environment variable `env`, so its receiver can tell the hub is asking. URL hooks run at the hub, so `env` is read from the **hub's** environment (only the variable's name is in the cluster and the spec); without it the hook can't ask, and its `on_lost` decides. It's part of the hook's definition (and so of the types that use it); a hook without one is as it was.
 
 **By hand:** an agent's summary lists the hook runs it waits for (`hooks: [{run, name}]`); `settle_hook {id, run, decision, reason?, text?, args?}` (operator) answers one as if the hook had. The web UI shows them with allow/deny buttons; the TUI marks the agent ⌛.
 
@@ -618,7 +621,7 @@ Everything in this document is implemented, except what "Not in scope yet" lists
 - **Cluster files:** parsing, validation, identities, node views, diff, versions and rollback.
 - **Nodes:** pull-based configuration, credential resolution, MCP hosting, senses (all sources and stages), stream relay.
 - **Switchboard:** CEL, flow control, all delivery kinds, holds (freeze and release, kept in the database), deliveries log.
-- **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI), call reasons (`_reason` for hooks, never for the tool).
+- **Hooks:** every point (pre_tool, post_tool, on_message, on_turn_end, on_report, pre_compact), run by MCP, URL (with an optional credential) or agent, `when`, timeouts and `on_lost`, recovery after restarts, `settle_hook` (op, web UI, TUI), call reasons (`_reason` for hooks, never for the tool).
 - **Surfaces:** ops registry (REST/RPC + OpenAPI + docs, MCP, CLI, client), principals/roles/tokens, event stream (SSE/WS), web UI, TUI.
 - **Flight recorder:** steps (`events`), scrub (`transcript` with `at`), two runs aligned (`diff`) with the first divergence and its cause; the web UI's replay tab, including fork-from-here.
 

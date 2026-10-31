@@ -322,3 +322,22 @@ fn client_tools_are_declared_in_an_agent_and_are_part_of_its_type() {
     assert!(bad("q", "{ type = \"string\" }").contains("object"));
     assert!(bad("q", "\"not json\"").contains("isn't JSON"));
 }
+
+#[test]
+fn url_hooks_may_carry_a_credential() {
+    let hook = |extra: &str| {
+        format!("{}\nhook \"h\" {{\n  on = \"pre_tool\"\n  run {{ url = \"https://policy.example.org/hook\" }}\n{extra}}}\n", BASE.replace("  nodes = [\"n1\"]\n", "  nodes = [\"n1\"]\n  hooks = [\"h\"]\n"))
+    };
+    let c = parse(&hook("  credential = { header = \"Authorization\", env = \"HOOK_TOKEN\", prefix = \"Bearer \" }\n")).unwrap();
+    let spec = c.hooks["h"].spec("h");
+    let subnet_core::hooks::HookRun::Url { credential: Some(cred), .. } = &spec.run else { panic!("{spec:?}") };
+    assert_eq!((cred.header.as_str(), cred.env.as_str(), cred.prefix.as_str()), ("Authorization", "HOOK_TOKEN", "Bearer "));
+    // A block works too; part of the type's identity, which is as it was without one.
+    let block = parse(&hook("  credential {\n    header = \"Authorization\"\n    env = \"HOOK_TOKEN\"\n    prefix = \"Bearer \"\n  }\n")).unwrap();
+    assert_eq!(block, c);
+    let plain = parse(&hook("")).unwrap();
+    assert_ne!(plain.agent_id("a"), c.agent_id("a"));
+    assert!(!serde_json::to_string(&plain.hooks["h"].spec("h")).unwrap().contains("credential"));
+    let e = parse(&hook("").replace("run { url = \"https://policy.example.org/hook\" }", "run { spawn = \"a\" }\n  credential = { header = \"X\", env = \"Y\" }")).unwrap_err();
+    assert!(e.to_string().contains("credential is for url hooks"), "{e}");
+}

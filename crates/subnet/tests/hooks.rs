@@ -15,16 +15,21 @@ const WORKER: &str = "You are a worker.";
 const JUDGE: &str = "You judge.";
 
 /// A hook server: answers each question with `decide(question)`, and keeps
-/// the questions.
+/// the questions (with the `authorization` header they came with, if any, as
+/// `_authorization`).
 async fn hook_server(decide: impl Fn(&Value) -> Value + Send + Sync + 'static) -> (String, Arc<Mutex<Vec<Value>>>) {
     let seen = Arc::new(Mutex::new(vec![]));
     let (s, decide) = (seen.clone(), Arc::new(decide));
     let app = axum::Router::new().route(
         "/hook",
-        axum::routing::post(move |axum::Json(q): axum::Json<Value>| {
+        axum::routing::post(move |headers: axum::http::HeaderMap, axum::Json(q): axum::Json<Value>| {
             let (s, decide) = (s.clone(), decide.clone());
             async move {
-                s.lock().unwrap().push(q.clone());
+                let mut kept = q.clone();
+                if let Some(a) = headers.get("authorization") {
+                    kept["_authorization"] = json!(a.to_str().unwrap());
+                }
+                s.lock().unwrap().push(kept);
                 axum::Json(decide(&q))
             }
         }),
@@ -275,4 +280,28 @@ async fn a_url_hook_asks_a_person_and_the_wait_is_an_event() {
     assert_eq!(n.t(id).await["awaiting_approval"]["id"], "c1");
     n.hub.op(&Addr::root(), subnet_core::proto::Op::Approve { id, call_id: "c1".into(), approved: true, reason: None }).await.unwrap();
     assert_eq!(n.mail().await["content"], "listed");
+}
+
+/// A URL hook with a credential sends it (the receiver can tell the hub is
+/// asking), and every hook hears whose work it judges (the agent's tenant).
+/// Without the credential's variable it can't ask: `on_lost` decides.
+#[tokio::test]
+async fn a_url_hook_sends_its_credential_and_the_tenant() {
+    // SAFETY: a variable no other test reads or writes.
+    unsafe { std::env::set_var("SUBNET_TEST_HOOK_TOKEN", "s3cret") };
+    let (url, seen) = hook_server(|q| if q["input"]["tool"] == "list_types" { json!({"decision": "allow"}) } else { json!({"decision": "deny"}) }).await;
+    let hooks = format!(
+        "hook \"signed\" {{\n  on = \"pre_tool\"\n  tools = [\"list_types\"]\n  run {{ url = {url:?} }}\n  credential = {{ header = \"Authorization\", env = \"SUBNET_TEST_HOOK_TOKEN\", prefix = \"Bearer \" }}\n}}\nhook \"unsigned\" {{\n  on = \"pre_tool\"\n  tools = [\"list_agents\"]\n  run {{ url = {url:?} }}\n  credential = {{ header = \"Authorization\", env = \"SUBNET_TEST_NO_SUCH_TOKEN\" }}\n  on_lost = \"allow\"\n}}\n"
+    );
+    let n = Net::new(&cluster(&hooks, &["signed", "unsigned"])).await;
+    n.node("s").await;
+    n.llm.push(WORKER, |_| common::llm::tool_calls(&[("c1", "list_types", json!({})), ("c2", "list_agents", json!({}))]));
+    n.llm.push(WORKER, |_| text(&["done"]));
+    n.hub.op(&Addr::root(), subnet_core::proto::Op::Spawn { ty: "worker".into(), prompt: "go".into(), tenant: Some("acme".into()) }).await.unwrap();
+    assert_eq!(n.mail().await["content"], "done");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the unsigned hook never asked: {seen:?}");
+    assert_eq!(seen[0]["_authorization"], "Bearer s3cret");
+    assert_eq!(seen[0]["agent"]["tenant"], "acme");
+    assert_eq!((seen[0]["input"]["tool"].as_str(), seen[0]["input"]["call_id"].as_str()), (Some("list_types"), Some("c1")));
 }

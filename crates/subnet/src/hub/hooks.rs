@@ -53,8 +53,8 @@ impl Hub {
     }
 
     async fn hook_answer(&self, agent: AgentId, hook: &HookSpec, input: Value) -> Result<Outcome, String> {
-        let ty = self.st.lock().await.agents.get(&agent).map(|r| r.a.spec.ty.clone()).unwrap_or_default();
-        let who = json!({"id": agent, "type": ty});
+        let (ty, tenant) = self.st.lock().await.agents.get(&agent).map(|r| (r.a.spec.ty.clone(), r.a.spec.tenant.clone())).unwrap_or_default();
+        let who = json!({"id": agent, "type": ty, "tenant": tenant});
         if let Some(when) = &hook.when {
             let e = subnet_switchboard::Expr::compile(when)?;
             if !e.eval_bool(&[("point", &json!(hook.on.name())), ("input", &input), ("agent", &who)])? {
@@ -73,8 +73,14 @@ impl Hub {
                 };
                 parse_outcome(&text)
             }
-            HookRun::Url { url } => {
-                let r = reqwest::Client::new().post(url).json(&question).send().await.map_err(|e| e.to_string())?;
+            HookRun::Url { url, credential } => {
+                let mut req = reqwest::Client::new().post(url).json(&question);
+                if let Some(c) = credential {
+                    // The secret is the hub's; its name alone is in the spec.
+                    let v = std::env::var(&c.env).map_err(|e| format!("credential env {}: {e}", c.env))?;
+                    req = req.header(c.header.as_str(), format!("{}{v}", c.prefix));
+                }
+                let r = req.send().await.map_err(|e| e.to_string())?;
                 let r = r.error_for_status().map_err(|e| e.to_string())?;
                 parse_outcome(&r.text().await.map_err(|e| e.to_string())?)
             }
