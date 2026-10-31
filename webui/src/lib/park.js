@@ -6,7 +6,7 @@ export function glyph(a) {
   if (a.phase === "cancelled") return "·";
   if (a.phase === "failed") return "✕";
   if (a.paused) return "‖";
-  if (a.awaiting_approval) return "?";
+  if (a.awaiting_approval || a.awaiting_client?.length) return "?";
   if (a.phase === "thinking") return "●";
   if (a.phase === "tools") return "▣";
   return "○";

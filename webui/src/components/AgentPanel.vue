@@ -10,6 +10,8 @@ const live = inject("live");
 const t = ref(null);
 const msg = ref("");
 const error = ref("");
+// Answers being typed for client tools' calls, by call id.
+const answers = ref({});
 
 async function load() {
   try {
@@ -43,6 +45,13 @@ async function send() {
   } catch (e) {
     error.value = e.message;
   }
+}
+
+async function answer(c, is_error = false) {
+  const content = answers.value[c.call_id] ?? "";
+  if (!is_error && !content.trim()) return;
+  const r = await act("answer", { call_id: c.call_id, content, is_error });
+  if (r) delete answers.value[c.call_id];
 }
 
 async function upgrade() {
@@ -101,6 +110,15 @@ const content = (m) => m.content ?? (m.tool_calls?.length ? m.tool_calls.map((c)
         <button @click="act('approve', { call_id: t.awaiting_approval.id, approved: false })">deny</button>
       </div>
     </div>
+    <form v-for="c in t?.awaiting_client ?? []" :key="c.call_id" class="err" @submit.prevent="answer(c)">
+      waiting for an answer: <span class="hi">{{ c.name }}</span> <span class="dim">({{ c.call_id }})</span>
+      <pre>{{ JSON.stringify(c.input, null, 2) }}</pre>
+      <div class="row">
+        <input v-model="answers[c.call_id]" class="grow" placeholder="answer" :aria-label="`answer to ${c.name}`" />
+        <button type="submit">answer</button>
+        <button type="button" title="the tool failed: the model reads error: and the text" @click="answer(c, true)">error</button>
+      </div>
+    </form>
     <div v-for="h in t?.hooks ?? []" :key="h.run" class="err">
       waiting for hook <span class="hi">{{ h.name }}</span> <span class="dim">({{ h.run }})</span>
       <div class="row">

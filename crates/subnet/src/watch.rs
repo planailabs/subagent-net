@@ -90,6 +90,9 @@ impl Printer {
         if let Some(c) = w["awaiting_approval"]["function"]["name"].as_str() {
             state.push_str(&format!(", waiting for approval of {c}"));
         }
+        for c in w["awaiting_client"].as_array().into_iter().flatten() {
+            state.push_str(&format!(", waiting for an answer to {} ({})", c["name"].as_str().unwrap_or("?"), c["call_id"].as_str().unwrap_or("?")));
+        }
         // A stream that stopped without an answer (aborted, failed) ends its line.
         if w["partial"].is_null() {
             self.end_stream(&mut out);
@@ -167,5 +170,8 @@ mod tests {
         paused["awaiting_approval"] = json!({"function": {"name": "rm"}});
         assert_eq!(p.render(&paused), "· tools, quick pause requested, waiting for approval of rm\n");
         assert_eq!(p.render(&paused), "", "unchanged state isn't repeated");
+        let mut asking = w(json!([]), Value::Null, "tools");
+        asking["awaiting_client"] = json!([{"call_id": "c2", "name": "ask_question", "input": {}}]);
+        assert_eq!(p.render(&asking), "· tools, waiting for an answer to ask_question (c2)\n");
     }
 }

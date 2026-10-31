@@ -39,6 +39,8 @@ test("glyphs encode state by shape", () => {
   assert.equal(glyph(agent("a", { phase: "failed" })), "✕");
   assert.equal(glyph(agent("a", { phase: "cancelled" })), "·");
   assert.equal(glyph(agent("a", { phase: "tools", awaiting_approval: { id: "c" } })), "?");
+  assert.equal(glyph(agent("a", { phase: "tools", awaiting_client: [{ call_id: "c", name: "ask", input: {} }] })), "?");
+  assert.equal(glyph(agent("a", { phase: "tools", awaiting_client: [] })), "▣");
 });
 
 test("plots group descendants under their root, depth first", () => {
@@ -95,6 +97,11 @@ test("notices stream text and mark summaries stale", () => {
   assert.equal(tileLine(live, "a"), "world", "the finished answer stays visible");
   applyNotice(live, { kind: "agent", agent: "b", event: { type: "inbox", from: "user:x", content: "hi" } });
   assert.ok(live.stale.has("*"), "unknown agents trigger a refetch");
+  // Waits for people show at once: the panel refetches and shows them.
+  for (const type of ["approval_requested", "client_tool_call"]) {
+    applyNotice(live, { kind: "agent", agent: type, event: { type, call_id: "c1", name: "ask", input: {} } });
+    assert.ok(live.stale.has(type), type);
+  }
 });
 
 test("sense and delivery feeds are bounded", () => {
