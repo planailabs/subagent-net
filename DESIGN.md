@@ -406,6 +406,8 @@ agent "assistant" {
 
 ### Tenants
 
+An agent can do work *for* someone: its **tenant**. An agent type with `isolated = true` keeps its agents within their tenant: `send_message` reaches only agents of the same tenant (no other address), `list_agents` shows only them, and mailboxes are off (pause, resume and cancel are limited to descendants anyway). For a hub serving many users' agents, so one user's agent can't reach another's.
+
 An agent can do work *for* someone: its **tenant**. A tenant is set when an agent is spawned from outside the cluster (`spawn` with `tenant`), and every descendant inherits it; agents can't choose one for their children. Agent summaries show it.
 
 Every tool call an agent makes says who calls, in the request's `_meta`: `subnet/agent` (its id), `subnet/parent` and `subnet/tenant` when it has them, also when the call is routed through the hub to another node. One server can so serve many agents and keep each one's state apart (a working directory, a session); switchboard deliveries (`deliver { mcp = … }`) carry none.

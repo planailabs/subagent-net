@@ -176,6 +176,13 @@ pub struct AgentDef {
     /// and the tool never sees it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub call_reasons: bool,
+    /// Its agents reach only agents of their own tenant: `send_message` to
+    /// another tenant's agent (or to any other address) is refused,
+    /// `list_agents` shows only theirs, and mailboxes are off. For a hub that
+    /// serves many users' agents (a chat backend), so one user's agent can't
+    /// reach another's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolated: bool,
     /// Tools answered by whoever drives its agents, not by a node
     /// (`client_tool "name" { … }`): a call waits for `answer`.
     #[serde(default, rename = "client_tool", skip_serializing_if = "IndexMap::is_empty")]

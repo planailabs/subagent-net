@@ -769,7 +769,7 @@ impl Hub {
         match op {
             Op::Spawn { ty, prompt, tenant } => j(self.spawn_for(caller, &ty, prompt, tenant).await),
             Op::Send { to, content } => j(self.send(caller, to, content).await),
-            Op::ListAgents => j(Ok(self.list_agents().await)),
+            Op::ListAgents => j(Ok(self.list_agents_for(caller).await)),
             Op::ListTypes => j(Ok(self.list_types().await)),
             Op::Pause { id, mode, tree } => j(self.pause(caller, id, mode, tree).await),
             Op::Resume { id, tree } => j(self.resume(caller, id, tree).await),
@@ -785,6 +785,17 @@ impl Hub {
             Op::GrepResult { call, pattern, context, page } => j(self.grep_result(caller, &call, &pattern, context, page).await),
             Op::ReadResult { call, from, to, full } => j(self.read_result(caller, &call, from, to, full).await),
             Op::BlobRaw { reference } => j(self.get_blob(&reference).await.map(|(mime, data)| serde_json::json!({"mime": mime, "base64": blobs::encode_b64(&data)}))),
+        }
+    }
+
+    /// `list_agents` as a caller sees it: an isolated agent only its own
+    /// tenant's agents.
+    pub async fn list_agents_for(&self, caller: &Addr) -> Vec<AgentSummary> {
+        let scope = self.isolation(&*self.st.lock().await, caller);
+        let all = self.list_agents().await;
+        match scope {
+            Some(tenant) => all.into_iter().filter(|a| a.tenant == tenant).collect(),
+            None => all,
         }
     }
 
@@ -1036,9 +1047,25 @@ impl Hub {
         Ok(serde_json::json!({"call": call, "pattern": pattern, "lines": lines.len(), "characters": text.chars().count(), "hits": shown, "matches": hits.len(), "page": page, "pages": pages, "next_page": (page < pages).then_some(page + 1)}))
     }
 
+    /// The tenant an isolated caller is kept within (`Some(tenant)`), or
+    /// `None` when the caller isn't an agent of an `isolated` type.
+    fn isolation(&self, st: &State, caller: &Addr) -> Option<Option<String>> {
+        let Addr::Agent(me) = caller else { return None };
+        let r = st.agents.get(me)?;
+        let ty = r.a.spec.ty.split('@').next().unwrap_or_default();
+        let c = self.cluster.read().unwrap();
+        c.spec.agents.get(ty).filter(|d| d.isolated).map(|_| r.a.spec.tenant.clone())
+    }
+
     pub async fn send(&self, caller: &Addr, to: Addr, content: String) -> Result<Done, HubError> {
         let to = self.resolve(to).await?;
         let mut st = self.st.lock().await;
+        if let Some(tenant) = self.isolation(&st, caller) {
+            let same = matches!(&to, Addr::Agent(id) if st.agents.get(id).is_some_and(|r| r.a.spec.tenant == tenant));
+            if !same {
+                return Err(HubError::Forbidden("an isolated agent sends only to its own tenant's agents".into()));
+            }
+        }
         match &to {
             Addr::Agent(id) if st.agents.contains_key(id) => {
                 // An agent an upgrade moved gets its messages in its copy
@@ -1572,6 +1599,9 @@ impl Hub {
 
     /// Mailbox ops: agents may only use the mailboxes their mixture lists.
     async fn mailbox(&self, caller: &Addr, name: &str, max: u32, take: bool) -> Result<Vec<Mail>, HubError> {
+        if self.isolation(&*self.st.lock().await, caller).is_some() {
+            return Err(HubError::Forbidden("isolated agents have no mailboxes".into()));
+        }
         if let Addr::Agent(me) = caller {
             let mixture = self.st.lock().await.agents.get(me).and_then(|r| r.a.spec.mixture.clone());
             let allowed = mixture

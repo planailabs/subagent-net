@@ -23,14 +23,15 @@ struct Ty {
     budget: (Option<u64>, u32, u32),
     /// The fake node reports a type id that doesn't match the cluster.
     stale: bool,
+    isolated: bool,
 }
 
 fn boss() -> Ty {
-    Ty { name: "boss", spawns: vec!["worker"], budget: (Some(1000), 2, 2), stale: false }
+    Ty { name: "boss", spawns: vec!["worker"], budget: (Some(1000), 2, 2), stale: false, isolated: false }
 }
 
 fn worker() -> Ty {
-    Ty { name: "worker", spawns: vec![], budget: (Some(400), 5, 0), stale: false }
+    Ty { name: "worker", spawns: vec![], budget: (Some(400), 5, 0), stale: false, isolated: false }
 }
 
 /// A hub plus the nodes declared so far; each new node re-applies the cluster.
@@ -64,8 +65,8 @@ impl W {
             let (mt, md, mc) = t.budget;
             let mt = mt.map(|x| format!("max_tokens = {x}, ")).unwrap_or_default();
             out.push_str(&format!(
-                "agent {:?} {{\n  credential {{\n    base_url = \"http://unused\"\n  }}\n  model = \"m\"\n  nodes = {:?}\n  spawns = {:?}\n  budget = {{ {mt}max_depth = {md}, max_children = {mc} }}\n}}\n",
-                t.name, ns, t.spawns
+                "agent {:?} {{\n  credential {{\n    base_url = \"http://unused\"\n  }}\n  model = \"m\"\n  nodes = {:?}\n  spawns = {:?}\n  budget = {{ {mt}max_depth = {md}, max_children = {mc} }}\n{}}}\n",
+                t.name, ns, t.spawns, if t.isolated { "  isolated = true\n" } else { "" }
             ));
         }
         out
@@ -341,6 +342,32 @@ async fn children_inherit_the_tenant() {
     let agents = hub.list_agents().await;
     let tenant = |id| agents.iter().find(|a| a.id == id).unwrap().tenant.clone();
     assert_eq!((tenant(boss_id).as_deref(), tenant(kid).as_deref()), (Some("acme"), Some("acme")));
+}
+
+#[tokio::test]
+async fn isolated_agents_reach_only_their_tenant() {
+    let hub = hub().await;
+    let mut chat = boss();
+    chat.name = "chat";
+    chat.isolated = true;
+    let _sp = spawner(&hub, "s", vec![chat, worker()], 8).await;
+    let ada = hub.spawn_for(&Addr::root(), "chat", "go".into(), Some("ada".into())).await.unwrap().id;
+    let ada2 = hub.spawn_for(&Addr::root(), "chat", "go".into(), Some("ada".into())).await.unwrap().id;
+    let bob = hub.spawn_for(&Addr::root(), "chat", "go".into(), Some("bob".into())).await.unwrap().id;
+    // Messages: to the own tenant's agents only, and to no other address.
+    let e = hub.op(&Addr::Agent(ada), Op::Send { to: Addr::Agent(bob), content: "hi".into() }).await.unwrap_err();
+    assert!(e.contains("own tenant"), "{e}");
+    assert!(hub.op(&Addr::Agent(ada), Op::Send { to: Addr::Mailbox("m".into()), content: "x".into() }).await.is_err());
+    hub.op(&Addr::Agent(ada), Op::Send { to: Addr::Agent(ada2), content: "hi".into() }).await.unwrap();
+    // The list: only the own tenant's.
+    let listed: Vec<Value> = serde_json::from_value(hub.op(&Addr::Agent(ada), Op::ListAgents).await.unwrap()).unwrap();
+    assert!(!listed.is_empty() && listed.iter().all(|a| a["tenant"] == "ada"), "{listed:?}");
+    // Mailboxes are off; the operator still sees everyone.
+    assert!(hub.op(&Addr::Agent(ada), Op::MailboxPeek { name: "m".into(), max: 1 }).await.is_err());
+    assert_eq!(hub.op(&Addr::root(), Op::ListAgents).await.unwrap().as_array().unwrap().len(), 3);
+    // A type that isn't isolated keeps its old reach.
+    let free = hub.spawn_for(&Addr::root(), "worker", "go".into(), Some("carol".into())).await.unwrap().id;
+    hub.op(&Addr::Agent(free), Op::Send { to: Addr::Agent(bob), content: "hi".into() }).await.unwrap();
 }
 
 #[tokio::test]
